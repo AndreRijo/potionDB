@@ -5,16 +5,19 @@ package main
 //To run in vscode: ctrl+option+N. This *should* work when it actually updates $GOPATH
 //From terminal: go to main folder and then: go run protoServer.go simpleClient.go
 
+//TODO: Reuse of canals? Creating a new canal for each read/write seems like a waste... Should I ask the teachers?
+
 import (
 	"antidote"
 	"bufio"
 	"clocksi"
 	"crdt"
 	"fmt"
-	"io"
+	rand "math/rand"
 	"net"
 	"os"
 	"strings"
+	"time"
 	"tools"
 
 	proto "github.com/golang/protobuf/proto"
@@ -37,6 +40,7 @@ func main() {
 	}
 	fmt.Println("Port?")
 	portString, _ := in.ReadString('\n')
+	rand.Seed(time.Now().UTC().UnixNano())
 	antidote.Initialize()
 	server, err := net.Listen("tcp", "127.0.0.1:"+strings.TrimSpace(portString))
 	tools.CheckErr(tools.PORT_ERROR, err)
@@ -60,6 +64,8 @@ Note that this is the same interaction type as in antidote.
 conn - the TCP connection between the client and this server.
 */
 func processConnection(conn net.Conn) {
+	tmChan := antidote.CreateClientHandler()
+
 	var replyType byte = 0
 	var reply proto.Message = nil
 	for {
@@ -68,8 +74,11 @@ func processConnection(conn net.Conn) {
 		//Read protobuf
 		fmt.Println("Waiting for client's request...")
 		protoType, protobuf, err := antidote.ReceiveProto(conn)
-		if err == io.EOF {
+		//This works in MacOS, but not on windows. For now we'll add any error here
+		//if err == io.EOF
+		if err != nil {
 			fmt.Println("Connection closed by client.")
+			tmChan <- antidote.TransactionManagerRequest{Args: antidote.TMConnLostArgs{}}
 			return
 		}
 		tools.CheckErr(tools.NETWORK_READ_ERROR, err)
@@ -88,11 +97,11 @@ func processConnection(conn net.Conn) {
 		case antidote.StaticUpdateObjs:
 			fmt.Println("Received proto of type StaticUpdateObjs")
 			replyType = antidote.CommitTransReply
-			reply = handleStaticUpdateObjects(protobuf.(*antidote.ApbStaticUpdateObjects))
+			reply = handleStaticUpdateObjects(protobuf.(*antidote.ApbStaticUpdateObjects), tmChan)
 		case antidote.StaticReadObjs:
 			fmt.Println("Received proto of type StaticReadObjs")
 			replyType = antidote.StaticReadObjsReply
-			reply = handleStaticReadObjects(protobuf.(*antidote.ApbStaticReadObjects))
+			reply = handleStaticReadObjects(protobuf.(*antidote.ApbStaticReadObjects), tmChan)
 		default:
 			fmt.Println("Received unknown proto, ignored... sort of")
 		}
@@ -107,16 +116,31 @@ func notSupported(protobuf proto.Message) {
 }
 
 //TODO: Error cases in which it should return ApbErrorResp
-func handleStaticReadObjects(proto *antidote.ApbStaticReadObjects) (respProto *antidote.ApbStaticReadObjectsResp) {
+func handleStaticReadObjects(proto *antidote.ApbStaticReadObjects,
+	tmChan chan antidote.TransactionManagerRequest) (respProto *antidote.ApbStaticReadObjectsResp) {
+
 	clientClock := clocksi.FromBytes(proto.GetTransaction().GetTimestamp())
 
 	objs := protoObjectsToAntidoteObjects(proto.GetObjects())
-	replies, ts := antidote.HandleStaticReadObjects(objs, clientClock)
+	replyChan := make(chan antidote.TMReadReply)
 
-	respProto = antidote.CreateStaticReadResp(replies, ts)
+	tmChan <- antidote.TransactionManagerRequest{
+		Args: antidote.TMReadArgs{
+			ObjsParams: objs,
+			ReplyChan:  replyChan,
+		},
+		Timestamp: clientClock,
+	}
+	//replies, ts := antidote.HandleStaticReadObjects(objs, clientClock)
+	reply := <-replyChan
+	close(replyChan)
+
+	//respProto = antidote.CreateStaticReadResp(replies, ts)
+	respProto = antidote.CreateStaticReadResp(reply.States, reply.Timestamp)
 	return
 }
 
+/*
 func protoObjectsToAntidoteObjects(protoObjs []*antidote.ApbBoundObject) (objs []antidote.ReadObjectParams) {
 	objs = make([]antidote.ReadObjectParams, len(protoObjs))
 
@@ -127,19 +151,42 @@ func protoObjectsToAntidoteObjects(protoObjs []*antidote.ApbBoundObject) (objs [
 	}
 	return
 }
+*/
+
+func protoObjectsToAntidoteObjects(protoObjs []*antidote.ApbBoundObject) (objs []antidote.KeyParams) {
+
+	objs = make([]antidote.KeyParams, len(protoObjs))
+
+	for i, currObj := range protoObjs {
+		objs[i] = antidote.CreateKeyParams(string(currObj.GetKey()), currObj.GetType(), string(currObj.GetBucket()))
+	}
+	return
+}
 
 //TODO: Error cases in which it should return ApbErrorResp
-func handleStaticUpdateObjects(proto *antidote.ApbStaticUpdateObjects) (respProto *antidote.ApbCommitResp) {
+func handleStaticUpdateObjects(proto *antidote.ApbStaticUpdateObjects,
+	tmChan chan antidote.TransactionManagerRequest) (respProto *antidote.ApbCommitResp) {
 
 	clientClock := clocksi.FromBytes(proto.GetTransaction().GetTimestamp())
 
 	updates := protoUpdateOpToAntidoteUpdate(proto.GetUpdates())
-	ts, err := antidote.HandleStaticUpdateObjects(updates, clientClock)
+	replyChan := make(chan antidote.TMUpdateReply)
 
+	tmChan <- antidote.TransactionManagerRequest{
+		Args: antidote.TMUpdateArgs{
+			UpdateParams: updates,
+			ReplyChan:    replyChan,
+		},
+		Timestamp: clientClock,
+	}
+	//ts, err := antidote.HandleStaticUpdateObjects(updates, clientClock)
+
+	reply := <-replyChan
 	//TODO: Actually not ignore error
-	ignore(err)
+	ignore(reply.Err)
 
-	respProto = antidote.CreateCommitOkResp(ts)
+	//respProto = antidote.CreateCommitOkResp(ts)
+	respProto = antidote.CreateCommitOkResp(reply.Timestamp)
 	return
 }
 
@@ -166,6 +213,13 @@ func protoUpdateOperationToAntidoteArguments(protoOperation *antidote.ApbUpdateO
 	switch crdtType {
 	case antidote.CRDTType_COUNTER:
 		updateArgs = crdt.Increment{Change: int32(protoOperation.GetCounterop().GetInc())}
+	case antidote.CRDTType_ORSET:
+		setProto := protoOperation.GetSetop()
+		if setProto.GetOptype() == antidote.ApbSetUpdate_ADD {
+			updateArgs = crdt.AddAll{Elems: crdt.ByteMatrixToElementArray(setProto.GetAdds())}
+		} else {
+			updateArgs = crdt.RemoveAll{Elems: crdt.ByteMatrixToElementArray(setProto.GetRems())}
+		}
 	default:
 		//TODO: Support other types and error case, and return error to client
 		tools.CheckErr("Unsupported data type for update - we should warn the user about this one day.", nil)

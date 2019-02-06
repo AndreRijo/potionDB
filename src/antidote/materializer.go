@@ -33,28 +33,27 @@ func createDbKeyStruct(key string, crdtType CRDTType, bucket string) (keyStruct 
 */
 
 /////*****************TYPE DEFINITIONS***********************/////
-//TODO: I need to include a channel in the request. It's the private channel of "client-materializer" (for the reply)
 
 type MaterializerRequest struct {
 	KeyParams
 	Timestamp clocksi.Timestamp
-	Args      RequestArgs
+	Args      MatRequestArgs
 }
 
-type RequestArgs interface {
-	getRequestType() (requestType RequestType)
+type MatRequestArgs interface {
+	getRequestType() (requestType MatRequestType)
 }
 
-type ReadRequestArgs struct {
+type MatReadArgs struct {
 	ReplyChan chan crdt.State
 }
 
-type UpdateRequestArgs struct {
+type MatUpdateArgs struct {
 	crdt.UpdateArguments
 	ReplyChan chan bool //TODO: This probably will need to be changed to include error types
 }
 
-type RequestType int
+type MatRequestType int
 
 //TODO: Typechecking...
 
@@ -62,8 +61,8 @@ type RequestType int
 
 const (
 	//Types of requests
-	readRequest  RequestType = 0
-	writeRequest RequestType = 1
+	readMatRequest  MatRequestType = 0
+	writeMatRequest MatRequestType = 1
 	//TODO: Maybe each bucket should correspond to one goroutine...?
 	//Number of goroutines in the pool to access the db. Each goroutine has a (automatically assigned) range of keys that it can access.
 	nGoRoutines uint64 = 8
@@ -81,13 +80,13 @@ var (
 
 /////*****************TYPE METHODS***********************/////
 
-func (args ReadRequestArgs) getRequestType() (requestType RequestType) {
-	requestType = readRequest
+func (args MatReadArgs) getRequestType() (requestType MatRequestType) {
+	requestType = readMatRequest
 	return
 }
 
-func (args UpdateRequestArgs) getRequestType() (requestType RequestType) {
-	requestType = writeRequest
+func (args MatUpdateArgs) getRequestType() (requestType MatRequestType) {
+	requestType = writeMatRequest
 	return
 }
 
@@ -98,11 +97,11 @@ func InitializeMaterializer() {
 	keyRangeSize = math.MaxUint64 / nGoRoutines
 	var i uint64
 	for i = 0; i < nGoRoutines; i++ {
-		go listenForRequests(i)
+		go listenForTransactionManagerRequests(i)
 	}
 }
 
-func listenForRequests(id uint64) {
+func listenForTransactionManagerRequests(id uint64) {
 	//Each goroutine is responsible for the range of keys [minKey, maxKey[
 	//Calculates range of keys for current goroutine
 	//factor := math.MaxUint64 / nGoRoutines
@@ -122,20 +121,20 @@ func listenForRequests(id uint64) {
 	for {
 		request := <-channel
 		//fmt.Println("Materializer goroutine", id, "received a request!")
-		handleRequest(request)
+		handleMatRequest(request)
 	}
 }
 
-func handleRequest(request MaterializerRequest) {
+func handleMatRequest(request MaterializerRequest) {
 	switch request.Args.getRequestType() {
-	case readRequest:
-		handleRead(request)
-	case writeRequest:
-		handleWrite(request)
+	case readMatRequest:
+		handleMatRead(request)
+	case writeMatRequest:
+		handleMatWrite(request)
 	}
 }
 
-func handleRead(request MaterializerRequest) {
+func handleMatRead(request MaterializerRequest) {
 	hashKey := getHash(getCombinedKey(request.KeyParams))
 
 	obj, hasKey := db[hashKey]
@@ -147,11 +146,11 @@ func handleRead(request MaterializerRequest) {
 		state = obj.GetValue()
 	}
 
-	request.Args.(ReadRequestArgs).ReplyChan <- state
+	request.Args.(MatReadArgs).ReplyChan <- state
 
 }
 
-func handleWrite(request MaterializerRequest) {
+func handleMatWrite(request MaterializerRequest) {
 	hashKey := getHash(getCombinedKey(request.KeyParams))
 
 	obj, hasKey := db[hashKey]
@@ -159,12 +158,12 @@ func handleWrite(request MaterializerRequest) {
 		obj = initializeCrdt(request.CrdtType)
 		db[hashKey] = obj
 	}
-	downstreamArgs := obj.Update(request.Args.(UpdateRequestArgs).UpdateArguments)
+	downstreamArgs := obj.Update(request.Args.(MatUpdateArgs).UpdateArguments)
 	//TODO: Replicate the operation or store in list to replicate of current transaction...? Maybe return to caller...?
 	//TODO: Also, error handling...?
 	obj.Downstream(downstreamArgs)
 
-	request.Args.(UpdateRequestArgs).ReplyChan <- true
+	request.Args.(MatUpdateArgs).ReplyChan <- true
 }
 
 /*
@@ -205,6 +204,8 @@ func initializeCrdt(crdtType CRDTType) (newCrdt crdt.CRDT) {
 	switch crdtType {
 	case CRDTType_COUNTER:
 		newCrdt = (&crdt.CounterCrdt{}).Initialize()
+	case CRDTType_ORSET:
+		newCrdt = (&crdt.SetAWCrdt{}).Initialize()
 	default:
 		//TODO: Support other crdtTypes
 		tools.CheckErr("Unsupported crdtType to initialize CRDT.", nil)

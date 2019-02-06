@@ -188,7 +188,13 @@ func CreateUpdateObjs(transId []byte, key string, crdtType CRDTType,
 			Updates:               updateOpArray,
 			TransactionDescriptor: transId,
 		}
-
+	case CRDTType_ORSET:
+		converted := updObj.(*ApbSetUpdate)
+		updateOperation.Setop = converted
+		protoBuf = &ApbUpdateObjects{
+			Updates:               updateOpArray,
+			TransactionDescriptor: transId,
+		}
 	default:
 		//fmt.Println("Didn't recognize CRDTType:", crdtType)
 		protoBuf = nil
@@ -205,22 +211,29 @@ func CreateCounterUpdate(amount int) (protoBuf *ApbCounterUpdate) {
 
 func CreateTopkUpdate(playerId int, score int) (protoBuf *ApbTopkUpdate) {
 	protoBuf = &ApbTopkUpdate{
-		//PlayerId: proto.Int32(int32(playerId)),
-		//Score: proto.Int32(int32(score)),
 		PlayerId: proto.Int64(int64(playerId)),
 		Score:    proto.Int64(int64(score)),
 	}
-	/*
-		pair := &ApbIntPair{
-			PlayerId : proto.Int32(int32(playerId)),
-			Score : proto.Int32(int32(score)),
+	return
+}
+
+func CreateSetUpdate(opType ApbSetUpdate_SetOpType, elems []string) (protoBuf *ApbSetUpdate) {
+	byteArray := make([][]byte, len(elems))
+	for i, elem := range elems {
+		byteArray[i] = []byte(elem)
+	}
+	switch opType {
+	case ApbSetUpdate_ADD:
+		protoBuf = &ApbSetUpdate{
+			Optype: &opType,
+			Adds:   byteArray,
 		}
-		pairsArray := make([]*ApbIntPair, 1)
-		pairsArray[0] = pair
-		protoBuf = &ApbTopkUpdate{
-			Adds: pairsArray,
+	case ApbSetUpdate_REMOVE:
+		protoBuf = &ApbSetUpdate{
+			Optype: &opType,
+			Rems:   byteArray,
 		}
-	*/
+	}
 	return
 }
 
@@ -286,6 +299,15 @@ func createCounterReadResp(value int32) (protobuf *ApbReadObjectResp) {
 	return
 }
 
+func createSetReadResp(elems []crdt.Element) (protobuf *ApbReadObjectResp) {
+	protobuf = &ApbReadObjectResp{
+		Set: &ApbGetSetResp{
+			Value: crdt.ElementArrayToByteMatrix(elems),
+		},
+	}
+	return
+}
+
 //func CreateReadObjectsResp(readReplies []*ApbReadObjectResp) (protobuf *ApbReadObjectsResp) {
 func CreateReadObjectsResp(objectStates []crdt.State) (protobuf *ApbReadObjectsResp) {
 	readReplies := convertAntidoteStatesToProto(objectStates)
@@ -326,6 +348,29 @@ func createUpdateOperation(updateArgs crdt.UpdateArguments, crdtType CRDTType) (
 				Inc: proto.Int64(int64(updateArgs.(crdt.Increment).Change)),
 			},
 		}
+	case CRDTType_ORSET:
+		switch convertedArgs := updateArgs.(type) {
+		case crdt.Add:
+			element := convertedArgs.Element
+			elements := make([][]byte, 1)
+			elements[0] = []byte(element)
+			opType := ApbSetUpdate_ADD
+			protobuf = &ApbUpdateOperation{Setop: &ApbSetUpdate{Optype: &opType, Adds: elements}}
+		case crdt.Remove:
+			element := convertedArgs.Element
+			elements := make([][]byte, 1)
+			elements[0] = []byte(element)
+			opType := ApbSetUpdate_REMOVE
+			protobuf = &ApbUpdateOperation{Setop: &ApbSetUpdate{Optype: &opType, Rems: elements}}
+		case crdt.AddAll:
+			elements := convertedArgs.Elems
+			opType := ApbSetUpdate_ADD
+			protobuf = &ApbUpdateOperation{Setop: &ApbSetUpdate{Optype: &opType, Adds: crdt.ElementArrayToByteMatrix(elements)}}
+		case crdt.RemoveAll:
+			elements := convertedArgs.Elems
+			opType := ApbSetUpdate_ADD
+			protobuf = &ApbUpdateOperation{Setop: &ApbSetUpdate{Optype: &opType, Adds: crdt.ElementArrayToByteMatrix(elements)}}
+		}
 	default:
 		tools.CheckErr("CrdtType not supported for update operation.", nil)
 	}
@@ -338,6 +383,8 @@ func convertAntidoteStatesToProto(objectStates []crdt.State) (protobufs []*ApbRe
 		switch convertedState := state.(type) {
 		case crdt.CounterState:
 			protobufs[i] = createCounterReadResp(convertedState.Value)
+		case crdt.SetAWState:
+			protobufs[i] = createSetReadResp(convertedState.Elems)
 		default:
 			tools.CheckErr("Unsupported data type in convertAntidoteStatesToProto", nil)
 		}

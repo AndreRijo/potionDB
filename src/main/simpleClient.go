@@ -29,10 +29,11 @@ const (
 )
 
 var (
-	//keys   = [2]string{"topk1", "topk2"}
-	keys = [4]string{"counter1", "counter2", "counter3", "counter4"}
+	keys = [2]string{"topk1", "topk2"}
+	//keys = [4]string{"counter1", "counter2", "counter3", "counter4"}
 	//buckets = [2][]byte{[]byte("bkt1"), []byte("bkt2")}
-	buckets = [2]string{"bkt1", "bkt2"}
+	//buckets = [2]string{"bkt1", "bkt2"}
+	buckets = [1]string{"bkt"}
 	reader  = bufio.NewReader(os.Stdin)
 )
 
@@ -52,18 +53,19 @@ func ClientMain() {
 		fmt.Println("Click enter once transactions stop happening.")
 		reader.ReadString('\n')
 	*/
-	testStaticUpdate(connection)
-	time.Sleep(time.Duration(1000) * time.Millisecond)
-	testStaticRead(connection)
+	testSet(connection)
+	//testStaticUpdate(connection)
+	//time.Sleep(time.Duration(1000) * time.Millisecond)
+	//testStaticRead(connection, antidote.CRDTType_COUNTER, 10)
 }
 
 //TODO: Test this and testStaticUpdate() with antidote
-func testStaticRead(connection net.Conn) {
-	reads := make([]antidote.ReadObjectParams, 10)
+func testStaticRead(connection net.Conn, crdtType antidote.CRDTType, nReads int) (receivedProto proto.Message) {
+	reads := make([]antidote.ReadObjectParams, nReads)
 	for i := 0; i < len(reads); i++ {
 		rndKey, rndBucket := getRandomLocationParams()
 		reads[i] = antidote.ReadObjectParams{
-			KeyParams: antidote.CreateKeyParams(rndKey, antidote.CRDTType_COUNTER, rndBucket),
+			KeyParams: antidote.CreateKeyParams(rndKey, crdtType, rndBucket),
 		}
 	}
 
@@ -72,16 +74,18 @@ func testStaticRead(connection net.Conn) {
 	fmt.Println("Proto sent! Waiting for reply.")
 
 	//Wait for reply
-	_, receivedProto, _ := antidote.ReceiveProto(connection)
-	fmt.Println("Received proto: ", receivedProto)
+	protoType, receivedProto, _ := antidote.ReceiveProto(connection)
+	fmt.Println("Received type, proto: ", protoType, receivedProto)
+
+	return
 }
 
-func testStaticUpdate(connection net.Conn) {
+func testStaticUpdate(connection net.Conn) (receivedProto proto.Message) {
 	updates := make([]antidote.UpdateObjectParams, 1)
 	inc := rand.Int31n(100)
 	for i := 0; i < len(updates); i++ {
 		rndKey, rndBucket := getRandomLocationParams()
-		fmt.Println("Incrementing with: ", inc)
+		fmt.Println("Incrementing with:", inc)
 		updates[i] = antidote.UpdateObjectParams{
 			KeyParams:  antidote.CreateKeyParams(rndKey, antidote.CRDTType_COUNTER, rndBucket),
 			UpdateArgs: crdt.Increment{Change: inc},
@@ -91,6 +95,71 @@ func testStaticUpdate(connection net.Conn) {
 	proto := antidote.CreateStaticUpdateObjs(updates)
 	antidote.SendProto(antidote.StaticUpdateObjs, proto, connection)
 	fmt.Println("Proto sent! Waiting for reply.")
+
+	//Wait for reply
+	protoType, receivedProto, _ := antidote.ReceiveProto(connection)
+	fmt.Println("Received type, proto: ", protoType, receivedProto)
+
+	return
+}
+
+func testSet(connection net.Conn) {
+	adds := make([]crdt.UpdateArguments, 3)
+	for i := 0; i < len(adds); i++ {
+		adds[i] = crdt.Add{Element: crdt.Element(fmt.Sprint(rand.Uint64()))}
+	}
+	testGenericUpdate(connection, antidote.CRDTType_ORSET, adds)
+
+	testStaticRead(connection, antidote.CRDTType_ORSET, 5)
+
+	rems := make([]crdt.UpdateArguments, 6)
+	for i := 0; i < len(rems); i++ {
+		rems[i] = crdt.Remove{Element: crdt.Element(fmt.Sprint(rand.Uint64()))}
+	}
+	testGenericUpdate(connection, antidote.CRDTType_ORSET, rems)
+
+	testStaticRead(connection, antidote.CRDTType_ORSET, 5)
+
+	addAll := make([]crdt.UpdateArguments, 1)
+	var rndElems []crdt.Element
+	for i := 0; i < len(addAll); i++ {
+		rndElems = make([]crdt.Element, 5)
+		for j := 0; j < len(rndElems); j++ {
+			rndElems[j] = crdt.Element(fmt.Sprint(rand.Uint64()))
+		}
+		addAll[i] = crdt.AddAll{Elems: rndElems}
+	}
+	testGenericUpdate(connection, antidote.CRDTType_ORSET, addAll)
+
+	testStaticRead(connection, antidote.CRDTType_ORSET, 5)
+
+	remAll := make([]crdt.UpdateArguments, 2)
+	for i := 0; i < len(remAll); i++ {
+		rndElems = make([]crdt.Element, 2)
+		for j := 0; j < len(rndElems); j++ {
+			rndElems[j] = crdt.Element(fmt.Sprint(rand.Uint64()))
+		}
+		remAll[i] = crdt.RemoveAll{Elems: rndElems}
+	}
+	testGenericUpdate(connection, antidote.CRDTType_ORSET, remAll)
+
+	testStaticRead(connection, antidote.CRDTType_ORSET, 5)
+}
+
+func testGenericUpdate(connection net.Conn, crdtType antidote.CRDTType, args []crdt.UpdateArguments) {
+	updates := make([]antidote.UpdateObjectParams, len(args))
+	for i := 0; i < len(args); i++ {
+		rndKey, rndBucket := getRandomLocationParams()
+		fmt.Println("Generating update op to key, bucket", rndKey, rndBucket)
+		updates[i] = antidote.UpdateObjectParams{
+			KeyParams:  antidote.CreateKeyParams(rndKey, crdtType, rndBucket),
+			UpdateArgs: args[i],
+		}
+	}
+
+	proto := antidote.CreateStaticUpdateObjs(updates)
+	antidote.SendProto(antidote.StaticUpdateObjs, proto, connection)
+	fmt.Println("Proto update sent! Waiting for reply.")
 
 	//Wait for reply
 	protoType, receivedProto, _ := antidote.ReceiveProto(connection)
@@ -285,3 +354,32 @@ func getRandomLocationParams() (key string, bucket string) {
 	key, bucket = keys[rand.Intn(len(keys))], buckets[rand.Intn(len(buckets))]
 	return
 }
+
+//Note: For now this only knows how to print sets.
+/*
+func printDetailedReadResult(protoBuf proto.Message) {
+	switch protoBuf.(type) {
+	case *antidote.ApbStaticReadObjectsResp:
+		fmt.Println("Detailed received proto: ")
+		readProtos := protoBuf.(*antidote.ApbStaticReadObjectsResp).Objects.Objects
+		for _, currProto := range readProtos {
+			if currProto.GetSet() != nil {
+				elements := crdt.ByteMatrixToElementArray(currProto.GetSet().GetValue())
+				for _, elem := range elements {
+					fmt.Print(string(elem), ",")
+				}
+			} else if currProto.GetCounter() != nil {
+				fmt.Print(currProto.GetCounter().GetValue())
+			} else {
+				fmt.Print("unsupported")
+			}
+			fmt.Print("; ")
+		}
+		fmt.Println()
+	case *antidote.ApbErrorResp:
+		fmt.Println("Error - tried to print detailed read result but the proto is an ApbErrorResp.")
+	default:
+		fmt.Println("Error on detailed read print - proto isn't a ApbStaticReadObjectsResp or ApbErrorResp.")
+	}
+}
+*/
