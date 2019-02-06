@@ -8,5 +8,6 @@
 \f0\fs24 \cf0 
 /bin/
 /pkg/
+/workspace/
 .DS_Store\
 .project}

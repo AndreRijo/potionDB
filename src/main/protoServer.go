@@ -30,6 +30,7 @@ var (
 func main() {
 
 	//TODO: Remove this client parts. It's temporary, just until I decide to separate the client from the server in different projects.
+	/*
 	fmt.Println("What to run? Client or server?")
 	toRun, _ := in.ReadString('\n')
 	fmt.Println(toRun)
@@ -38,6 +39,7 @@ func main() {
 		ClientMain()
 		return
 	}
+	*/
 	fmt.Println("Port?")
 	portString, _ := in.ReadString('\n')
 	rand.Seed(time.Now().UTC().UnixNano())
