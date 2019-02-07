@@ -7,6 +7,7 @@ import (
 	"clocksi"
 	"crdt"
 	fmt "fmt"
+	"tools"
 )
 
 /////*****************TYPE DEFINITIONS***********************/////
@@ -134,48 +135,122 @@ func handleTMRequest(request TransactionManagerRequest) (shouldStop bool) {
 	return
 }
 
-//For now ignore the client's timestamp
-//TODO: Actually take in consideration the client's timestamp
+//TODO: Maybe I didn't had to find a common timestamp and I should had just asked for the client's version...?
+//Obviously in that case it would still block if a partition doesn't yet have a high enough version.
 func handleTMRead(request TransactionManagerRequest) {
-	ts := clocksi.NextTimestamp()
-	readRequest := request.Args.(TMReadArgs)
-	states := make([]crdt.State, len(readRequest.ObjsParams))
-	//TODO: Couple this in a single request?
-	replyChan := make(chan crdt.State)
+	readArgs := request.Args.(TMReadArgs)
 
-	for i, obj := range readRequest.ObjsParams {
-		request := MaterializerRequest{
-			KeyParams: obj,
-			Args: MatReadArgs{
-				ReplyChan: replyChan,
+	smallestTS := findCommonTimestamp(readArgs.ObjsParams, request.Timestamp)
+
+	var currReadChan chan crdt.State = nil
+	var currRequest MaterializerRequest
+	states := make([]crdt.State, len(readArgs.ObjsParams))
+
+	//Now, ask to read the version corresponding to timestamp smallestTS.
+	for i, currRead := range readArgs.ObjsParams {
+		currReadChan = make(chan crdt.State)
+
+		currRequest = MaterializerRequest{
+			MatRequestArgs: MatReadArgs{
+				Timestamp: smallestTS,
+				KeyParams: currRead,
+				ReplyChan: currReadChan,
 			},
-			Timestamp: request.Timestamp,
 		}
-		SendRequest(request)
-		states[i] = <-replyChan
+		SendRequest(currRequest)
+		states[i] = <-currReadChan
+		close(currReadChan)
 	}
-	close(replyChan)
 
-	readRequest.ReplyChan <- TMReadReply{
+	readArgs.ReplyChan <- TMReadReply{
 		States:    states,
-		Timestamp: ts,
+		Timestamp: smallestTS,
 	}
+
+	/*
+		Algorithm:
+			First step: discover what timestamp to use
+				for each read
+					find channel;
+					if it is a new channel
+						ask for TS
+						if TS < previousTS
+							previousTS = TS
+							if previousTS < clientTS
+								panic for now (in future: put read on hold)
+					if allChannelsConsulted
+						break
+			Second step: create a read channel for each channel to use (on implementation a new channel is created for each read)
+				for each channel
+					create channel
+			Third step: perform read on smallest timestamp OR put on hold
+				for each read
+					send request
+					wait for state
+					//TODO: Paralelize the requests? This includes the TS ones
+			Four step: return states
+	*/
+
+}
+
+//TODO: Possibly cache the hashing results and return them? That would allow to include them in the requests and paralelize the read requests
+func findCommonTimestamp(objsParams []KeyParams, clientTs clocksi.Timestamp) (ts clocksi.Timestamp) {
+	verifiedPartitions := make([]bool, nGoRoutines)
+	var nVerified uint64 = 0
+	readChannels := make([]chan crdt.State, nGoRoutines)
+	var smallestTS clocksi.Timestamp = nil
+
+	//Variables local to the first for. To avoid unecessary redeclarations
+	var currChanKey uint64
+	for _, currRead := range objsParams {
+		currChanKey = GetChannelKey(currRead)
+		//Still haven't verified this transaction
+		if !verifiedPartitions[currChanKey] {
+
+			nVerified++
+			replyTSChan := make(chan clocksi.Timestamp)
+			readChannels[currChanKey] = make(chan crdt.State)
+			currTSRequest := MaterializerRequest{
+				MatRequestArgs: MatVersionArgs{
+					ReplyChan: replyTSChan,
+					ChannelId: currChanKey,
+				},
+			}
+			SendRequestToChannel(currTSRequest, currChanKey)
+			currTS := <-replyTSChan
+			close(replyTSChan)
+
+			if smallestTS == nil || currTS.IsLowerOrEqual(smallestTS) {
+				smallestTS = currTS
+			}
+			//The current partition is behind the client's timestamp.
+			//TODO: Handle case in which the partition's timestamp is behind the client's
+			if smallestTS.IsLower(clientTs) {
+				tools.CheckErr("Unsupported situation - client's TS is more recent than one of the partitions. This will be supported *eventually*", nil)
+			}
+			//Already verified all partitions, no need to continue
+			if nVerified == nGoRoutines {
+				break
+			}
+		}
+	}
+
+	return smallestTS
 }
 
 func handleTMWrite(request TransactionManagerRequest) {
-	ts := clocksi.NextTimestamp()
+	ts := request.Timestamp.NextTimestamp()
 	writeRequest := request.Args.(TMUpdateArgs)
 	//TODO: Couple this in a single request?
 	replyChan := make(chan bool)
 
 	for _, upd := range writeRequest.UpdateParams {
 		request := MaterializerRequest{
-			KeyParams: upd.KeyParams,
-			Args: MatUpdateArgs{
-				UpdateArguments: upd.UpdateArgs,
-				ReplyChan:       replyChan,
+			MatRequestArgs: MatUpdateArgs{
+				UpdateObjectParams: upd,
+				Timestamp:          ts,
+				ReplyChan:          replyChan,
 			},
-			Timestamp: request.Timestamp,
 		}
 		SendRequest(request)
 		<-replyChan
@@ -187,6 +262,32 @@ func handleTMWrite(request TransactionManagerRequest) {
 		Err:       nil,
 	}
 }
+
+/***** OLD CODE FOR GOROUTINE WITHOUT TIMESTAMPS LOGIC VERSION *****/
+
+/*
+func HandleStaticReadObjects(objsParams []ReadObjectParams, lastClock clocksi.Timestamp) (states []crdt.State, ts clocksi.Timestamp) {
+		ts := request.Timestamp.NextTimestamp()
+
+		replyChan := make(chan []crdt.State)
+
+		matRequest := MaterializerRequest{
+			Args: MatReadArgs{
+				ObjsParams: readRequest.ObjsParams,
+				ReplyChan:  replyChan,
+			},
+			Timestamp: ts,
+		}
+		SendRequest(matRequest)
+		states := <-replyChan
+		close(replyChan)
+
+		readRequest.ReplyChan <- TMReadReply{
+			States:    states,
+			Timestamp: ts,
+		}
+	}
+*/
 
 /***** OLD CODE FOR NO-GOROUTINE TM VERSION *****/
 
@@ -243,28 +344,5 @@ func HandleStaticUpdateObjects(updates []UpdateObjectParams, lastClock clocksi.T
 	err = nil
 	return
 }
-
-*/
-
-//This is here just in case for some reason I decide to go back to this
-/*
-//Interface that contains the necessary information to identify an object
-type ObjectLocation interface {
-	GetKey() (key string)
-	GetCRDTType() (crdtType CRDTType)
-	GetBucket() (bucket string)
-}
-
-func (params ReadObjectParams) GetKey() (key string) { key = params.Key; return }
-
-func (params ReadObjectParams) GetCRDTType() (crdtType CRDTType) { crdtType = params.CrdtType; return }
-
-func (params ReadObjectParams) GetBucket() (bucket string) { bucket = params.Bucket; return }
-
-func (params UpdateObjectParams) GetKey() (key string) { key = params.Key; return }
-
-func (params UpdateObjectParams) GetCRDTType() (crdtType CRDTType) { crdtType = params.CrdtType; return }
-
-func (params UpdateObjectParams) GetBucket() (bucket string) { bucket = params.Bucket; return }
 
 */

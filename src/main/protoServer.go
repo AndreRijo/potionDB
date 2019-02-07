@@ -31,14 +31,14 @@ func main() {
 
 	//TODO: Remove this client parts. It's temporary, just until I decide to separate the client from the server in different projects.
 	/*
-	fmt.Println("What to run? Client or server?")
-	toRun, _ := in.ReadString('\n')
-	fmt.Println(toRun)
-	if strings.ToLower(strings.TrimSpace(toRun)) == "client" {
-		fmt.Println("Starting client")
-		ClientMain()
-		return
-	}
+		fmt.Println("What to run? Client or server?")
+		toRun, _ := in.ReadString('\n')
+		fmt.Println(toRun)
+		if strings.ToLower(strings.TrimSpace(toRun)) == "client" {
+			fmt.Println("Starting client")
+			ClientMain()
+			return
+		}
 	*/
 	fmt.Println("Port?")
 	portString, _ := in.ReadString('\n')

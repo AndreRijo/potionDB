@@ -1,6 +1,7 @@
 package crdt
 
 type CounterCrdt struct {
+	genericCRDT
 	value int32
 }
 

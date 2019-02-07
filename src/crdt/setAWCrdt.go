@@ -8,6 +8,7 @@ import (
 type Element string
 
 type SetAWCrdt struct {
+	genericCRDT
 	elems map[Element]uniqueSet
 	//elems map[Element]uniqueSet
 	//Used to generate unique identifiers. This does not need to be included in a serialization to transfer the state.
