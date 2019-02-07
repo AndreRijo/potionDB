@@ -67,6 +67,7 @@ conn - the TCP connection between the client and this server.
 */
 func processConnection(conn net.Conn) {
 	tmChan := antidote.CreateClientHandler()
+	var clientId antidote.ClientId = antidote.ClientId(rand.Uint64())
 
 	var replyType byte = 0
 	var reply proto.Message = nil
@@ -99,11 +100,11 @@ func processConnection(conn net.Conn) {
 		case antidote.StaticUpdateObjs:
 			fmt.Println("Received proto of type StaticUpdateObjs")
 			replyType = antidote.CommitTransReply
-			reply = handleStaticUpdateObjects(protobuf.(*antidote.ApbStaticUpdateObjects), tmChan)
+			reply = handleStaticUpdateObjects(protobuf.(*antidote.ApbStaticUpdateObjects), tmChan, clientId)
 		case antidote.StaticReadObjs:
 			fmt.Println("Received proto of type StaticReadObjs")
 			replyType = antidote.StaticReadObjsReply
-			reply = handleStaticReadObjects(protobuf.(*antidote.ApbStaticReadObjects), tmChan)
+			reply = handleStaticReadObjects(protobuf.(*antidote.ApbStaticReadObjects), tmChan, clientId)
 		default:
 			fmt.Println("Received unknown proto, ignored... sort of")
 		}
@@ -119,9 +120,9 @@ func notSupported(protobuf proto.Message) {
 
 //TODO: Error cases in which it should return ApbErrorResp
 func handleStaticReadObjects(proto *antidote.ApbStaticReadObjects,
-	tmChan chan antidote.TransactionManagerRequest) (respProto *antidote.ApbStaticReadObjectsResp) {
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *antidote.ApbStaticReadObjectsResp) {
 
-	clientClock := clocksi.FromBytes(proto.GetTransaction().GetTimestamp())
+	clientClock := clocksi.ClockSiTimestamp{}.FromBytes(proto.GetTransaction().GetTimestamp())
 
 	objs := protoObjectsToAntidoteObjects(proto.GetObjects())
 	replyChan := make(chan antidote.TMReadReply)
@@ -131,7 +132,10 @@ func handleStaticReadObjects(proto *antidote.ApbStaticReadObjects,
 			ObjsParams: objs,
 			ReplyChan:  replyChan,
 		},
-		Timestamp: clientClock,
+		TransactionId: antidote.TransactionId{
+			ClientId:  clientId,
+			Timestamp: clientClock,
+		},
 	}
 	//replies, ts := antidote.HandleStaticReadObjects(objs, clientClock)
 	reply := <-replyChan
@@ -167,9 +171,9 @@ func protoObjectsToAntidoteObjects(protoObjs []*antidote.ApbBoundObject) (objs [
 
 //TODO: Error cases in which it should return ApbErrorResp
 func handleStaticUpdateObjects(proto *antidote.ApbStaticUpdateObjects,
-	tmChan chan antidote.TransactionManagerRequest) (respProto *antidote.ApbCommitResp) {
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *antidote.ApbCommitResp) {
 
-	clientClock := clocksi.FromBytes(proto.GetTransaction().GetTimestamp())
+	clientClock := clocksi.ClockSiTimestamp{}.FromBytes(proto.GetTransaction().GetTimestamp())
 
 	updates := protoUpdateOpToAntidoteUpdate(proto.GetUpdates())
 	replyChan := make(chan antidote.TMUpdateReply)
@@ -179,7 +183,10 @@ func handleStaticUpdateObjects(proto *antidote.ApbStaticUpdateObjects,
 			UpdateParams: updates,
 			ReplyChan:    replyChan,
 		},
-		Timestamp: clientClock,
+		TransactionId: antidote.TransactionId{
+			ClientId:  clientId,
+			Timestamp: clientClock,
+		},
 	}
 	//ts, err := antidote.HandleStaticUpdateObjects(updates, clientClock)
 

@@ -12,6 +12,8 @@ type CRDT interface {
 	Downstream(downstreamArgs UpdateArguments)
 
 	GetVersion() (ts clocksi.Timestamp)
+
+	IsOperationWellTyped(args UpdateArguments) (ok bool, err error)
 }
 
 //The idea is to include here the methods/data common to every CRDT. For now, that's only the vectorClock and GetVersion()
@@ -24,6 +26,11 @@ type State interface {
 
 //Represents the arguments specific to each CRDT.
 type UpdateArguments interface {
+}
+
+type ArgsError struct {
+	err  string
+	args UpdateArguments
 }
 
 //TODO: Seems like we can't implement methods with more specific structures (e.g: use CounterState when interface mention State).

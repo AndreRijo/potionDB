@@ -42,3 +42,8 @@ func (crdt *CounterCrdt) Downstream(downstreamArgs UpdateArguments) {
 		crdt.value -= incOrDec.Change
 	}
 }
+
+func (crdt *CounterCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err error) {
+	//TODO: Typechecking
+	return true, nil
+}

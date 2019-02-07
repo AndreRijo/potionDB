@@ -138,3 +138,8 @@ func (crdt *SetAWCrdt) applyRemoveAll(toRem map[Element]uniqueSet) {
 		//The element wasn't in the set already, so nothing to do
 	}
 }
+
+func (crdt *SetAWCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err error) {
+	//TODO: Typechecking
+	return true, nil
+}

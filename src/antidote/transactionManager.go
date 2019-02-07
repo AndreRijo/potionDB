@@ -29,8 +29,8 @@ type ReadObjectParams struct {
 }
 
 type TransactionManagerRequest struct {
-	Timestamp clocksi.Timestamp
-	Args      TMRequestArgs
+	TransactionId
+	Args TMRequestArgs
 }
 
 type TMRequestArgs interface {
@@ -62,6 +62,13 @@ type TMUpdateReply struct {
 
 type TMRequestType int
 
+type ClientId uint64
+
+type TransactionId struct {
+	ClientId  ClientId
+	Timestamp clocksi.Timestamp
+}
+
 /////*****************CONSTANTS AND VARIABLES***********************/////
 
 const (
@@ -69,6 +76,12 @@ const (
 	writeTMRequest  TMRequestType = 1
 	lostConnRequest TMRequestType = 255
 )
+
+/*
+var (
+	currTimestamp clocksi.Timestamp = clocksi.ClockSiTimestamp{}.NewTimestamp()
+)
+*/
 
 /////*****************TYPE METHODS***********************/////
 
@@ -238,29 +251,85 @@ func findCommonTimestamp(objsParams []KeyParams, clientTs clocksi.Timestamp) (ts
 	return smallestTS
 }
 
+//TODO: Separate in parts?
+//Note: For now this corresponds to static writes.
 func handleTMWrite(request TransactionManagerRequest) {
-	ts := request.Timestamp.NextTimestamp()
-	writeRequest := request.Args.(TMUpdateArgs)
-	//TODO: Couple this in a single request?
-	replyChan := make(chan bool)
+	updateArgs := request.Args.(TMUpdateArgs)
+	updatesPerPartition := make([]*MatStaticUpdateArgs, nGoRoutines)
+	envolvedPartitions := make([]uint64, 0, nGoRoutines)
 
-	for _, upd := range writeRequest.UpdateParams {
-		request := MaterializerRequest{
-			MatRequestArgs: MatUpdateArgs{
-				UpdateObjectParams: upd,
-				Timestamp:          ts,
-				ReplyChan:          replyChan,
-			},
+	var currChanKey uint64
+	//1st step: discover envolved partitions and group updates
+	for _, upd := range updateArgs.UpdateParams {
+		currChanKey = GetChannelKey(upd.KeyParams)
+		if updatesPerPartition[currChanKey] == nil {
+			updatesPerPartition[currChanKey] = &MatStaticUpdateArgs{
+				//Slice with initial length of 0 (empty) and a default capacity. Resize is automatic if when using append
+				Updates:       make([]UpdateObjectParams, 0, len(updateArgs.UpdateParams)*2/int(nGoRoutines)),
+				TransactionId: request.TransactionId,
+				ReplyChan:     make(chan TimestampErrorPair),
+			}
+			envolvedPartitions = append(envolvedPartitions, currChanKey)
 		}
-		SendRequest(request)
-		<-replyChan
+		updatesPerPartition[currChanKey].Updates = append(updatesPerPartition[currChanKey].Updates, upd)
 	}
-	close(replyChan)
 
-	writeRequest.ReplyChan <- TMUpdateReply{
-		Timestamp: ts,
+	//2nd step: send update operations to each envolved partition
+	for _, partId := range envolvedPartitions {
+		matRequest := MaterializerRequest{MatRequestArgs: updatesPerPartition[partId]}
+		SendRequestToChannel(matRequest, partId)
+	}
+
+	var maxTimestamp *clocksi.Timestamp
+	//Also 2nd step: wait for reply of each partition
+	//TODO: Possibly paralelize? What if errors occour?
+	for _, partId := range envolvedPartitions {
+		reply := <-updatesPerPartition[partId].ReplyChan
+		if reply.Timestamp == nil {
+			updateArgs.ReplyChan <- TMUpdateReply{
+				Timestamp: nil,
+				Err:       reply.error,
+			}
+			return
+		}
+		if reply.Timestamp.IsHigherOrEqual(*maxTimestamp) {
+			maxTimestamp = &reply.Timestamp
+		}
+	}
+
+	//3rd step: send commit to envolved partitions
+	//TODO: Should I not assume that the 2nd phase of commit is fail-safe?
+	for _, partId := range envolvedPartitions {
+		SendRequest(MaterializerRequest{MatRequestArgs: MatCommitArgs{
+			TransactionId:   request.TransactionId,
+			CommitTimestamp: *maxTimestamp,
+			ChannelId:       partId,
+		}})
+	}
+
+	//4th step: send ok to client
+	updateArgs.ReplyChan <- TMUpdateReply{
+		Timestamp: *maxTimestamp,
 		Err:       nil,
 	}
+
+	/*
+		Algorithm:
+			1st step: discover envolved partitions and group writes
+				- for update in writeRequest.UpdateParams
+					- getPartitionKey
+					- add update to list
+			2nd step: send update operations to each envolved partition and collect proposed timestamp
+				- for each partition envolved
+					- send list of updates
+					- wait for proposed timestamp
+					- if proposed timestamp > highest proposed timestamp so far
+						highest timestamp = proposed timestamp
+			3rd step: send commit to envolved partitions
+				- for each partition envolved
+					- commit(highest timestamp)
+			4th step: send ok to client
+	*/
 }
 
 /***** OLD CODE FOR GOROUTINE WITHOUT TIMESTAMPS LOGIC VERSION *****/
@@ -285,6 +354,32 @@ func HandleStaticReadObjects(objsParams []ReadObjectParams, lastClock clocksi.Ti
 		readRequest.ReplyChan <- TMReadReply{
 			States:    states,
 			Timestamp: ts,
+		}
+	}
+*/
+
+/*
+func handleTMWrite(request TransactionManagerRequest) {
+		//ts := request.Timestamp.NextTimestamp()
+		writeRequest := request.Args.(TMUpdateArgs)
+		replyChan := make(chan bool)
+
+		for _, upd := range writeRequest.UpdateParams {
+			request := MaterializerRequest{
+				MatRequestArgs: MatUpdateArgs{
+					UpdateObjectParams: upd,
+					Timestamp:          request.Timestamp,
+					ReplyChan:          replyChan,
+				},
+			}
+			SendRequest(request)
+			<-replyChan
+		}
+		close(replyChan)
+
+		writeRequest.ReplyChan <- TMUpdateReply{
+			Timestamp: request.Timestamp,
+			Err:       nil,
 		}
 	}
 */
