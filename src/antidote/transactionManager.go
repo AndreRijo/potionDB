@@ -7,7 +7,6 @@ import (
 	"clocksi"
 	"crdt"
 	fmt "fmt"
-	"tools"
 )
 
 /////*****************TYPE DEFINITIONS***********************/////
@@ -154,6 +153,9 @@ func handleTMRead(request TransactionManagerRequest) {
 	readArgs := request.Args.(TMReadArgs)
 
 	smallestTS := findCommonTimestamp(readArgs.ObjsParams, request.Timestamp)
+	if smallestTS.IsLower(request.Timestamp) {
+		smallestTS = request.Timestamp
+	}
 
 	var currReadChan chan crdt.State = nil
 	var currRequest MaterializerRequest
@@ -235,11 +237,6 @@ func findCommonTimestamp(objsParams []KeyParams, clientTs clocksi.Timestamp) (ts
 
 			if smallestTS == nil || currTS.IsLowerOrEqual(smallestTS) {
 				smallestTS = currTS
-			}
-			//The current partition is behind the client's timestamp.
-			//TODO: Handle case in which the partition's timestamp is behind the client's
-			if smallestTS.IsLower(clientTs) {
-				tools.CheckErr("Unsupported situation - client's TS is more recent than one of the partitions. This will be supported *eventually*", nil)
 			}
 			//Already verified all partitions, no need to continue
 			if nVerified == nGoRoutines {

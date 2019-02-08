@@ -10,7 +10,9 @@ import (
 )
 
 /////*****************TYPE DEFINITIONS***********************/////
+
 //////////************Requests**************************//////////
+
 type MaterializerRequest struct {
 	MatRequestArgs
 }
@@ -28,11 +30,10 @@ type MatReadArgs struct {
 }
 
 //Args for update request. Note that unlike with MatReadArgs, a MatUpdateArgs represents multiple updates, but all for the same partition
-//TODO: Probably change this to MatStaticUpdateArgs and make a different one for MatUpdateArgs... the difference would be only on ReplyChan.
 type MatUpdateArgs struct {
 	Updates []UpdateObjectParams
 	TransactionId
-	ReplyChan chan BoolErrorPair //TODO: This probably will need to be changed to include error types
+	ReplyChan chan BoolErrorPair
 }
 
 type MatStaticUpdateArgs struct {
@@ -53,7 +54,6 @@ type MatCommitArgs struct {
 	CommitTimestamp clocksi.Timestamp
 }
 
-//TODO: Stop using timestamp as transaction id (problem: client that sends two requests with same seen clock)
 type MatStartTransactionArgs struct {
 	ChannelId uint64
 	TransactionId
@@ -70,6 +70,9 @@ type partitionData struct {
 	highestVersionSeen     clocksi.Timestamp                      //Contains the highest timestamp seen (i.e., possibly not commited) so far
 	pendingOps             map[TransactionId][]UpdateObjectParams //pending transactions waiting for commit
 	suggestedTimestamps    map[TransactionId]clocksi.Timestamp    //map of transactionId -> timestamp suggested on first write request for transactionId
+	commitedWaitToApply    map[TransactionId]clocksi.Timestamp    //set of transactionId -> commit timestamp of commited transactions that couldn't be applied due to pending versions
+	//TODO: Choose a better option to hold pending reads? Checking the whole map takes a long time...
+	pendingReads map[clocksi.Timestamp][]*MatReadArgs //pending reads that require a more recent version than stableVersion
 }
 
 type BoolErrorPair struct {
@@ -88,8 +91,6 @@ type UnknownCrdtTypeError struct {
 	CRDTType
 }
 
-//TODO: Typechecking...
-
 /////*****************CONSTANTS AND VARIABLES***********************/////
 
 const (
@@ -102,7 +103,8 @@ const (
 	commitMatRequest           MatRequestType = 5
 	//TODO: Maybe each bucket should correspond to one goroutine...?
 	//Number of goroutines in the pool to access the db. Each goroutine has a (automatically assigned) range of keys that it can access.
-	nGoRoutines uint64 = 8
+	nGoRoutines   uint64 = 8
+	readQueueSize        = 10 //Initial size of the read queue for pending reads (partitionData.pendingReads)
 )
 
 var (
@@ -185,34 +187,49 @@ func listenForTransactionManagerRequests(id uint64) {
 		highestVersionSeen:     clocksi.ClockSiTimestamp{}.NewTimestamp(),
 		pendingOps:             make(map[TransactionId][]UpdateObjectParams),
 		suggestedTimestamps:    make(map[TransactionId]clocksi.Timestamp),
+		commitedWaitToApply:    make(map[TransactionId]clocksi.Timestamp),
+		pendingReads:           make(map[clocksi.Timestamp][]*MatReadArgs),
 	}
 	//Listens to the channel and processes requests
 	channel := make(chan MaterializerRequest)
 	channels[id] = channel
 	for {
 		request := <-channel
-		handleMatRequest(request, &partitionData, id)
+		handleMatRequest(request, &partitionData)
 	}
 }
 
-func handleMatRequest(request MaterializerRequest, partitionData *partitionData, id uint64) {
+func handleMatRequest(request MaterializerRequest, partitionData *partitionData) {
 	switch request.getRequestType() {
 	case readMatRequest:
-		handleMatRead(request, partitionData, id)
+		handleMatRead(request, partitionData)
 	case writeStaticMatRequest:
-		handleMatStaticWrite(request, partitionData, id)
+		handleMatStaticWrite(request, partitionData)
 	case writeMatRequest:
-		handleMatWrite(request, partitionData, id)
+		handleMatWrite(request, partitionData)
 	case versionMatRequest:
-		handleMatVersion(request, partitionData, id)
+		handleMatVersion(request, partitionData)
 	case commitMatRequest:
-		handleMatCommit(request, partitionData, id)
+		handleMatCommit(request, partitionData)
 	}
 }
 
-func handleMatRead(request MaterializerRequest, partitionData *partitionData, id uint64) {
+func handleMatRead(request MaterializerRequest, partitionData *partitionData) {
 	//TODO: Actually take in consideration the timestamp to read the correct version
 	readArgs := request.MatRequestArgs.(MatReadArgs)
+	if readArgs.Timestamp.IsHigherOrEqual(partitionData.stableVersion) {
+		applyReadAndReply(&readArgs)
+	} else {
+		//Queue the request.
+		queue, exists := partitionData.pendingReads[readArgs.Timestamp]
+		if !exists {
+			queue = make([]*MatReadArgs, 0, readQueueSize)
+		}
+		partitionData.pendingReads[readArgs.Timestamp] = append(queue, &readArgs)
+	}
+}
+
+func applyReadAndReply(readArgs *MatReadArgs) {
 	hashKey := getHash(getCombinedKey(readArgs.KeyParams))
 	obj, hasKey := db[hashKey]
 	var state crdt.State
@@ -226,7 +243,7 @@ func handleMatRead(request MaterializerRequest, partitionData *partitionData, id
 	readArgs.ReplyChan <- state
 }
 
-func handleStartTransaction(request MaterializerRequest, partitionData *partitionData, id uint64) {
+func handleStartTransaction(request MaterializerRequest, partitionData *partitionData) {
 	startTransArgs := request.MatRequestArgs.(MatStartTransactionArgs)
 	auxiliaryStartTransaction(startTransArgs.TransactionId, partitionData)
 	startTransArgs.ReplyChan <- partitionData.suggestedTimestamps[startTransArgs.TransactionId]
@@ -237,17 +254,25 @@ func auxiliaryStartTransaction(transactionId TransactionId, partitionData *parti
 	newTimestamp := partitionData.highestVersionSeen.NextTimestamp()
 	partitionData.highestVersionSeen = newTimestamp
 	partitionData.suggestedTimestamps[transactionId] = newTimestamp
+	if partitionData.smallestPendingVersion == nil {
+		partitionData.smallestPendingVersion = newTimestamp
+	}
 }
 
-func handleMatStaticWrite(request MaterializerRequest, partitionData *partitionData, id uint64) {
+func handleMatStaticWrite(request MaterializerRequest, partitionData *partitionData) {
 	writeArgs := request.MatRequestArgs.(MatStaticUpdateArgs)
 
 	auxiliaryStartTransaction(writeArgs.TransactionId, partitionData)
 
 	ok, err := typecheckWrites(writeArgs.Updates)
 	if !ok {
-		//TODO: Changes here might be needed after implementing abort
-		delete(partitionData.suggestedTimestamps, writeArgs.TransactionId)
+		//TODO: Changes here might be needed after implementing abort (and maybe extract this to a common method)
+		suggestedTimestamp := partitionData.suggestedTimestamps[writeArgs.TransactionId]
+		deleteTransactionMetadata(&writeArgs.TransactionId, partitionData)
+		//The smallest pending version corresponds to this aborted transaction, so we need to update it
+		if partitionData.smallestPendingVersion == suggestedTimestamp {
+			handlePendingCommits(partitionData)
+		}
 		writeArgs.ReplyChan <- TimestampErrorPair{
 			Timestamp: nil,
 			error:     err,
@@ -262,7 +287,7 @@ func handleMatStaticWrite(request MaterializerRequest, partitionData *partitionD
 
 }
 
-func handleMatWrite(request MaterializerRequest, partitionData *partitionData, id uint64) {
+func handleMatWrite(request MaterializerRequest, partitionData *partitionData) {
 	writeArgs := request.MatRequestArgs.(MatUpdateArgs)
 
 	ok, err := typecheckWrites(writeArgs.Updates)
@@ -291,15 +316,73 @@ func typecheckWrites(updates []UpdateObjectParams) (ok bool, err error) {
 	return
 }
 
-func handleMatVersion(request MaterializerRequest, partitionData *partitionData, id uint64) {
-	//request.MatRequestArgs.(MatVersionArgs).ReplyChan <- stableVersions[id]
+func handleMatVersion(request MaterializerRequest, partitionData *partitionData) {
 	request.MatRequestArgs.(MatVersionArgs).ReplyChan <- partitionData.stableVersion
 }
 
-func handleMatCommit(request MaterializerRequest, partitionData *partitionData, id uint64) {
+func handleMatCommit(request MaterializerRequest, partitionData *partitionData) {
 	commitArgs := request.MatRequestArgs.(MatCommitArgs)
 
-	updates := partitionData.pendingOps[commitArgs.TransactionId]
+	//Check if we can apply the updates
+	if partitionData.smallestPendingVersion.IsLower(commitArgs.CommitTimestamp) {
+		//A transaction with smaller version is pending, so we need to queue this commit.
+		partitionData.commitedWaitToApply[commitArgs.TransactionId] = commitArgs.CommitTimestamp
+	} else {
+		//Safe to apply the commit
+		applyCommit(&commitArgs.TransactionId, &commitArgs.CommitTimestamp, partitionData)
+	}
+}
+
+func applyCommit(transactionId *TransactionId, commitTimestamp *clocksi.Timestamp, partitionData *partitionData) {
+	applyUpdates(partitionData.pendingOps[*transactionId])
+
+	updatePartitionDataWithCommit(transactionId, commitTimestamp, partitionData)
+}
+
+func updatePartitionDataWithCommit(transactionId *TransactionId, commitTimestamp *clocksi.Timestamp, partitionData *partitionData) {
+	deleteTransactionMetadata(transactionId, partitionData)
+	//Transactions are commited in order, so this commit timestamp is always more recent than the previous stableVersion
+	partitionData.stableVersion = *commitTimestamp
+	//But we might have already prepared a more recent timestamp
+	if (*commitTimestamp).IsHigherOrEqual(partitionData.highestVersionSeen) {
+		partitionData.highestVersionSeen = *commitTimestamp
+	}
+
+	handlePendingCommits(partitionData)
+}
+
+func deleteTransactionMetadata(transactionId *TransactionId, partitionData *partitionData) {
+	delete(partitionData.pendingOps, *transactionId)
+	delete(partitionData.suggestedTimestamps, *transactionId)
+}
+
+func handlePendingCommits(partitionData *partitionData) {
+	//First step: update smallestTimestamp
+	if len(partitionData.suggestedTimestamps) == 0 {
+		partitionData.smallestPendingVersion = nil
+		//Since commits are in order, the smallestPendingVersion was always this commit.
+	} else {
+		partitionData.smallestPendingVersion = partitionData.highestVersionSeen
+		var smallestVersionId TransactionId
+		for transId, ts := range partitionData.suggestedTimestamps {
+			if ts.IsLowerOrEqual(partitionData.smallestPendingVersion) {
+				partitionData.smallestPendingVersion = ts
+				smallestVersionId = transId
+			}
+		}
+		//Second step: check if the smallest version corresponds to a commited transaction that wasn't yet applied
+		nextCommitTs, isWaitingToApply := partitionData.commitedWaitToApply[smallestVersionId]
+		if isWaitingToApply {
+			//Third step: apply that transaction
+			applyCommit(&smallestVersionId, &nextCommitTs, partitionData)
+		} else if len(partitionData.pendingReads) > 0 {
+			applyPendingReads(partitionData)
+		}
+	}
+	return
+}
+
+func applyUpdates(updates []UpdateObjectParams) {
 	for _, upd := range updates {
 		hashKey := getHash(getCombinedKey(upd.KeyParams))
 
@@ -311,12 +394,17 @@ func handleMatCommit(request MaterializerRequest, partitionData *partitionData, 
 		downstreamArgs := obj.Update(upd)
 		obj.Downstream(downstreamArgs)
 	}
+}
 
-	//Transactions are commited in order, so this commit timestamp is always more recent than the previous stableVersion
-	partitionData.stableVersion = commitArgs.CommitTimestamp
-	//But we might have already prepared a more recent timestamp
-	if commitArgs.CommitTimestamp.IsHigherOrEqual(partitionData.highestVersionSeen) {
-		partitionData.highestVersionSeen = commitArgs.CommitTimestamp
+func applyPendingReads(partitionData *partitionData) {
+	for ts, readSlices := range partitionData.pendingReads {
+		if ts.IsHigherOrEqual(partitionData.stableVersion) {
+			//Apply all reads of that transaction
+			for _, readArgs := range readSlices {
+				applyReadAndReply(readArgs)
+			}
+			delete(partitionData.pendingReads, ts)
+		}
 	}
 }
 
