@@ -1,12 +1,12 @@
 package antidote
 
 import (
-	"time"
 	"clocksi"
 	"crdt"
 	fmt "fmt"
 	"math/rand"
 	"testing"
+	"time"
 )
 
 //TODO: Lots of common code between different tests... Maybe find common code and extract to one or more methods?
@@ -52,14 +52,14 @@ func TestWrites1(t *testing.T) {
 	go handleTMRead(readReq)
 	readReply := <-readChan
 
-	if readReply.States[0].(crdt.SetAWState).Elems[0] != firstWriteParams[0].UpdateArgs.(crdt.Add).Element {
+	if len(readReply.States[0].(crdt.SetAWState).Elems) == 0 || readReply.States[0].(crdt.SetAWState).Elems[0] != firstWriteParams[0].UpdateArgs.(crdt.Add).Element {
 		t.Error("Read of first key doesn't match")
-		t.Error("Received: ", readReply.States[0].(crdt.SetAWState).Elems[0])
+		t.Error("Received: ", readReply.States[0].(crdt.SetAWState).Elems)
 		t.Error("Expected: ", firstWriteParams[0].UpdateArgs.(crdt.Add).Element)
 	}
-	if readReply.States[1].(crdt.SetAWState).Elems[0] != secondWriteParams[0].UpdateArgs.(crdt.Add).Element {
+	if len(readReply.States[1].(crdt.SetAWState).Elems) == 0 || readReply.States[1].(crdt.SetAWState).Elems[0] != secondWriteParams[0].UpdateArgs.(crdt.Add).Element {
 		t.Error("Read of second key doesn't match")
-		t.Error("Received: ", readReply.States[1].(crdt.SetAWState).Elems[0])
+		t.Error("Received: ", readReply.States[1].(crdt.SetAWState).Elems)
 		t.Error("Expected: ", secondWriteParams[0].UpdateArgs.(crdt.Add).Element)
 	}
 
@@ -111,7 +111,7 @@ func TestWrites2(t *testing.T) {
 	}
 
 	readKeysParams := []KeyParams{firstKey, secondKey}
-	readReq, readChan := createRead(secondWriteReply.Timestamp, readKeysParams)
+	readReq, readChan := createRead(thirdWriteReply.Timestamp, readKeysParams)
 
 	go handleTMRead(readReq)
 	readReply := <-readChan
@@ -158,7 +158,7 @@ func TestWrites3(t *testing.T) {
 	}
 
 	thirdWriteParams := createRandomSetAdd(firstKey)
-	thirdWriteReq, thirdWriteChan := createWrite(secondWriteReply.Timestamp, thirdWriteParams)
+	thirdWriteReq, thirdWriteChan := createWrite(clocksi.NewClockSiTimestamp(), thirdWriteParams)
 
 	go handleTMWrite(thirdWriteReq)
 	thirdWriteReply := <-thirdWriteChan
@@ -211,6 +211,7 @@ func TestWritesAndReads(t *testing.T) {
 
 	go handleTMWrite(firstWriteReq)
 	firstWriteReply := <-firstWriteChan
+	fmt.Println()
 
 	if firstWriteReply.Err != nil {
 		t.Error("Error on first write: ", firstWriteReply.Err)
@@ -221,6 +222,7 @@ func TestWritesAndReads(t *testing.T) {
 
 	go handleTMWrite(secondWriteReq)
 	secondWriteReply := <-secondWriteChan
+	fmt.Println()
 
 	if secondWriteReply.Err != nil {
 		t.Error("Error on second write: ", secondWriteReply.Err)
@@ -231,6 +233,7 @@ func TestWritesAndReads(t *testing.T) {
 
 	go handleTMWrite(thirdWriteReq)
 	thirdWriteReply := <-thirdWriteChan
+	fmt.Println()
 
 	if thirdWriteReply.Err != nil {
 		t.Error("Error on third write: ", thirdWriteReply.Err)
@@ -243,18 +246,21 @@ func TestWritesAndReads(t *testing.T) {
 
 	//This read is supposed to timeout, as we asked for a timestamp that doesn't yet exist.
 	select {
-	case <- firstReadChan:
+	case <-firstReadChan:
 		t.Error("Error - the first read didn't block, even though the timestamp used is not yet available.")
+		return
 	case <-time.After(2 * time.Second):
 		t.Log("First read timeout, as expected.")
 	}
+	fmt.Println()
 
 	fourthWriteParams := createRandomSetAdd(firstKey)
 	fourthWriteReq, fourthWriteChan := createWrite(secondWriteReply.Timestamp, fourthWriteParams)
 
 	go handleTMWrite(fourthWriteReq)
 	fourthWriteReply := <-fourthWriteChan
-	
+	fmt.Println()
+
 	if fourthWriteReply.Err != nil {
 		t.Error("Error on fourth write: ", fourthWriteReply.Err)
 	}

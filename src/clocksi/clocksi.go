@@ -37,7 +37,7 @@ type Timestamp interface {
 }
 
 type ClockSiTimestamp struct {
-	vectorClock []uint64
+	vectorClock *[]uint64
 }
 
 type TsResult int
@@ -53,6 +53,11 @@ const (
 	entrySize = 8
 )
 
+var (
+	//Useful for comparations or other situations in which we need a temporary, non-significant, timestamp
+	DummyTs = NewClockSiTimestamp()
+)
+
 //Creates a new timestamp. This gives the same result as doing: newTs = ClockSiTimestamp{}.NewTimestamp().
 //Use whichever option feels more natural.
 func NewClockSiTimestamp() (ts Timestamp) {
@@ -60,16 +65,17 @@ func NewClockSiTimestamp() (ts Timestamp) {
 }
 
 func (ts ClockSiTimestamp) NewTimestamp() (newTs Timestamp) {
-	ts = ClockSiTimestamp{vectorClock: make([]uint64, 1)}
-	ts.vectorClock[0] = 0
-	return
+	vc := make([]uint64, 1)
+	ts = ClockSiTimestamp{vectorClock: &vc}
+	(*ts.vectorClock)[0] = 0
+	return ts
 }
 
 func (ts ClockSiTimestamp) NextTimestamp() (newTs Timestamp) {
 	//TODO: Actually update the correct position
 	//Remember, in go assigning an array to a variable does a deep copy
 	newVc := ts.vectorClock
-	newVc[0]++
+	(*newVc)[0]++
 	newTs = ClockSiTimestamp{vectorClock: newVc}
 	return
 }
@@ -81,8 +87,8 @@ func (ts ClockSiTimestamp) Compare(otherTs Timestamp) (compResult TsResult) {
 	}
 
 	//TODO: Handle vectorClocks with different sizes...?
-	otherVc := otherTs.(ClockSiTimestamp).vectorClock
-	selfVc := ts.vectorClock
+	otherVc := *otherTs.(ClockSiTimestamp).vectorClock
+	selfVc := *ts.vectorClock
 	foundHigher := false
 	foundLower := false
 
@@ -117,8 +123,8 @@ func (ts ClockSiTimestamp) IsHigherOrEqual(otherTs Timestamp) (compResult bool) 
 	}
 
 	//TODO: Handle vectorClocks with different sizes...?
-	otherVc := otherTs.(ClockSiTimestamp).vectorClock
-	selfVc := ts.vectorClock
+	otherVc := *otherTs.(ClockSiTimestamp).vectorClock
+	selfVc := *ts.vectorClock
 
 	for i, selfValue := range selfVc {
 		if selfValue < otherVc[i] {
@@ -136,8 +142,8 @@ func (ts ClockSiTimestamp) IsHigher(otherTs Timestamp) (compResult bool) {
 	}
 
 	//TODO: Handle vectorClocks with different sizes...?
-	otherVc := otherTs.(ClockSiTimestamp).vectorClock
-	selfVc := ts.vectorClock
+	otherVc := *otherTs.(ClockSiTimestamp).vectorClock
+	selfVc := *ts.vectorClock
 	foundLower := false
 
 	for i, selfValue := range selfVc {
@@ -157,8 +163,8 @@ func (ts ClockSiTimestamp) IsLowerOrEqual(otherTs Timestamp) (compResult bool) {
 	}
 
 	//TODO: Handle vectorClocks with different sizes...?
-	otherVc := otherTs.(ClockSiTimestamp).vectorClock
-	selfVc := ts.vectorClock
+	otherVc := *otherTs.(ClockSiTimestamp).vectorClock
+	selfVc := *ts.vectorClock
 
 	for i, selfValue := range selfVc {
 		if selfValue > otherVc[i] {
@@ -176,8 +182,8 @@ func (ts ClockSiTimestamp) IsLower(otherTs Timestamp) (compResult bool) {
 	}
 
 	//TODO: Handle vectorClocks with different sizes...?
-	otherVc := otherTs.(ClockSiTimestamp).vectorClock
-	selfVc := ts.vectorClock
+	otherVc := *otherTs.(ClockSiTimestamp).vectorClock
+	selfVc := *ts.vectorClock
 	foundHigher := false
 
 	for i, selfValue := range selfVc {
@@ -196,8 +202,8 @@ func (ts ClockSiTimestamp) IsEqual(otherTs Timestamp) (compResult bool) {
 		return false
 	}
 
-	otherVc := otherTs.(ClockSiTimestamp).vectorClock
-	selfVc := ts.vectorClock
+	otherVc := *otherTs.(ClockSiTimestamp).vectorClock
+	selfVc := *ts.vectorClock
 
 	for i, selfValue := range selfVc {
 		if selfValue != otherVc[i] {
@@ -214,8 +220,8 @@ func (ts ClockSiTimestamp) IsConcurrent(otherTs Timestamp) (compResult bool) {
 }
 
 func (ts ClockSiTimestamp) ToBytes() (bytes []byte) {
-	bytes = make([]byte, len(ts.vectorClock)*entrySize)
-	for i, vcEntry := range ts.vectorClock {
+	bytes = make([]byte, len(*ts.vectorClock)*entrySize)
+	for i, vcEntry := range *ts.vectorClock {
 		binary.LittleEndian.PutUint64(bytes[i*entrySize:(i+1)*entrySize], vcEntry)
 	}
 	return
@@ -224,14 +230,16 @@ func (ts ClockSiTimestamp) ToBytes() (bytes []byte) {
 func (ts ClockSiTimestamp) FromBytes(bytes []byte) (newTs Timestamp) {
 	//Initial/default timestamp
 	if bytes == nil || len(bytes) == 0 {
-		newClockSi := &ClockSiTimestamp{vectorClock: make([]uint64, 1)}
+		newVC := make([]uint64, 1)
+		newClockSi := &ClockSiTimestamp{vectorClock: &newVC}
 		//Should be unecessary.
-		newClockSi.vectorClock[0] = 0
+		(*newClockSi.vectorClock)[0] = 0
 		newTs = *newClockSi
 	} else {
-		newClockSi := &ClockSiTimestamp{vectorClock: make([]uint64, len(bytes)/8)}
-		for i := 0; i < len(newClockSi.vectorClock); i++ {
-			newClockSi.vectorClock[i] = binary.LittleEndian.Uint64(bytes[i*entrySize : (i+1)*entrySize])
+		newVC := make([]uint64, len(bytes)/8)
+		newClockSi := &ClockSiTimestamp{vectorClock: &newVC}
+		for i := 0; i < len(newVC); i++ {
+			newVC[i] = binary.LittleEndian.Uint64(bytes[i*entrySize : (i+1)*entrySize])
 		}
 		newTs = *newClockSi
 	}

@@ -110,8 +110,8 @@ const (
 var (
 	//db = make(map[combinedKey]crdt.CRDT)
 	//uint64: result returned by the hash function
-	db           = make(map[uint64]crdt.CRDT)
-	keyRangeSize uint64 //Number of keys that each goroutine is responsible, except for the last one which might have a bit more.
+	db           = make(map[uint64]crdt.CRDT) //TODO: Change this, as it can crash due to concurrency (more evident with prints near write access to db)
+	keyRangeSize uint64                       //Number of keys that each goroutine is responsible, except for the last one which might have a bit more.
 	//Each goroutine is responsible for a certain range of keys (with no intersection between ranges)
 	//More precisely, a goroutine is responsible from its id * keyRangeSize (inclusive) to (id + 1) * keyRangeSize (exclusive)
 	channels = make([]chan MaterializerRequest, nGoRoutines)
@@ -217,7 +217,7 @@ func handleMatRequest(request MaterializerRequest, partitionData *partitionData)
 func handleMatRead(request MaterializerRequest, partitionData *partitionData) {
 	//TODO: Actually take in consideration the timestamp to read the correct version
 	readArgs := request.MatRequestArgs.(MatReadArgs)
-	if readArgs.Timestamp.IsHigherOrEqual(partitionData.stableVersion) {
+	if readArgs.Timestamp.IsLowerOrEqual(partitionData.stableVersion) {
 		applyReadAndReply(&readArgs)
 	} else {
 		//Queue the request.
@@ -324,7 +324,8 @@ func handleMatCommit(request MaterializerRequest, partitionData *partitionData) 
 	commitArgs := request.MatRequestArgs.(MatCommitArgs)
 
 	//Check if we can apply the updates
-	if partitionData.smallestPendingVersion.IsLower(commitArgs.CommitTimestamp) {
+	if commitArgs.CommitTimestamp.IsHigher(partitionData.smallestPendingVersion) {
+		//if partitionData.smallestPendingVersion.IsLower(commitArgs.CommitTimestamp) {
 		//A transaction with smaller version is pending, so we need to queue this commit.
 		partitionData.commitedWaitToApply[commitArgs.TransactionId] = commitArgs.CommitTimestamp
 	} else {
@@ -391,7 +392,7 @@ func applyUpdates(updates []UpdateObjectParams) {
 			obj = initializeCrdt(upd.CrdtType)
 			db[hashKey] = obj
 		}
-		downstreamArgs := obj.Update(upd)
+		downstreamArgs := obj.Update(upd.UpdateArgs)
 		obj.Downstream(downstreamArgs)
 	}
 }

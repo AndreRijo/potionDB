@@ -273,11 +273,11 @@ func handleTMWrite(request TransactionManagerRequest) {
 
 	//2nd step: send update operations to each envolved partition
 	for _, partId := range envolvedPartitions {
-		matRequest := MaterializerRequest{MatRequestArgs: updatesPerPartition[partId]}
+		matRequest := MaterializerRequest{MatRequestArgs: *updatesPerPartition[partId]}
 		SendRequestToChannel(matRequest, partId)
 	}
 
-	var maxTimestamp *clocksi.Timestamp
+	var maxTimestamp *clocksi.Timestamp = &clocksi.DummyTs
 	//Also 2nd step: wait for reply of each partition
 	//TODO: Possibly paralelize? What if errors occour?
 	for _, partId := range envolvedPartitions {
