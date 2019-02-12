@@ -193,7 +193,6 @@ Success: if every operation commits and final read returns all values written. T
 3rd: write in [0], with [1]
 	- writes…
 	- commit
-4th: read with [1]
 5th: read with [4]
 	- check that it doesn’t commit
 6th: write with [3]
@@ -239,8 +238,14 @@ func TestWritesAndReads(t *testing.T) {
 		t.Error("Error on third write: ", thirdWriteReply.Err)
 	}
 
+	var futureTs clocksi.Timestamp
+	if thirdWriteReply.Timestamp.IsHigherOrEqual(thirdWriteReply.Timestamp) {
+		futureTs = thirdWriteReply.Timestamp.NextTimestamp()
+	} else {
+		futureTs = thirdWriteReply.Timestamp.NextTimestamp()
+	}
 	readKeysParams := []KeyParams{firstKey}
-	firstReadReq, firstReadChan := createRead(secondWriteReply.Timestamp.NextTimestamp(), readKeysParams)
+	firstReadReq, firstReadChan := createRead(futureTs, readKeysParams)
 
 	go handleTMRead(firstReadReq)
 
@@ -255,7 +260,7 @@ func TestWritesAndReads(t *testing.T) {
 	fmt.Println()
 
 	fourthWriteParams := createRandomSetAdd(firstKey)
-	fourthWriteReq, fourthWriteChan := createWrite(secondWriteReply.Timestamp, fourthWriteParams)
+	fourthWriteReq, fourthWriteChan := createWrite(thirdWriteReply.Timestamp, fourthWriteParams)
 
 	go handleTMWrite(fourthWriteReq)
 	fourthWriteReply := <-fourthWriteChan
@@ -270,9 +275,17 @@ func TestWritesAndReads(t *testing.T) {
 	go handleTMRead(secondReadReq)
 	secondReadReply := <-secondReadChan
 
+	//Check that the first read now returned
+	firstReadReply := <-firstReadChan
+
 	firstKeyWrites := []UpdateObjectParams{firstWriteParams[0], secondWriteParams[0], thirdWriteParams[0], fourthWriteParams[0]}
+	if !checkWriteReadSetMatch(firstReadReply.States[0].(crdt.SetAWState), firstKeyWrites) {
+		t.Error("First read of key doesn't match")
+		t.Error("Received: ", firstReadReply.States[0].(crdt.SetAWState).Elems)
+		t.Error("Expected: ", firstKeyWrites)
+	}
 	if !checkWriteReadSetMatch(secondReadReply.States[0].(crdt.SetAWState), firstKeyWrites) {
-		t.Error("Read of key doesn't match")
+		t.Error("Second read of key doesn't match")
 		t.Error("Received: ", secondReadReply.States[0].(crdt.SetAWState).Elems)
 		t.Error("Expected: ", firstKeyWrites)
 	}

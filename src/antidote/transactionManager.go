@@ -294,15 +294,21 @@ func handleTMWrite(request TransactionManagerRequest) {
 		}
 	}
 
-	//3rd step: send commit to envolved partitions
+	//3rd step: send commit to ALL partitions
 	//TODO: Should I not assume that the 2nd phase of commit is fail-safe?
-	for _, partId := range envolvedPartitions {
-		SendRequest(MaterializerRequest{MatRequestArgs: MatCommitArgs{
-			TransactionId:   request.TransactionId,
-			CommitTimestamp: *maxTimestamp,
-			ChannelId:       partId,
-		}})
-	}
+	/*
+		for _, partId := range envolvedPartitions {
+			SendRequest(MaterializerRequest{MatRequestArgs: MatCommitArgs{
+				TransactionId:   request.TransactionId,
+				CommitTimestamp: *maxTimestamp,
+				ChannelId:       partId,
+			}})
+		}
+	*/
+	SendRequestToAllChannels(MaterializerRequest{MatRequestArgs: MatCommitArgs{
+		TransactionId:   request.TransactionId,
+		CommitTimestamp: *maxTimestamp,
+	}})
 
 	//4th step: send ok to client
 	updateArgs.ReplyChan <- TMUpdateReply{
@@ -322,8 +328,8 @@ func handleTMWrite(request TransactionManagerRequest) {
 					- wait for proposed timestamp
 					- if proposed timestamp > highest proposed timestamp so far
 						highest timestamp = proposed timestamp
-			3rd step: send commit to envolved partitions
-				- for each partition envolved
+			3rd step: send commit to ALL partitions
+				- for each partition
 					- commit(highest timestamp)
 			4th step: send ok to client
 	*/

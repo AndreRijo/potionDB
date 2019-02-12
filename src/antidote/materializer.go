@@ -49,7 +49,6 @@ type MatVersionArgs struct {
 }
 
 type MatCommitArgs struct {
-	ChannelId       uint64
 	TransactionId   TransactionId
 	CommitTimestamp clocksi.Timestamp
 }
@@ -159,7 +158,7 @@ func (args MatCommitArgs) getRequestType() (requestType MatRequestType) {
 }
 
 func (args MatCommitArgs) getChannel() (channelId uint64) {
-	return args.ChannelId
+	return 0 //Commits are supposed to be sent to all partitions
 }
 
 func (err UnknownCrdtTypeError) Error() (errString string) {
@@ -320,18 +319,25 @@ func handleMatVersion(request MaterializerRequest, partitionData *partitionData)
 	request.MatRequestArgs.(MatVersionArgs).ReplyChan <- partitionData.stableVersion
 }
 
+/*
+	Note: This is received by every partition even if no operations are targeted to some partitions.
+	This is because every partition needs to know the latest version commited, so that reads are applied succesfully
+*/
 func handleMatCommit(request MaterializerRequest, partitionData *partitionData) {
 	commitArgs := request.MatRequestArgs.(MatCommitArgs)
 
 	//Check if we can apply the updates
-	if commitArgs.CommitTimestamp.IsHigher(partitionData.smallestPendingVersion) {
-		//if partitionData.smallestPendingVersion.IsLower(commitArgs.CommitTimestamp) {
+	compResult := commitArgs.CommitTimestamp.Compare(partitionData.smallestPendingVersion)
+	//if commitArgs.CommitTimestamp.IsHigher(partitionData.smallestPendingVersion) {
+	//Apply Commit
+	if partitionData.smallestPendingVersion == nil || compResult == clocksi.EqualTs || compResult == clocksi.ConcurrentTs {
+		//Safe to commit
+		applyCommit(&commitArgs.TransactionId, &commitArgs.CommitTimestamp, partitionData)
+	} else if compResult == clocksi.HigherTs {
 		//A transaction with smaller version is pending, so we need to queue this commit.
 		partitionData.commitedWaitToApply[commitArgs.TransactionId] = commitArgs.CommitTimestamp
-	} else {
-		//Safe to apply the commit
-		applyCommit(&commitArgs.TransactionId, &commitArgs.CommitTimestamp, partitionData)
 	}
+	//Note: It's possible for a partition to receive a smaller commit TS when the partition in case wasn't envolved in that commit's operations
 }
 
 func applyCommit(transactionId *TransactionId, commitTimestamp *clocksi.Timestamp, partitionData *partitionData) {
@@ -376,9 +382,10 @@ func handlePendingCommits(partitionData *partitionData) {
 		if isWaitingToApply {
 			//Third step: apply that transaction
 			applyCommit(&smallestVersionId, &nextCommitTs, partitionData)
-		} else if len(partitionData.pendingReads) > 0 {
-			applyPendingReads(partitionData)
 		}
+	}
+	if len(partitionData.pendingReads) > 0 {
+		applyPendingReads(partitionData)
 	}
 	return
 }
@@ -437,6 +444,14 @@ when they know the appropriate channel. Avoids computing an extra hash.
 */
 func SendRequestToChannel(request MaterializerRequest, channelKey uint64) {
 	channels[channelKey] <- request
+}
+
+func SendRequestToAllChannels(request MaterializerRequest) {
+	for _, channel := range channels {
+		//Copy the request to avoid concurrent access problems
+		newReq := request
+		channel <- newReq
+	}
 }
 
 func GetChannelKey(keyParams KeyParams) (key uint64) {
