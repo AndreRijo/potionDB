@@ -2,6 +2,8 @@ package clocksi
 
 import (
 	"encoding/binary"
+	"fmt"
+	"strings"
 )
 
 type Timestamp interface {
@@ -34,6 +36,8 @@ type Timestamp interface {
 	//Gets the timestamp that is represented in the byte array
 	//Note: This method is safe to call on an empty Timestamp instance.
 	FromBytes(bytes []byte) (newTs Timestamp)
+	//Useful for debugging purposes
+	ToString() (tsString string)
 }
 
 type ClockSiTimestamp struct {
@@ -74,9 +78,9 @@ func (ts ClockSiTimestamp) NewTimestamp() (newTs Timestamp) {
 func (ts ClockSiTimestamp) NextTimestamp() (newTs Timestamp) {
 	//TODO: Actually update the correct position
 	//Remember, in go assigning an array to a variable does a deep copy
-	newVc := ts.vectorClock
-	(*newVc)[0]++
-	newTs = ClockSiTimestamp{vectorClock: newVc}
+	newVc := make([]uint64, 1)
+	newVc[0] = (*ts.vectorClock)[0] + 1
+	newTs = ClockSiTimestamp{vectorClock: &newVc}
 	return
 }
 
@@ -244,4 +248,14 @@ func (ts ClockSiTimestamp) FromBytes(bytes []byte) (newTs Timestamp) {
 		newTs = *newClockSi
 	}
 	return
+}
+
+func (ts ClockSiTimestamp) ToString() (tsString string) {
+	var builder strings.Builder
+	builder.WriteString("{[")
+	for _, value := range *ts.vectorClock {
+		builder.WriteString(fmt.Sprint(value) + ",")
+	}
+	builder.WriteString("]}")
+	return builder.String()
 }

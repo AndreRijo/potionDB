@@ -4,6 +4,7 @@ package clocksi
 
 import (
 	"encoding/binary"
+	"fmt"
 	"time"
 )
 
@@ -86,4 +87,12 @@ func (ts DumbTimestamp) FromBytes(bytes []byte) (newTs Timestamp) {
 		newTs = DumbTimestamp{timestamp: int64(binary.LittleEndian.Uint64(bytes))}
 	}
 	return
+}
+
+func (ts DumbTimestamp) DebugPrint() {
+	fmt.Print("{", int(ts.timestamp), "}")
+}
+
+func (ts DumbTimestamp) ToString() (tsString string) {
+	return "{" + fmt.Sprint(ts.timestamp) + "}"
 }
