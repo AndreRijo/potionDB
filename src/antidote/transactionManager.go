@@ -125,7 +125,6 @@ func listenForProtobufRequests(channel chan TransactionManagerRequest) {
 	stop := false
 	for !stop {
 		request := <-channel
-		//fmt.Println("TransactionManager goroutine", id, "received a request!")
 		stop = handleTMRequest(request)
 	}
 
@@ -296,15 +295,6 @@ func handleTMWrite(request TransactionManagerRequest) {
 
 	//3rd step: send commit to ALL partitions
 	//TODO: Should I not assume that the 2nd phase of commit is fail-safe?
-	/*
-		for _, partId := range envolvedPartitions {
-			SendRequest(MaterializerRequest{MatRequestArgs: MatCommitArgs{
-				TransactionId:   request.TransactionId,
-				CommitTimestamp: *maxTimestamp,
-				ChannelId:       partId,
-			}})
-		}
-	*/
 	SendRequestToAllChannels(MaterializerRequest{MatRequestArgs: MatCommitArgs{
 		TransactionId:   request.TransactionId,
 		CommitTimestamp: *maxTimestamp,

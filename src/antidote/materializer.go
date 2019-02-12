@@ -64,6 +64,7 @@ type MatRequestType byte
 //////////********************Other types************************//////////
 //Struct that represents local data to each goroutine/partition
 type partitionData struct {
+	db                     map[uint64]crdt.CRDT                   //CRDT database of this partition
 	stableVersion          clocksi.Timestamp                      //latest commited timestamp
 	smallestPendingVersion clocksi.Timestamp                      //the oldest timestamp that wasn't yet commited but has already been prepared
 	highestVersionSeen     clocksi.Timestamp                      //Contains the highest timestamp seen (i.e., possibly not commited) so far
@@ -101,16 +102,14 @@ const (
 	startTransactionMatRequest MatRequestType = 4
 	commitMatRequest           MatRequestType = 5
 	//TODO: Maybe each bucket should correspond to one goroutine...?
-	//Number of goroutines in the pool to access the db. Each goroutine has a (automatically assigned) range of keys that it can access.
+	//Number of goroutines in the pool to access the database. Each goroutine has a (automatically assigned) range of keys that it can access.
 	nGoRoutines   uint64 = 8
 	readQueueSize        = 10 //Initial size of the read queue for pending reads (partitionData.pendingReads)
 )
 
 var (
-	//db = make(map[combinedKey]crdt.CRDT)
 	//uint64: result returned by the hash function
-	db           = make(map[uint64]crdt.CRDT) //TODO: Change this, as it can crash due to concurrency (more evident with prints near write access to db)
-	keyRangeSize uint64                       //Number of keys that each goroutine is responsible, except for the last one which might have a bit more.
+	keyRangeSize uint64 //Number of keys that each goroutine is responsible, except for the last one which might have a bit more.
 	//Each goroutine is responsible for a certain range of keys (with no intersection between ranges)
 	//More precisely, a goroutine is responsible from its id * keyRangeSize (inclusive) to (id + 1) * keyRangeSize (exclusive)
 	channels = make([]chan MaterializerRequest, nGoRoutines)
@@ -181,6 +180,7 @@ func listenForTransactionManagerRequests(id uint64) {
 	//Where keyRangeSize = math.MaxUint64 / number of goroutines
 
 	partitionData := partitionData{
+		db:                     make(map[uint64]crdt.CRDT),
 		stableVersion:          clocksi.ClockSiTimestamp{}.NewTimestamp(),
 		smallestPendingVersion: nil,
 		highestVersionSeen:     clocksi.ClockSiTimestamp{}.NewTimestamp(),
@@ -217,7 +217,7 @@ func handleMatRead(request MaterializerRequest, partitionData *partitionData) {
 	//TODO: Actually take in consideration the timestamp to read the correct version
 	readArgs := request.MatRequestArgs.(MatReadArgs)
 	if readArgs.Timestamp.IsLowerOrEqual(partitionData.stableVersion) {
-		applyReadAndReply(&readArgs)
+		applyReadAndReply(&readArgs, partitionData)
 	} else {
 		//Queue the request.
 		queue, exists := partitionData.pendingReads[readArgs.Timestamp]
@@ -228,9 +228,9 @@ func handleMatRead(request MaterializerRequest, partitionData *partitionData) {
 	}
 }
 
-func applyReadAndReply(readArgs *MatReadArgs) {
+func applyReadAndReply(readArgs *MatReadArgs, partitionData *partitionData) {
 	hashKey := getHash(getCombinedKey(readArgs.KeyParams))
-	obj, hasKey := db[hashKey]
+	obj, hasKey := partitionData.db[hashKey]
 	var state crdt.State
 	if !hasKey {
 		//TODO: Handle error as antidote does (check what it does? I think it just returns the object with the initial state)
@@ -341,7 +341,7 @@ func handleMatCommit(request MaterializerRequest, partitionData *partitionData) 
 }
 
 func applyCommit(transactionId *TransactionId, commitTimestamp *clocksi.Timestamp, partitionData *partitionData) {
-	applyUpdates(partitionData.pendingOps[*transactionId])
+	applyUpdates(partitionData.pendingOps[*transactionId], partitionData)
 
 	updatePartitionDataWithCommit(transactionId, commitTimestamp, partitionData)
 }
@@ -390,14 +390,14 @@ func handlePendingCommits(partitionData *partitionData) {
 	return
 }
 
-func applyUpdates(updates []UpdateObjectParams) {
+func applyUpdates(updates []UpdateObjectParams, partitionData *partitionData) {
 	for _, upd := range updates {
 		hashKey := getHash(getCombinedKey(upd.KeyParams))
 
-		obj, hasKey := db[hashKey]
+		obj, hasKey := partitionData.db[hashKey]
 		if !hasKey {
 			obj = initializeCrdt(upd.CrdtType)
-			db[hashKey] = obj
+			partitionData.db[hashKey] = obj
 		}
 		downstreamArgs := obj.Update(upd.UpdateArgs)
 		obj.Downstream(downstreamArgs)
@@ -409,7 +409,7 @@ func applyPendingReads(partitionData *partitionData) {
 		if ts.IsHigherOrEqual(partitionData.stableVersion) {
 			//Apply all reads of that transaction
 			for _, readArgs := range readSlices {
-				applyReadAndReply(readArgs)
+				applyReadAndReply(readArgs, partitionData)
 			}
 			delete(partitionData.pendingReads, ts)
 		}

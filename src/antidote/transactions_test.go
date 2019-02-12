@@ -71,20 +71,26 @@ Goal: do 3 writes in two partitions. 1st write: initial clock, 1st partition. 2n
 Success: if all operations commit and a read returns the values written.
 */
 func TestWrites2(t *testing.T) {
-	Initialize()
+	go Initialize()
+
+	//Sleep for a bit to ensure all gothreads initialize
+	time.Sleep(200 * time.Millisecond)
 	firstKey := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), CRDTType_ORSET, "bkt")
 	secondKey := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), CRDTType_ORSET, "bkt")
 
 	//We want to force the two keys to go to different partitions
 	for GetChannelKey(secondKey) == GetChannelKey(firstKey) {
+		fmt.Println("Channel key collision, generating new key...")
 		secondKey.Key = string(fmt.Sprint(rand.Uint64()))
 	}
 
 	firstWriteParams := createRandomSetAdd(firstKey)
 	firstWriteReq, firstWriteChan := createWrite(clocksi.NewClockSiTimestamp(), firstWriteParams)
 
+	//fmt.Println("Sending 1st write")
 	go handleTMWrite(firstWriteReq)
 	firstWriteReply := <-firstWriteChan
+	//fmt.Println("Got 1st write reply")
 
 	if firstWriteReply.Err != nil {
 		t.Error("Error on first write: ", firstWriteReply.Err)
@@ -93,8 +99,10 @@ func TestWrites2(t *testing.T) {
 	secondWriteParams := createRandomSetAdd(secondKey)
 	secondWriteReq, secondWriteChan := createWrite(firstWriteReply.Timestamp, secondWriteParams)
 
+	//fmt.Println("Sending 2nd write")
 	go handleTMWrite(secondWriteReq)
 	secondWriteReply := <-secondWriteChan
+	//fmt.Println("Got 2nd write reply")
 
 	if secondWriteReply.Err != nil {
 		t.Error("Error on second write: ", secondWriteReply.Err)
@@ -103,8 +111,10 @@ func TestWrites2(t *testing.T) {
 	thirdWriteParams := createRandomSetAdd(firstKey)
 	thirdWriteReq, thirdWriteChan := createWrite(secondWriteReply.Timestamp, thirdWriteParams)
 
+	//fmt.Println("Sending 3rd write")
 	go handleTMWrite(thirdWriteReq)
 	thirdWriteReply := <-thirdWriteChan
+	//fmt.Println("Got 3rd write reply")
 
 	if thirdWriteReply.Err != nil {
 		t.Error("Error on third write: ", thirdWriteReply.Err)
@@ -113,8 +123,10 @@ func TestWrites2(t *testing.T) {
 	readKeysParams := []KeyParams{firstKey, secondKey}
 	readReq, readChan := createRead(thirdWriteReply.Timestamp, readKeysParams)
 
+	//fmt.Println("Sending read")
 	go handleTMRead(readReq)
 	readReply := <-readChan
+	//fmt.Println("Got read reply")
 
 	firstKeyWrites := []UpdateObjectParams{firstWriteParams[0], thirdWriteParams[0]}
 	if !checkWriteReadSetMatch(readReply.States[0].(crdt.SetAWState), firstKeyWrites) {
@@ -210,7 +222,6 @@ func TestWritesAndReads(t *testing.T) {
 
 	go handleTMWrite(firstWriteReq)
 	firstWriteReply := <-firstWriteChan
-	fmt.Println()
 
 	if firstWriteReply.Err != nil {
 		t.Error("Error on first write: ", firstWriteReply.Err)
@@ -221,7 +232,6 @@ func TestWritesAndReads(t *testing.T) {
 
 	go handleTMWrite(secondWriteReq)
 	secondWriteReply := <-secondWriteChan
-	fmt.Println()
 
 	if secondWriteReply.Err != nil {
 		t.Error("Error on second write: ", secondWriteReply.Err)
@@ -232,7 +242,6 @@ func TestWritesAndReads(t *testing.T) {
 
 	go handleTMWrite(thirdWriteReq)
 	thirdWriteReply := <-thirdWriteChan
-	fmt.Println()
 
 	if thirdWriteReply.Err != nil {
 		t.Error("Error on third write: ", thirdWriteReply.Err)
@@ -257,14 +266,12 @@ func TestWritesAndReads(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Log("First read timeout, as expected.")
 	}
-	fmt.Println()
 
 	fourthWriteParams := createRandomSetAdd(firstKey)
 	fourthWriteReq, fourthWriteChan := createWrite(thirdWriteReply.Timestamp, fourthWriteParams)
 
 	go handleTMWrite(fourthWriteReq)
 	fourthWriteReply := <-fourthWriteChan
-	fmt.Println()
 
 	if fourthWriteReply.Err != nil {
 		t.Error("Error on fourth write: ", fourthWriteReply.Err)
