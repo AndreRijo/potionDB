@@ -9,6 +9,11 @@ import (
 	"time"
 )
 
+const (
+	initializeTime = 200 //Time to wait for the materializer to finish initializing. 
+						 //Increase this if tests are failing due to all goroutines going to sleep.
+)
+
 //TODO: Lots of common code between different tests... Maybe find common code and extract to one or more methods?
 
 /*
@@ -18,6 +23,9 @@ Success: if both operations commit and a read returns the values written.
 */
 func TestWrites1(t *testing.T) {
 	Initialize()
+
+	//Sleep for a bit to ensure all gothreads initialize
+	time.Sleep(initializeTime * time.Millisecond)
 	firstKey := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), CRDTType_ORSET, "bkt")
 	secondKey := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), CRDTType_ORSET, "bkt")
 
@@ -74,7 +82,7 @@ func TestWrites2(t *testing.T) {
 	go Initialize()
 
 	//Sleep for a bit to ensure all gothreads initialize
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(initializeTime * time.Millisecond)
 	firstKey := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), CRDTType_ORSET, "bkt")
 	secondKey := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), CRDTType_ORSET, "bkt")
 
@@ -147,6 +155,10 @@ Success: if all operations commit and a read returns the values written.
 */
 func TestWrites3(t *testing.T) {
 	Initialize()
+
+	//Sleep for a bit to ensure all gothreads initialize
+	time.Sleep(initializeTime * time.Millisecond)
+
 	firstKey := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), CRDTType_ORSET, "bkt")
 
 	firstWriteParams := createRandomSetAdd(firstKey)
@@ -215,6 +227,9 @@ Success: if every operation commits and final read returns all values written. T
 */
 func TestWritesAndReads(t *testing.T) {
 	Initialize()
+
+	//Sleep for a bit to ensure all gothreads initialize
+	time.Sleep(initializeTime * time.Millisecond)
 	firstKey := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), CRDTType_ORSET, "bkt")
 
 	firstWriteParams := createRandomSetAdd(firstKey)

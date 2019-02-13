@@ -172,6 +172,7 @@ func handleTMRead(request TransactionManagerRequest) {
 			},
 		}
 		SendRequest(currRequest)
+		//TODO: Wait for reply in different for
 		states[i] = <-currReadChan
 		close(currReadChan)
 	}
@@ -251,27 +252,28 @@ func findCommonTimestamp(objsParams []KeyParams, clientTs clocksi.Timestamp) (ts
 //Note: For now this corresponds to static writes.
 func handleTMWrite(request TransactionManagerRequest) {
 	updateArgs := request.Args.(TMUpdateArgs)
+	//TODO: possibly group the two below arrays in just one map?
 	updatesPerPartition := make([]*MatStaticUpdateArgs, nGoRoutines)
-	envolvedPartitions := make([]uint64, 0, nGoRoutines)
+	involvedPartitions := make([]uint64, 0, nGoRoutines)
 
 	var currChanKey uint64
-	//1st step: discover envolved partitions and group updates
+	//1st step: discover involved partitions and group updates
 	for _, upd := range updateArgs.UpdateParams {
 		currChanKey = GetChannelKey(upd.KeyParams)
 		if updatesPerPartition[currChanKey] == nil {
 			updatesPerPartition[currChanKey] = &MatStaticUpdateArgs{
-				//Slice with initial length of 0 (empty) and a default capacity. Resize is automatic if when using append
+				//Slice with initial length of 0 (empty) and a default capacity. Resize is automatic when using append
 				Updates:       make([]UpdateObjectParams, 0, len(updateArgs.UpdateParams)*2/int(nGoRoutines)),
 				TransactionId: request.TransactionId,
 				ReplyChan:     make(chan TimestampErrorPair),
 			}
-			envolvedPartitions = append(envolvedPartitions, currChanKey)
+			involvedPartitions = append(involvedPartitions, currChanKey)
 		}
 		updatesPerPartition[currChanKey].Updates = append(updatesPerPartition[currChanKey].Updates, upd)
 	}
 
-	//2nd step: send update operations to each envolved partition
-	for _, partId := range envolvedPartitions {
+	//2nd step: send update operations to each involved partition
+	for _, partId := range involvedPartitions {
 		matRequest := MaterializerRequest{MatRequestArgs: *updatesPerPartition[partId]}
 		SendRequestToChannel(matRequest, partId)
 	}
@@ -279,7 +281,7 @@ func handleTMWrite(request TransactionManagerRequest) {
 	var maxTimestamp *clocksi.Timestamp = &clocksi.DummyTs
 	//Also 2nd step: wait for reply of each partition
 	//TODO: Possibly paralelize? What if errors occour?
-	for _, partId := range envolvedPartitions {
+	for _, partId := range involvedPartitions {
 		reply := <-updatesPerPartition[partId].ReplyChan
 		if reply.Timestamp == nil {
 			updateArgs.ReplyChan <- TMUpdateReply{
@@ -308,12 +310,12 @@ func handleTMWrite(request TransactionManagerRequest) {
 
 	/*
 		Algorithm:
-			1st step: discover envolved partitions and group writes
+			1st step: discover involved partitions and group writes
 				- for update in writeRequest.UpdateParams
 					- getPartitionKey
 					- add update to list
-			2nd step: send update operations to each envolved partition and collect proposed timestamp
-				- for each partition envolved
+			2nd step: send update operations to each involved partition and collect proposed timestamp
+				- for each partition involved
 					- send list of updates
 					- wait for proposed timestamp
 					- if proposed timestamp > highest proposed timestamp so far

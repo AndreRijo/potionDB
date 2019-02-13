@@ -67,6 +67,8 @@ conn - the TCP connection between the client and this server.
 */
 func processConnection(conn net.Conn) {
 	tmChan := antidote.CreateClientHandler()
+	//TODO: Change this to a random ID generated inside the transaction. This ID should be different from transaction to transaction
+	//The current solution can give problems in the Materializer when a commited transaction is put on hold and another transaction from the same client arrives
 	var clientId antidote.ClientId = antidote.ClientId(rand.Uint64())
 
 	var replyType byte = 0

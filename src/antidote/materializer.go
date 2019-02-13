@@ -261,22 +261,14 @@ func auxiliaryStartTransaction(transactionId TransactionId, partitionData *parti
 func handleMatStaticWrite(request MaterializerRequest, partitionData *partitionData) {
 	writeArgs := request.MatRequestArgs.(MatStaticUpdateArgs)
 
-	auxiliaryStartTransaction(writeArgs.TransactionId, partitionData)
-
 	ok, err := typecheckWrites(writeArgs.Updates)
 	if !ok {
-		//TODO: Changes here might be needed after implementing abort (and maybe extract this to a common method)
-		suggestedTimestamp := partitionData.suggestedTimestamps[writeArgs.TransactionId]
-		deleteTransactionMetadata(&writeArgs.TransactionId, partitionData)
-		//The smallest pending version corresponds to this aborted transaction, so we need to update it
-		if partitionData.smallestPendingVersion == suggestedTimestamp {
-			handlePendingCommits(partitionData)
-		}
 		writeArgs.ReplyChan <- TimestampErrorPair{
 			Timestamp: nil,
 			error:     err,
 		}
 	} else {
+		auxiliaryStartTransaction(writeArgs.TransactionId, partitionData)
 		partitionData.pendingOps[writeArgs.TransactionId] = writeArgs.Updates
 		writeArgs.ReplyChan <- TimestampErrorPair{
 			Timestamp: partitionData.suggestedTimestamps[writeArgs.TransactionId],
@@ -328,7 +320,7 @@ func handleMatCommit(request MaterializerRequest, partitionData *partitionData) 
 
 	//Check if we can apply the updates
 	compResult := commitArgs.CommitTimestamp.Compare(partitionData.smallestPendingVersion)
-	//if commitArgs.CommitTimestamp.IsHigher(partitionData.smallestPendingVersion) {
+	//TODO: Should this really have clocksi.ConcurrentTs?
 	//Apply Commit
 	if partitionData.smallestPendingVersion == nil || compResult == clocksi.EqualTs || compResult == clocksi.ConcurrentTs {
 		//Safe to commit
@@ -337,7 +329,7 @@ func handleMatCommit(request MaterializerRequest, partitionData *partitionData) 
 		//A transaction with smaller version is pending, so we need to queue this commit.
 		partitionData.commitedWaitToApply[commitArgs.TransactionId] = commitArgs.CommitTimestamp
 	}
-	//Note: It's possible for a partition to receive a smaller commit TS when the partition in case wasn't envolved in that commit's operations
+	//Note: It's possible for a partition to receive a smaller commit TS when the partition in case wasn't involved in that commit's operations
 }
 
 func applyCommit(transactionId *TransactionId, commitTimestamp *clocksi.Timestamp, partitionData *partitionData) {
@@ -361,6 +353,7 @@ func updatePartitionDataWithCommit(transactionId *TransactionId, commitTimestamp
 func deleteTransactionMetadata(transactionId *TransactionId, partitionData *partitionData) {
 	delete(partitionData.pendingOps, *transactionId)
 	delete(partitionData.suggestedTimestamps, *transactionId)
+	delete(partitionData.commitedWaitToApply, *transactionId)
 }
 
 func handlePendingCommits(partitionData *partitionData) {
@@ -406,7 +399,7 @@ func applyUpdates(updates []UpdateObjectParams, partitionData *partitionData) {
 
 func applyPendingReads(partitionData *partitionData) {
 	for ts, readSlices := range partitionData.pendingReads {
-		if ts.IsHigherOrEqual(partitionData.stableVersion) {
+		if ts.IsLowerOrEqual(partitionData.stableVersion) {
 			//Apply all reads of that transaction
 			for _, readArgs := range readSlices {
 				applyReadAndReply(readArgs, partitionData)
