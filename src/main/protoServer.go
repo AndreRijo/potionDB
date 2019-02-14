@@ -29,17 +29,6 @@ var (
 
 func main() {
 
-	//TODO: Remove this client parts. It's temporary, just until I decide to separate the client from the server in different projects.
-	/*
-		fmt.Println("What to run? Client or server?")
-		toRun, _ := in.ReadString('\n')
-		fmt.Println(toRun)
-		if strings.ToLower(strings.TrimSpace(toRun)) == "client" {
-			fmt.Println("Starting client")
-			ClientMain()
-			return
-		}
-	*/
 	fmt.Println("Port?")
 	portString, _ := in.ReadString('\n')
 	rand.Seed(time.Now().UTC().UnixNano())
@@ -87,24 +76,35 @@ func processConnection(conn net.Conn) {
 			return
 		}
 		tools.CheckErr(tools.NETWORK_READ_ERROR, err)
-
 		switch protoType {
 		case antidote.ReadObjs:
-			notSupported(protobuf)
+			fmt.Println("Received proto of type ApbReadObjects")
+			replyType = antidote.ReadObjsReply
+			reply = handleReadObjects(protobuf.(*antidote.ApbReadObjects), tmChan, clientId)
 		case antidote.UpdateObjs:
-			notSupported(protobuf)
+			fmt.Println("Received proto of type ApbUpdateObjects")
+			//TODO: Check what antidote replies on this case
+			replyType = antidote.ErrorReply
+			reply = handleUpdateObjects(protobuf.(*antidote.ApbUpdateObjects), tmChan, clientId)
 		case antidote.StartTrans:
-			notSupported(protobuf)
+			fmt.Println("Received proto of type ApbStartTransaction")
+			replyType = antidote.StartTransReply
+			reply = handleStartTxn(protobuf.(*antidote.ApbStartTransaction), tmChan, clientId)
 		case antidote.AbortTrans:
-			notSupported(protobuf)
+			fmt.Println("Received proto of type ApbAbortTransaction")
+			//TODO: Check what antidote replies on this case
+			replyType = antidote.CommitTransReply
+			reply = handleAbortTxn(protobuf.(*antidote.ApbAbortTransaction), tmChan, clientId)
 		case antidote.CommitTrans:
-			notSupported(protobuf)
+			fmt.Println("Received proto of type ApbCommitTransaction")
+			replyType = antidote.CommitTransReply
+			reply = handleCommitTxn(protobuf.(*antidote.ApbCommitTransaction), tmChan, clientId)
 		case antidote.StaticUpdateObjs:
-			fmt.Println("Received proto of type StaticUpdateObjs")
+			fmt.Println("Received proto of type ApbStaticUpdateObjects")
 			replyType = antidote.CommitTransReply
 			reply = handleStaticUpdateObjects(protobuf.(*antidote.ApbStaticUpdateObjects), tmChan, clientId)
 		case antidote.StaticReadObjs:
-			fmt.Println("Received proto of type StaticReadObjs")
+			fmt.Println("Received proto of type ApbStaticReadObjects")
 			replyType = antidote.StaticReadObjsReply
 			reply = handleStaticReadObjects(protobuf.(*antidote.ApbStaticReadObjects), tmChan, clientId)
 		default:
@@ -114,10 +114,6 @@ func processConnection(conn net.Conn) {
 		fmt.Println("Sending reply proto")
 		antidote.SendProto(replyType, reply, conn)
 	}
-}
-
-func notSupported(protobuf proto.Message) {
-	fmt.Println("Received proto is recognized but not yet supported")
 }
 
 //TODO: Error cases in which it should return ApbErrorResp
@@ -139,27 +135,13 @@ func handleStaticReadObjects(proto *antidote.ApbStaticReadObjects,
 			Timestamp: clientClock,
 		},
 	}
-	//replies, ts := antidote.HandleStaticReadObjects(objs, clientClock)
 	reply := <-replyChan
 	close(replyChan)
 
-	//respProto = antidote.CreateStaticReadResp(replies, ts)
 	respProto = antidote.CreateStaticReadResp(reply.States, reply.Timestamp)
 	return
 }
 
-/*
-func protoObjectsToAntidoteObjects(protoObjs []*antidote.ApbBoundObject) (objs []antidote.ReadObjectParams) {
-	objs = make([]antidote.ReadObjectParams, len(protoObjs))
-
-	for i, currObj := range protoObjs {
-		objs[i] = antidote.ReadObjectParams{
-			KeyParams: antidote.CreateKeyParams(string(currObj.GetKey()), currObj.GetType(), string(currObj.GetBucket())),
-		}
-	}
-	return
-}
-*/
 
 func protoObjectsToAntidoteObjects(protoObjs []*antidote.ApbBoundObject) (objs []antidote.KeyParams) {
 
@@ -190,15 +172,43 @@ func handleStaticUpdateObjects(proto *antidote.ApbStaticUpdateObjects,
 			Timestamp: clientClock,
 		},
 	}
-	//ts, err := antidote.HandleStaticUpdateObjects(updates, clientClock)
 
 	reply := <-replyChan
 	//TODO: Actually not ignore error
 	ignore(reply.Err)
 
-	//respProto = antidote.CreateCommitOkResp(ts)
 	respProto = antidote.CreateCommitOkResp(reply.Timestamp)
 	return
+}
+
+func handleReadObjects(proto *antidote.ApbReadObjects,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *antidote.ApbReadObjectsResp) {
+	notSupported(proto)
+	return nil
+}
+
+func handleUpdateObjects(proto *antidote.ApbUpdateObjects,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *antidote.ApbErrorResp) {
+	notSupported(proto)
+	return nil
+}
+
+func handleStartTxn(proto *antidote.ApbStartTransaction,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *antidote.ApbStartTransactionResp) {
+	notSupported(proto)
+	return nil
+}
+
+func handleAbortTxn(proto *antidote.ApbAbortTransaction,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *antidote.ApbCommitResp) {
+	notSupported(proto)
+	return nil
+}
+
+func handleCommitTxn(proto *antidote.ApbCommitTransaction,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *antidote.ApbCommitResp) {
+	notSupported(proto)
+	return nil
 }
 
 //TODO: Maybe the two methods below should be moved to protoLib?
@@ -268,6 +278,10 @@ messageTypeToCode('ApbConnectToDCs')                -> 130;
 messageTypeToCode('ApbGetConnectionDescriptor')     -> 131;
 messageTypeToCode('ApbGetConnectionDescriptorResp') -> 132.
 */
+
+func notSupported(protobuf proto.Message) {
+	fmt.Println("Received proto is recognized but not yet supported")
+}
 
 //Temporary method. This is used to avoid compile errors on unused variables
 //This unused variables mark stuff that isn't being processed yet.

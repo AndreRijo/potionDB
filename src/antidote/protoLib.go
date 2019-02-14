@@ -121,19 +121,28 @@ func unmarshallProto(code byte, msgBuf []byte) (protobuf proto.Message) {
 	return
 }
 
-func CreateStartTransaction() (protoBuf *ApbStartTransaction) {
+//Note: timestamp can be nil.
+func CreateStartTransaction(timestamp []byte) (protoBuf *ApbStartTransaction) {
 	transProps := &ApbTxnProperties{
 		ReadWrite: proto.Uint32(0),
 		RedBlue:   proto.Uint32(0),
 	}
 	protoBuf = &ApbStartTransaction{
 		Properties: transProps,
+		Timestamp: timestamp,
 	}
 	return
 }
 
 func CreateCommitTransaction(transId []byte) (protoBuf *ApbCommitTransaction) {
 	protoBuf = &ApbCommitTransaction{
+		TransactionDescriptor: transId,
+	}
+	return
+}
+
+func CreateAbortTransaction(transId[] byte) (protoBuf *ApbAbortTransaction) {
+	protoBuf = &ApbAbortTransaction{
 		TransactionDescriptor: transId,
 	}
 	return
@@ -237,10 +246,10 @@ func CreateSetUpdate(opType ApbSetUpdate_SetOpType, elems []string) (protoBuf *A
 	return
 }
 
-//TODO: Use a struct different from the one in transactionManager
+//TODO: Use a struct different from the one in transactionManager. Also, support receiving transId
 func CreateStaticReadObjs(readParams []ReadObjectParams) (protobuf *ApbStaticReadObjects) {
 	protobuf = &ApbStaticReadObjects{
-		Transaction: CreateStartTransaction(),
+		Transaction: CreateStartTransaction(nil),
 		Objects:     createBoundObjectsArray(readParams),
 	}
 	return
@@ -308,7 +317,6 @@ func createSetReadResp(elems []crdt.Element) (protobuf *ApbReadObjectResp) {
 	return
 }
 
-//func CreateReadObjectsResp(readReplies []*ApbReadObjectResp) (protobuf *ApbReadObjectsResp) {
 func CreateReadObjectsResp(objectStates []crdt.State) (protobuf *ApbReadObjectsResp) {
 	readReplies := convertAntidoteStatesToProto(objectStates)
 	protobuf = &ApbReadObjectsResp{
@@ -318,10 +326,10 @@ func CreateReadObjectsResp(objectStates []crdt.State) (protobuf *ApbReadObjectsR
 	return
 }
 
-//TODO: Use a different struct from the one in transactionManager
+//TODO: Use a different struct from the one in transactionManager. Also, support receiving transId
 func CreateStaticUpdateObjs(updates []UpdateObjectParams) (protobuf *ApbStaticUpdateObjects) {
 	protobuf = &ApbStaticUpdateObjects{
-		Transaction: CreateStartTransaction(),
+		Transaction: CreateStartTransaction(nil),
 		Updates:     createUpdateOps(updates),
 	}
 	return
