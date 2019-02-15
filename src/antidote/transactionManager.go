@@ -146,27 +146,29 @@ func handleTMRequest(request TransactionManagerRequest) (shouldStop bool) {
 	return
 }
 
-//TODO: Maybe I didn't had to find a common timestamp and I should had just asked for the client's version...?
-//Obviously in that case it would still block if a partition doesn't yet have a high enough version.
+//TODO: Group reads. Also, send a "read operation" instead of just key params.
 func handleTMRead(request TransactionManagerRequest) {
 	readArgs := request.Args.(TMReadArgs)
 
-	smallestTS := findCommonTimestamp(readArgs.ObjsParams, request.Timestamp)
-	if smallestTS.IsLower(request.Timestamp) {
-		smallestTS = request.Timestamp
+	/*
+	tsToUse := findCommonTimestamp(readArgs.ObjsParams, request.Timestamp)
+	if tsToUse.IsLower(request.Timestamp) {
+		tsToUse = request.Timestamp
 	}
+	*/
+	tsToUse := request.Timestamp
 
 	var currReadChan chan crdt.State = nil
 	var currRequest MaterializerRequest
 	states := make([]crdt.State, len(readArgs.ObjsParams))
 
-	//Now, ask to read the version corresponding to timestamp smallestTS.
+	//Now, ask to read the client requested version.
 	for i, currRead := range readArgs.ObjsParams {
 		currReadChan = make(chan crdt.State)
 
 		currRequest = MaterializerRequest{
 			MatRequestArgs: MatReadArgs{
-				Timestamp: smallestTS,
+				Timestamp: tsToUse,
 				KeyParams: currRead,
 				ReplyChan: currReadChan,
 			},
@@ -179,7 +181,7 @@ func handleTMRead(request TransactionManagerRequest) {
 
 	readArgs.ReplyChan <- TMReadReply{
 		States:    states,
-		Timestamp: smallestTS,
+		Timestamp: tsToUse,
 	}
 
 	/*
@@ -244,7 +246,6 @@ func findCommonTimestamp(objsParams []KeyParams, clientTs clocksi.Timestamp) (ts
 			}
 		}
 	}
-
 	return smallestTS
 }
 
@@ -295,12 +296,15 @@ func handleTMWrite(request TransactionManagerRequest) {
 		}
 	}
 
-	//3rd step: send commit to ALL partitions
+	//3rd step: send commit to involved partitions
 	//TODO: Should I not assume that the 2nd phase of commit is fail-safe?
-	SendRequestToAllChannels(MaterializerRequest{MatRequestArgs: MatCommitArgs{
+	commitReq := MaterializerRequest{MatRequestArgs: MatCommitArgs{
 		TransactionId:   request.TransactionId,
 		CommitTimestamp: *maxTimestamp,
-	}})
+	}}
+	for _, partId := range involvedPartitions {
+		SendRequestToChannel(commitReq, partId)
+	}
 
 	//4th step: send ok to client
 	updateArgs.ReplyChan <- TMUpdateReply{
@@ -320,7 +324,7 @@ func handleTMWrite(request TransactionManagerRequest) {
 					- wait for proposed timestamp
 					- if proposed timestamp > highest proposed timestamp so far
 						highest timestamp = proposed timestamp
-			3rd step: send commit to ALL partitions
+			3rd step: send commit to involved partitions
 				- for each partition
 					- commit(highest timestamp)
 			4th step: send ok to client

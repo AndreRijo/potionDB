@@ -66,8 +66,9 @@ type MatRequestType byte
 type partitionData struct {
 	db                     map[uint64]crdt.CRDT                   //CRDT database of this partition
 	stableVersion          clocksi.Timestamp                      //latest commited timestamp
-	smallestPendingVersion clocksi.Timestamp                      //the oldest timestamp that wasn't yet commited but has already been prepared
-	highestVersionSeen     clocksi.Timestamp                      //Contains the highest timestamp seen (i.e., possibly not commited) so far
+	twoSmallestPendingTxn  [2]*TransactionId                       //Contains the two transactionIds that have been prepared with the smallest timestamps.
+																  //Idea: avoids the issue of the txn we're verying being the one with the lowest proposed timestamp (in this case, check the 2nd entry)
+	highestPendingTs       clocksi.Timestamp                      //Contains the highest timestamp that was prepared. Used to check if a read can be executed or not.
 	pendingOps             map[TransactionId][]UpdateObjectParams //pending transactions waiting for commit
 	suggestedTimestamps    map[TransactionId]clocksi.Timestamp    //map of transactionId -> timestamp suggested on first write request for transactionId
 	commitedWaitToApply    map[TransactionId]clocksi.Timestamp    //set of transactionId -> commit timestamp of commited transactions that couldn't be applied due to pending versions
@@ -182,8 +183,7 @@ func listenForTransactionManagerRequests(id uint64) {
 	partitionData := partitionData{
 		db:                     make(map[uint64]crdt.CRDT),
 		stableVersion:          clocksi.ClockSiTimestamp{}.NewTimestamp(),
-		smallestPendingVersion: nil,
-		highestVersionSeen:     clocksi.ClockSiTimestamp{}.NewTimestamp(),
+		highestPendingTs:       nil,
 		pendingOps:             make(map[TransactionId][]UpdateObjectParams),
 		suggestedTimestamps:    make(map[TransactionId]clocksi.Timestamp),
 		commitedWaitToApply:    make(map[TransactionId]clocksi.Timestamp),
@@ -216,7 +216,7 @@ func handleMatRequest(request MaterializerRequest, partitionData *partitionData)
 func handleMatRead(request MaterializerRequest, partitionData *partitionData) {
 	//TODO: Actually take in consideration the timestamp to read the correct version
 	readArgs := request.MatRequestArgs.(MatReadArgs)
-	if readArgs.Timestamp.IsLowerOrEqual(partitionData.stableVersion) {
+	if canRead(readArgs.Timestamp, partitionData) {
 		applyReadAndReply(&readArgs, partitionData)
 	} else {
 		//Queue the request.
@@ -226,6 +226,22 @@ func handleMatRead(request MaterializerRequest, partitionData *partitionData) {
 		}
 		partitionData.pendingReads[readArgs.Timestamp] = append(queue, &readArgs)
 	}
+}
+
+func canRead(readTs clocksi.Timestamp, partitionData *partitionData) (canRead bool) {
+	if readTs.IsLowerOrEqual(partitionData.stableVersion) {
+		canRead = true
+	} else if partitionData.twoSmallestPendingTxn[0] != nil && 
+		partitionData.suggestedTimestamps[*partitionData.twoSmallestPendingTxn[0]].IsLower(readTs) {
+		//There's a commit prepared with a timestamp lower than read's
+		canRead = false
+	} else {
+		localTs := clocksi.NewClockSiTimestamp().NextTimestamp()
+		if (localTs.IsHigherOrEqual(readTs)) {
+			canRead = true
+		}
+	}
+	return
 }
 
 func applyReadAndReply(readArgs *MatReadArgs, partitionData *partitionData) {
@@ -250,11 +266,18 @@ func handleStartTransaction(request MaterializerRequest, partitionData *partitio
 
 //Contains code shared between startTransaction and staticWrite
 func auxiliaryStartTransaction(transactionId TransactionId, partitionData *partitionData) {
-	newTimestamp := partitionData.highestVersionSeen.NextTimestamp()
-	partitionData.highestVersionSeen = newTimestamp
+	var newTimestamp clocksi.Timestamp
+	if (partitionData.highestPendingTs == nil) {
+		newTimestamp = partitionData.stableVersion.NextTimestamp()
+	} else {
+		newTimestamp = partitionData.highestPendingTs.NextTimestamp()
+	}
+	partitionData.highestPendingTs = newTimestamp
 	partitionData.suggestedTimestamps[transactionId] = newTimestamp
-	if partitionData.smallestPendingVersion == nil {
-		partitionData.smallestPendingVersion = newTimestamp
+	if partitionData.twoSmallestPendingTxn[0] == nil {
+		partitionData.twoSmallestPendingTxn[0] = &transactionId
+	} else if partitionData.twoSmallestPendingTxn[1] == nil {
+		partitionData.twoSmallestPendingTxn[1] = &transactionId
 	}
 }
 
@@ -318,18 +341,31 @@ func handleMatVersion(request MaterializerRequest, partitionData *partitionData)
 func handleMatCommit(request MaterializerRequest, partitionData *partitionData) {
 	commitArgs := request.MatRequestArgs.(MatCommitArgs)
 
-	//Check if we can apply the updates
-	compResult := commitArgs.CommitTimestamp.Compare(partitionData.smallestPendingVersion)
-	//TODO: Should this really have clocksi.ConcurrentTs?
-	//Apply Commit
-	if partitionData.smallestPendingVersion == nil || compResult == clocksi.EqualTs || compResult == clocksi.ConcurrentTs {
+	if canCommit(commitArgs, partitionData) {
 		//Safe to commit
 		applyCommit(&commitArgs.TransactionId, &commitArgs.CommitTimestamp, partitionData)
-	} else if compResult == clocksi.HigherTs {
+	} else {
 		//A transaction with smaller version is pending, so we need to queue this commit.
 		partitionData.commitedWaitToApply[commitArgs.TransactionId] = commitArgs.CommitTimestamp
 	}
-	//Note: It's possible for a partition to receive a smaller commit TS when the partition in case wasn't involved in that commit's operations
+}
+
+func canCommit(commitArgs MatCommitArgs, partitionData *partitionData) (canCommit bool) {
+	if (commitArgs.TransactionId != *partitionData.twoSmallestPendingTxn[0]) {
+		canCommit = commitArgs.CommitTimestamp.IsLower(partitionData.suggestedTimestamps[*partitionData.twoSmallestPendingTxn[0]]) 
+	} else {
+		//The txn we're verying is the one for which we proposed the lowest value. Check the 2nd lowest.
+		canCommit = partitionData.twoSmallestPendingTxn[1] == nil || commitArgs.CommitTimestamp.IsLower(partitionData.suggestedTimestamps[*partitionData.twoSmallestPendingTxn[1]])
+	}
+	return
+	/*
+	for txnId, ts := range partitionData.suggestedTimestamps {
+		if txnId != commitArgs.TransactionId && ts.IsLower(commitArgs.CommitTimestamp) {
+			return false
+		}
+	}
+	return true
+	*/
 }
 
 func applyCommit(transactionId *TransactionId, commitTimestamp *clocksi.Timestamp, partitionData *partitionData) {
@@ -342,11 +378,6 @@ func updatePartitionDataWithCommit(transactionId *TransactionId, commitTimestamp
 	deleteTransactionMetadata(transactionId, partitionData)
 	//Transactions are commited in order, so this commit timestamp is always more recent than the previous stableVersion
 	partitionData.stableVersion = *commitTimestamp
-	//But we might have already prepared a more recent timestamp
-	if (*commitTimestamp).IsHigherOrEqual(partitionData.highestVersionSeen) {
-		partitionData.highestVersionSeen = *commitTimestamp
-	}
-
 	handlePendingCommits(partitionData)
 }
 
@@ -357,26 +388,32 @@ func deleteTransactionMetadata(transactionId *TransactionId, partitionData *part
 }
 
 func handlePendingCommits(partitionData *partitionData) {
-	//First step: update smallestTimestamp
+	//First step: update twoSmallestPendingTxn
+	//Note that since commits are in order, the twoSmallestPendingTxn[0] was always the latest commit applied.
+	partitionData.twoSmallestPendingTxn[0] = partitionData.twoSmallestPendingTxn[1]
+	partitionData.twoSmallestPendingTxn[1] = nil
+	//No further commits pending
 	if len(partitionData.suggestedTimestamps) == 0 {
-		partitionData.smallestPendingVersion = nil
-		//Since commits are in order, the smallestPendingVersion was always this commit.
-	} else {
-		partitionData.smallestPendingVersion = partitionData.highestVersionSeen
-		var smallestVersionId TransactionId
+		partitionData.highestPendingTs = nil
+	} else if len(partitionData.suggestedTimestamps) > 1 {
+		//Search for the now second smallest pending timestamp
+		var smallestTs clocksi.Timestamp = partitionData.highestPendingTs
 		for transId, ts := range partitionData.suggestedTimestamps {
-			if ts.IsLowerOrEqual(partitionData.smallestPendingVersion) {
-				partitionData.smallestPendingVersion = ts
-				smallestVersionId = transId
+			if ts.IsLowerOrEqual(smallestTs) {
+				partitionData.twoSmallestPendingTxn[1] = &transId
+				smallestTs = ts
 			}
 		}
-		//Second step: check if the smallest version corresponds to a commited transaction that wasn't yet applied
-		nextCommitTs, isWaitingToApply := partitionData.commitedWaitToApply[smallestVersionId]
+	}
+	//Second step: check if the smallest version corresponds to a commited transaction that wasn't yet applied
+	if (partitionData.twoSmallestPendingTxn[0] != nil) {
+		nextCommitTs, isWaitingToApply := partitionData.commitedWaitToApply[*partitionData.twoSmallestPendingTxn[0]]
 		if isWaitingToApply {
 			//Third step: apply that transaction
-			applyCommit(&smallestVersionId, &nextCommitTs, partitionData)
+			applyCommit(partitionData.twoSmallestPendingTxn[0], &nextCommitTs, partitionData)
 		}
 	}
+	//Third step: apply pending reads
 	if len(partitionData.pendingReads) > 0 {
 		applyPendingReads(partitionData)
 	}

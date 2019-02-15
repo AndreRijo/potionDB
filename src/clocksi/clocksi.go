@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"strings"
+	"time"
 )
 
 type Timestamp interface {
@@ -41,7 +42,7 @@ type Timestamp interface {
 }
 
 type ClockSiTimestamp struct {
-	vectorClock *[]uint64
+	vectorClock *[]int64
 }
 
 type TsResult int
@@ -69,7 +70,7 @@ func NewClockSiTimestamp() (ts Timestamp) {
 }
 
 func (ts ClockSiTimestamp) NewTimestamp() (newTs Timestamp) {
-	vc := make([]uint64, 1)
+	vc := make([]int64, 1)
 	ts = ClockSiTimestamp{vectorClock: &vc}
 	(*ts.vectorClock)[0] = 0
 	return ts
@@ -77,9 +78,8 @@ func (ts ClockSiTimestamp) NewTimestamp() (newTs Timestamp) {
 
 func (ts ClockSiTimestamp) NextTimestamp() (newTs Timestamp) {
 	//TODO: Actually update the correct position
-	//Remember, in go assigning an array to a variable does a deep copy
-	newVc := make([]uint64, 1)
-	newVc[0] = (*ts.vectorClock)[0] + 1
+	newVc := make([]int64, 1)
+	newVc[0] = time.Now().UTC().UnixNano()
 	newTs = ClockSiTimestamp{vectorClock: &newVc}
 	return
 }
@@ -226,7 +226,7 @@ func (ts ClockSiTimestamp) IsConcurrent(otherTs Timestamp) (compResult bool) {
 func (ts ClockSiTimestamp) ToBytes() (bytes []byte) {
 	bytes = make([]byte, len(*ts.vectorClock)*entrySize)
 	for i, vcEntry := range *ts.vectorClock {
-		binary.LittleEndian.PutUint64(bytes[i*entrySize:(i+1)*entrySize], vcEntry)
+		binary.LittleEndian.PutUint64(bytes[i*entrySize:(i+1)*entrySize], uint64(vcEntry))
 	}
 	return
 }
@@ -234,16 +234,16 @@ func (ts ClockSiTimestamp) ToBytes() (bytes []byte) {
 func (ts ClockSiTimestamp) FromBytes(bytes []byte) (newTs Timestamp) {
 	//Initial/default timestamp
 	if bytes == nil || len(bytes) == 0 {
-		newVC := make([]uint64, 1)
+		newVC := make([]int64, 1)
 		newClockSi := &ClockSiTimestamp{vectorClock: &newVC}
 		//Should be unecessary.
 		(*newClockSi.vectorClock)[0] = 0
 		newTs = *newClockSi
 	} else {
-		newVC := make([]uint64, len(bytes)/8)
+		newVC := make([]int64, len(bytes)/8)
 		newClockSi := &ClockSiTimestamp{vectorClock: &newVC}
 		for i := 0; i < len(newVC); i++ {
-			newVC[i] = binary.LittleEndian.Uint64(bytes[i*entrySize : (i+1)*entrySize])
+			newVC[i] = int64(binary.LittleEndian.Uint64(bytes[i*entrySize : (i+1)*entrySize]))
 		}
 		newTs = *newClockSi
 	}

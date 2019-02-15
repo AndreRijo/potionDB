@@ -206,8 +206,8 @@ func TestWrites3(t *testing.T) {
 }
 
 /*
-Goal: to test if multiple writes and reads to the same key finish succesfully with the expected results. This includes writing with old clocks and reading with "future" clocks
-Success: if every operation commits and final read returns all values written. The second to last read must only finish after the last write.
+Goal: to test if multiple writes and reads to the same key finish succesfully with the expected results. This includes writing with old clocks and reading with clocks higher than the latest's commit
+Success: if every operation commits and final read returns all values written.
 1st: write in [0], with [0]
 	- writes…
 	- commit
@@ -273,6 +273,8 @@ func TestWritesAndReads(t *testing.T) {
 
 	go handleTMRead(firstReadReq)
 
+	//Reads for timestamps more recent than latest' commit no longer are supposed to block, unless there's a commit pending.
+	/*
 	//This read is supposed to timeout, as we asked for a timestamp that doesn't yet exist.
 	select {
 	case <-firstReadChan:
@@ -280,6 +282,15 @@ func TestWritesAndReads(t *testing.T) {
 		return
 	case <-time.After(2 * time.Second):
 		t.Log("First read timeout, as expected.")
+	}
+	*/
+
+	firstReadReply := <-firstReadChan
+	firstReadWrites := []UpdateObjectParams{firstWriteParams[0], secondWriteParams[0], thirdWriteParams[0]}
+	if !checkWriteReadSetMatch(firstReadReply.States[0].(crdt.SetAWState), firstReadWrites) {
+		t.Error("First read of key doesn't match")
+		t.Error("Received: ", firstReadReply.States[0].(crdt.SetAWState).Elems)
+		t.Error("Expected: ", firstReadWrites)
 	}
 
 	fourthWriteParams := createRandomSetAdd(firstKey)
@@ -297,19 +308,11 @@ func TestWritesAndReads(t *testing.T) {
 	go handleTMRead(secondReadReq)
 	secondReadReply := <-secondReadChan
 
-	//Check that the first read now returned
-	firstReadReply := <-firstReadChan
-
-	firstKeyWrites := []UpdateObjectParams{firstWriteParams[0], secondWriteParams[0], thirdWriteParams[0], fourthWriteParams[0]}
-	if !checkWriteReadSetMatch(firstReadReply.States[0].(crdt.SetAWState), firstKeyWrites) {
-		t.Error("First read of key doesn't match")
-		t.Error("Received: ", firstReadReply.States[0].(crdt.SetAWState).Elems)
-		t.Error("Expected: ", firstKeyWrites)
-	}
-	if !checkWriteReadSetMatch(secondReadReply.States[0].(crdt.SetAWState), firstKeyWrites) {
+	secondReadWrites := []UpdateObjectParams{firstWriteParams[0], secondWriteParams[0], thirdWriteParams[0], fourthWriteParams[0]}
+	if !checkWriteReadSetMatch(secondReadReply.States[0].(crdt.SetAWState), secondReadWrites) {
 		t.Error("Second read of key doesn't match")
 		t.Error("Received: ", secondReadReply.States[0].(crdt.SetAWState).Elems)
-		t.Error("Expected: ", firstKeyWrites)
+		t.Error("Expected: ", secondReadWrites)
 	}
 }
 
