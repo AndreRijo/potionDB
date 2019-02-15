@@ -436,7 +436,7 @@ func applyUpdates(updates []UpdateObjectParams, partitionData *partitionData) {
 
 func applyPendingReads(partitionData *partitionData) {
 	for ts, readSlices := range partitionData.pendingReads {
-		if ts.IsLowerOrEqual(partitionData.stableVersion) {
+		if canRead(ts, partitionData) {
 			//Apply all reads of that transaction
 			for _, readArgs := range readSlices {
 				applyReadAndReply(readArgs, partitionData)
