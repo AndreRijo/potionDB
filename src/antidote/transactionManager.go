@@ -46,7 +46,27 @@ type TMUpdateArgs struct {
 	ReplyChan    chan TMUpdateReply
 }
 
+type TMStaticUpdateArgs struct {
+	TMUpdateArgs
+}
+
+type TMStaticReadArgs struct {
+	TMReadArgs
+}
+
 type TMConnLostArgs struct {
+}
+
+type TMStartTxnArgs struct {
+	ReplyChan chan TMStartTxnReply
+}
+
+type TMCommitTxnArgs struct {
+	ReplyChan chan TMCommitTxnReply
+}
+
+type TMAbortTxnArgs struct {
+	
 }
 
 type TMReadReply struct {
@@ -54,9 +74,27 @@ type TMReadReply struct {
 	Timestamp clocksi.Timestamp
 }
 
+/*
 type TMUpdateReply struct {
 	Timestamp clocksi.Timestamp
 	Err       error
+}
+*/
+type TMUpdateReply struct {
+	TMTimestampErrorPairReply
+}
+
+type TMTimestampErrorPairReply struct {
+	Timestamp clocksi.Timestamp
+	Err       error
+}
+
+type TMStartTxnReply struct {
+	Timestamp clocksi.Timestamp
+}
+
+type TMCommitTxnReply struct {
+	TMTimestampErrorPairReply
 }
 
 type TMRequestType int
@@ -71,8 +109,13 @@ type TransactionId struct {
 /////*****************CONSTANTS AND VARIABLES***********************/////
 
 const (
-	readTMRequest   TMRequestType = 0
-	writeTMRequest  TMRequestType = 1
+	readStaticTMRequest   TMRequestType = 0
+	updateStaticTMRequest  TMRequestType = 1
+	readTMRequest TMRequestType = 2
+	updateTMRequest TMRequestType = 3
+	startTxnTMRequest TMRequestType = 4
+	commitTxnTMRequest TMRequestType = 5
+	abortTxnTMRequest TMRequestType = 6
 	lostConnRequest TMRequestType = 255
 )
 
@@ -84,19 +127,36 @@ var (
 
 /////*****************TYPE METHODS***********************/////
 
+func (args TMStaticReadArgs) getRequestType() (requestType TMRequestType) {
+	return readStaticTMRequest
+}
+
+func (args TMStaticUpdateArgs) getRequestType() (requestType TMRequestType) {
+	return updateStaticTMRequest
+}
+
 func (args TMReadArgs) getRequestType() (requestType TMRequestType) {
-	requestType = readTMRequest
-	return
+	return readTMRequest
 }
 
 func (args TMUpdateArgs) getRequestType() (requestType TMRequestType) {
-	requestType = writeTMRequest
-	return
+	return updateTMRequest
 }
 
 func (args TMConnLostArgs) getRequestType() (requestType TMRequestType) {
-	requestType = lostConnRequest
-	return
+	return lostConnRequest
+}
+
+func (args TMStartTxnArgs) getRequestType() (requestType TMRequestType) {
+	return startTxnTMRequest
+}
+
+func (args TMCommitTxnArgs) getRequestType() (requestType TMRequestType) {
+	return commitTxnTMRequest
+}
+
+func (args TMAbortTxnArgs) getRequestType() (requestType TMRequestType) {
+	return abortTxnTMRequest
 }
 
 /////*****************TRANSACTION MANAGER CODE***********************/////
@@ -135,10 +195,20 @@ func handleTMRequest(request TransactionManagerRequest) (shouldStop bool) {
 	shouldStop = false
 
 	switch request.Args.getRequestType() {
+	case readStaticTMRequest:
+		handleStaticTMRead(request)
+	case updateStaticTMRequest:
+		handleStaticTMUpdate(request)
 	case readTMRequest:
 		handleTMRead(request)
-	case writeTMRequest:
-		handleTMWrite(request)
+	case updateTMRequest:
+		handleTMUpdate(request)
+	case startTxnTMRequest:
+		handleTMStartTxn(request)
+	case commitTxnTMRequest:
+		handleTMCommit(request)
+	case abortTxnTMRequest:
+		handleTMAbort(request)
 	case lostConnRequest:
 		shouldStop = true
 	}
@@ -147,7 +217,7 @@ func handleTMRequest(request TransactionManagerRequest) (shouldStop bool) {
 }
 
 //TODO: Group reads. Also, send a "read operation" instead of just key params.
-func handleTMRead(request TransactionManagerRequest) {
+func handleStaticTMRead(request TransactionManagerRequest) {
 	readArgs := request.Args.(TMReadArgs)
 
 	/*
@@ -210,48 +280,9 @@ func handleTMRead(request TransactionManagerRequest) {
 
 }
 
-//TODO: Possibly cache the hashing results and return them? That would allow to include them in the requests and paralelize the read requests
-func findCommonTimestamp(objsParams []KeyParams, clientTs clocksi.Timestamp) (ts clocksi.Timestamp) {
-	verifiedPartitions := make([]bool, nGoRoutines)
-	var nVerified uint64 = 0
-	readChannels := make([]chan crdt.State, nGoRoutines)
-	var smallestTS clocksi.Timestamp = nil
-
-	//Variables local to the first for. To avoid unecessary redeclarations
-	var currChanKey uint64
-	for _, currRead := range objsParams {
-		currChanKey = GetChannelKey(currRead)
-		//Still haven't verified this transaction
-		if !verifiedPartitions[currChanKey] {
-
-			nVerified++
-			replyTSChan := make(chan clocksi.Timestamp)
-			readChannels[currChanKey] = make(chan crdt.State)
-			currTSRequest := MaterializerRequest{
-				MatRequestArgs: MatVersionArgs{
-					ReplyChan: replyTSChan,
-					ChannelId: currChanKey,
-				},
-			}
-			SendRequestToChannel(currTSRequest, currChanKey)
-			currTS := <-replyTSChan
-			close(replyTSChan)
-
-			if smallestTS == nil || currTS.IsLowerOrEqual(smallestTS) {
-				smallestTS = currTS
-			}
-			//Already verified all partitions, no need to continue
-			if nVerified == nGoRoutines {
-				break
-			}
-		}
-	}
-	return smallestTS
-}
-
 //TODO: Separate in parts?
 //Note: For now this corresponds to static writes.
-func handleTMWrite(request TransactionManagerRequest) {
+func handleStaticTMUpdate(request TransactionManagerRequest) {
 	updateArgs := request.Args.(TMUpdateArgs)
 	//TODO: possibly group the two below arrays in just one map?
 	updatesPerPartition := make([]*MatStaticUpdateArgs, nGoRoutines)
@@ -329,6 +360,82 @@ func handleTMWrite(request TransactionManagerRequest) {
 					- commit(highest timestamp)
 			4th step: send ok to client
 	*/
+}
+
+func handleTMRead(request TransactionManagerRequest) {
+	readArgs := request.Args.(TMReadArgs)
+
+	ignore(readArgs)
+}
+
+func handleTMUpdate(request TransactionManagerRequest) {
+	updateArgs := request.Args.(TMUpdateArgs)
+
+	ignore(updateArgs)
+}
+
+func handleTMStartTxn(request TransactionManagerRequest) {
+	startTxnArgs := request.Args.(TMStartTxnArgs)
+
+	ignore(startTxnArgs)
+}
+
+func handleTMCommit(request TransactionManagerRequest) {
+	commitArgs := request.Args.(TMCommitTxnArgs)
+
+	ignore(commitArgs)
+}
+
+func handleTMAbort(request TransactionManagerRequest) {
+	abortArgs := request.Args.(TMAbortTxnArgs)
+
+	ignore(abortArgs)
+}
+
+//TODO: Possibly cache the hashing results and return them? That would allow to include them in the requests and paralelize the read requests
+func findCommonTimestamp(objsParams []KeyParams, clientTs clocksi.Timestamp) (ts clocksi.Timestamp) {
+	verifiedPartitions := make([]bool, nGoRoutines)
+	var nVerified uint64 = 0
+	readChannels := make([]chan crdt.State, nGoRoutines)
+	var smallestTS clocksi.Timestamp = nil
+
+	//Variables local to the first for. To avoid unecessary redeclarations
+	var currChanKey uint64
+	for _, currRead := range objsParams {
+		currChanKey = GetChannelKey(currRead)
+		//Still haven't verified this transaction
+		if !verifiedPartitions[currChanKey] {
+
+			nVerified++
+			replyTSChan := make(chan clocksi.Timestamp)
+			readChannels[currChanKey] = make(chan crdt.State)
+			currTSRequest := MaterializerRequest{
+				MatRequestArgs: MatVersionArgs{
+					ReplyChan: replyTSChan,
+					ChannelId: currChanKey,
+				},
+			}
+			SendRequestToChannel(currTSRequest, currChanKey)
+			currTS := <-replyTSChan
+			close(replyTSChan)
+
+			if smallestTS == nil || currTS.IsLowerOrEqual(smallestTS) {
+				smallestTS = currTS
+			}
+			//Already verified all partitions, no need to continue
+			if nVerified == nGoRoutines {
+				break
+			}
+		}
+	}
+	return smallestTS
+}
+
+
+//Temporary method. This is used to avoid compile errors on unused variables
+//This unused variables mark stuff that isn't being processed yet.
+func ignore(any interface{}) {
+
 }
 
 /***** OLD CODE FOR GOROUTINE WITHOUT TIMESTAMPS LOGIC VERSION *****/
