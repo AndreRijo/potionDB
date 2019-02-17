@@ -10,7 +10,7 @@ import (
 )
 
 /////*****************TYPE DEFINITIONS***********************/////
-
+//TODO: Extract requests types, replies and methods to another file
 //////////************Requests**************************//////////
 
 type MaterializerRequest struct {
@@ -20,6 +20,12 @@ type MaterializerRequest struct {
 type MatRequestArgs interface {
 	getRequestType() (requestType MatRequestType)
 	getChannel() (channelId uint64)
+}
+
+//Args for latest stable version request. This won't be necessary if we remove findCommonTimestamp from transactionManager
+type MatVersionArgs struct {
+	ChannelId uint64
+	ReplyChan chan clocksi.Timestamp
 }
 
 //Args for read request
@@ -36,16 +42,19 @@ type MatUpdateArgs struct {
 	ReplyChan chan BoolErrorPair
 }
 
+type MatStaticReadArgs struct {
+	MatReadArgs
+}
+
 type MatStaticUpdateArgs struct {
 	Updates []UpdateObjectParams
 	TransactionId
 	ReplyChan chan TimestampErrorPair
 }
 
-//Args for latest stable version request.
-type MatVersionArgs struct {
+type MatStartTransactionArgs struct {
 	ChannelId uint64
-	ReplyChan chan clocksi.Timestamp
+	TransactionId
 }
 
 type MatCommitArgs struct {
@@ -53,9 +62,11 @@ type MatCommitArgs struct {
 	CommitTimestamp clocksi.Timestamp
 }
 
-type MatStartTransactionArgs struct {
-	ChannelId uint64
-	TransactionId
+type MatAbortArgs struct {
+	TransactionId TransactionId
+}
+
+type MatPrepareArgs struct {
 	ReplyChan chan clocksi.Timestamp
 }
 
@@ -64,14 +75,14 @@ type MatRequestType byte
 //////////********************Other types************************//////////
 //Struct that represents local data to each goroutine/partition
 type partitionData struct {
-	db                     map[uint64]crdt.CRDT                   //CRDT database of this partition
-	stableVersion          clocksi.Timestamp                      //latest commited timestamp
-	twoSmallestPendingTxn  [2]*TransactionId                       //Contains the two transactionIds that have been prepared with the smallest timestamps.
-																  //Idea: avoids the issue of the txn we're verying being the one with the lowest proposed timestamp (in this case, check the 2nd entry)
-	highestPendingTs       clocksi.Timestamp                      //Contains the highest timestamp that was prepared. Used to check if a read can be executed or not.
-	pendingOps             map[TransactionId][]UpdateObjectParams //pending transactions waiting for commit
-	suggestedTimestamps    map[TransactionId]clocksi.Timestamp    //map of transactionId -> timestamp suggested on first write request for transactionId
-	commitedWaitToApply    map[TransactionId]clocksi.Timestamp    //set of transactionId -> commit timestamp of commited transactions that couldn't be applied due to pending versions
+	db                    map[uint64]crdt.CRDT //CRDT database of this partition
+	stableVersion         clocksi.Timestamp    //latest commited timestamp
+	twoSmallestPendingTxn [2]*TransactionId    //Contains the two transactionIds that have been prepared with the smallest timestamps.
+	//Idea: avoids the issue of the txn we're verying being the one with the lowest proposed timestamp (in this case, check the 2nd entry)
+	highestPendingTs    clocksi.Timestamp                      //Contains the highest timestamp that was prepared. Used to check if a read can be executed or not.
+	pendingOps          map[TransactionId][]UpdateObjectParams //pending transactions waiting for commit
+	suggestedTimestamps map[TransactionId]clocksi.Timestamp    //map of transactionId -> timestamp suggested on first write request for transactionId
+	commitedWaitToApply map[TransactionId]clocksi.Timestamp    //set of transactionId -> commit timestamp of commited transactions that couldn't be applied due to pending versions
 	//TODO: Choose a better option to hold pending reads? Checking the whole map takes a long time...
 	pendingReads map[clocksi.Timestamp][]*MatReadArgs //pending reads that require a more recent version than stableVersion
 }
@@ -96,12 +107,16 @@ type UnknownCrdtTypeError struct {
 
 const (
 	//Types of requests
-	readMatRequest             MatRequestType = 0
+	readStaticMatRequest       MatRequestType = 0
 	writeStaticMatRequest      MatRequestType = 1
-	writeMatRequest            MatRequestType = 2
-	versionMatRequest          MatRequestType = 3
+	readMatRequest             MatRequestType = 2
+	writeMatRequest            MatRequestType = 3
 	startTransactionMatRequest MatRequestType = 4
 	commitMatRequest           MatRequestType = 5
+	abortMatRequest            MatRequestType = 6
+	prepareMatRequest          MatRequestType = 7
+	versionMatRequest          MatRequestType = 255
+
 	//TODO: Maybe each bucket should correspond to one goroutine...?
 	//Number of goroutines in the pool to access the database. Each goroutine has a (automatically assigned) range of keys that it can access.
 	nGoRoutines   uint64 = 8
@@ -118,10 +133,11 @@ var (
 
 /////*****************TYPE METHODS***********************/////
 
-func (args MatReadArgs) getRequestType() (requestType MatRequestType) {
-	return readMatRequest
+func (args MatStaticReadArgs) getRequestType() (requestType MatRequestType) {
+	return readStaticMatRequest
 }
-func (args MatReadArgs) getChannel() (channelId uint64) {
+
+func (args MatStaticReadArgs) getChannel() (channelId uint64) {
 	return GetChannelKey(args.KeyParams)
 }
 
@@ -130,6 +146,13 @@ func (args MatStaticUpdateArgs) getRequestType() (requestType MatRequestType) {
 }
 func (args MatStaticUpdateArgs) getChannel() (channelId uint64) {
 	return GetChannelKey(args.Updates[0].KeyParams)
+}
+
+func (args MatReadArgs) getRequestType() (requestType MatRequestType) {
+	return readMatRequest
+}
+func (args MatReadArgs) getChannel() (channelId uint64) {
+	return GetChannelKey(args.KeyParams)
 }
 
 func (args MatUpdateArgs) getRequestType() (requestType MatRequestType) {
@@ -158,7 +181,23 @@ func (args MatCommitArgs) getRequestType() (requestType MatRequestType) {
 }
 
 func (args MatCommitArgs) getChannel() (channelId uint64) {
-	return 0 //Commits are supposed to be sent to all partitions
+	return 0 //When sending the commit the TM already knows the channel to send the request
+}
+
+func (args MatAbortArgs) getRequestType() (requestType MatRequestType) {
+	return abortMatRequest
+}
+
+func (args MatAbortArgs) getChannel() (channelId uint64) {
+	return 0 //When sending an abort the TM already knows the channel to send the request
+}
+
+func (args MatPrepareArgs) getRequestType() (requestType MatRequestType) {
+	return prepareMatRequest
+}
+
+func (args MatPrepareArgs) getChannel() (channelId uint64) {
+	return 0 //When sending a prepare the TM already knows the channel to send the request
 }
 
 func (err UnknownCrdtTypeError) Error() (errString string) {
@@ -181,13 +220,13 @@ func listenForTransactionManagerRequests(id uint64) {
 	//Where keyRangeSize = math.MaxUint64 / number of goroutines
 
 	partitionData := partitionData{
-		db:                     make(map[uint64]crdt.CRDT),
-		stableVersion:          clocksi.ClockSiTimestamp{}.NewTimestamp(),
-		highestPendingTs:       nil,
-		pendingOps:             make(map[TransactionId][]UpdateObjectParams),
-		suggestedTimestamps:    make(map[TransactionId]clocksi.Timestamp),
-		commitedWaitToApply:    make(map[TransactionId]clocksi.Timestamp),
-		pendingReads:           make(map[clocksi.Timestamp][]*MatReadArgs),
+		db:                  make(map[uint64]crdt.CRDT),
+		stableVersion:       clocksi.ClockSiTimestamp{}.NewTimestamp(),
+		highestPendingTs:    nil,
+		pendingOps:          make(map[TransactionId][]UpdateObjectParams),
+		suggestedTimestamps: make(map[TransactionId]clocksi.Timestamp),
+		commitedWaitToApply: make(map[TransactionId]clocksi.Timestamp),
+		pendingReads:        make(map[clocksi.Timestamp][]*MatReadArgs),
 	}
 	//Listens to the channel and processes requests
 	channel := make(chan MaterializerRequest)
@@ -231,13 +270,13 @@ func handleMatRead(request MaterializerRequest, partitionData *partitionData) {
 func canRead(readTs clocksi.Timestamp, partitionData *partitionData) (canRead bool) {
 	if readTs.IsLowerOrEqual(partitionData.stableVersion) {
 		canRead = true
-	} else if partitionData.twoSmallestPendingTxn[0] != nil && 
+	} else if partitionData.twoSmallestPendingTxn[0] != nil &&
 		partitionData.suggestedTimestamps[*partitionData.twoSmallestPendingTxn[0]].IsLower(readTs) {
 		//There's a commit prepared with a timestamp lower than read's
 		canRead = false
 	} else {
 		localTs := clocksi.NewClockSiTimestamp().NextTimestamp()
-		if (localTs.IsHigherOrEqual(readTs)) {
+		if localTs.IsHigherOrEqual(readTs) {
 			canRead = true
 		}
 	}
@@ -267,7 +306,7 @@ func handleStartTransaction(request MaterializerRequest, partitionData *partitio
 //Contains code shared between startTransaction and staticWrite
 func auxiliaryStartTransaction(transactionId TransactionId, partitionData *partitionData) {
 	var newTimestamp clocksi.Timestamp
-	if (partitionData.highestPendingTs == nil) {
+	if partitionData.highestPendingTs == nil {
 		newTimestamp = partitionData.stableVersion.NextTimestamp()
 	} else {
 		newTimestamp = partitionData.highestPendingTs.NextTimestamp()
@@ -351,20 +390,20 @@ func handleMatCommit(request MaterializerRequest, partitionData *partitionData) 
 }
 
 func canCommit(commitArgs MatCommitArgs, partitionData *partitionData) (canCommit bool) {
-	if (commitArgs.TransactionId != *partitionData.twoSmallestPendingTxn[0]) {
-		canCommit = commitArgs.CommitTimestamp.IsLower(partitionData.suggestedTimestamps[*partitionData.twoSmallestPendingTxn[0]]) 
+	if commitArgs.TransactionId != *partitionData.twoSmallestPendingTxn[0] {
+		canCommit = commitArgs.CommitTimestamp.IsLower(partitionData.suggestedTimestamps[*partitionData.twoSmallestPendingTxn[0]])
 	} else {
 		//The txn we're verying is the one for which we proposed the lowest value. Check the 2nd lowest.
 		canCommit = partitionData.twoSmallestPendingTxn[1] == nil || commitArgs.CommitTimestamp.IsLower(partitionData.suggestedTimestamps[*partitionData.twoSmallestPendingTxn[1]])
 	}
 	return
 	/*
-	for txnId, ts := range partitionData.suggestedTimestamps {
-		if txnId != commitArgs.TransactionId && ts.IsLower(commitArgs.CommitTimestamp) {
-			return false
+		for txnId, ts := range partitionData.suggestedTimestamps {
+			if txnId != commitArgs.TransactionId && ts.IsLower(commitArgs.CommitTimestamp) {
+				return false
+			}
 		}
-	}
-	return true
+		return true
 	*/
 }
 
@@ -406,7 +445,7 @@ func handlePendingCommits(partitionData *partitionData) {
 		}
 	}
 	//Second step: check if the smallest version corresponds to a commited transaction that wasn't yet applied
-	if (partitionData.twoSmallestPendingTxn[0] != nil) {
+	if partitionData.twoSmallestPendingTxn[0] != nil {
 		nextCommitTs, isWaitingToApply := partitionData.commitedWaitToApply[*partitionData.twoSmallestPendingTxn[0]]
 		if isWaitingToApply {
 			//Third step: apply that transaction
@@ -474,6 +513,14 @@ when they know the appropriate channel. Avoids computing an extra hash.
 */
 func SendRequestToChannel(request MaterializerRequest, channelKey uint64) {
 	channels[channelKey] <- request
+}
+
+func SendRequestToChannels(request MaterializerRequest, channelsToSend ...chan MaterializerRequest) {
+	for _, channel := range channelsToSend {
+		//Copy the request to avoid concurrent access problems
+		newReq := request
+		channel <- newReq
+	}
 }
 
 func SendRequestToAllChannels(request MaterializerRequest) {

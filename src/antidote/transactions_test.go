@@ -10,8 +10,8 @@ import (
 )
 
 const (
-	initializeTime = 200 //Time to wait for the materializer to finish initializing. 
-						 //Increase this if tests are failing due to all goroutines going to sleep.
+	initializeTime = 200 //Time to wait for the materializer to finish initializing.
+	//Increase this if tests are failing due to all goroutines going to sleep.
 )
 
 //TODO: Lots of common code between different tests... Maybe find common code and extract to one or more methods?
@@ -275,14 +275,14 @@ func TestWritesAndReads(t *testing.T) {
 
 	//Reads for timestamps more recent than latest' commit no longer are supposed to block, unless there's a commit pending.
 	/*
-	//This read is supposed to timeout, as we asked for a timestamp that doesn't yet exist.
-	select {
-	case <-firstReadChan:
-		t.Error("Error - the first read didn't block, even though the timestamp used is not yet available.")
-		return
-	case <-time.After(2 * time.Second):
-		t.Log("First read timeout, as expected.")
-	}
+		//This read is supposed to timeout, as we asked for a timestamp that doesn't yet exist.
+		select {
+		case <-firstReadChan:
+			t.Error("Error - the first read didn't block, even though the timestamp used is not yet available.")
+			return
+		case <-time.After(2 * time.Second):
+			t.Log("First read timeout, as expected.")
+		}
 	*/
 
 	firstReadReply := <-firstReadChan
@@ -331,14 +331,14 @@ func createWrite(ts clocksi.Timestamp, updParams []UpdateObjectParams) (request 
 	return
 }
 
-func createRead(ts clocksi.Timestamp, keyParams []KeyParams) (request TransactionManagerRequest, replyChan chan TMReadReply) {
-	replyChan = make(chan TMReadReply)
+func createRead(ts clocksi.Timestamp, keyParams []KeyParams) (request TransactionManagerRequest, replyChan chan TMStaticReadReply) {
+	replyChan = make(chan TMStaticReadReply)
 	request = TransactionManagerRequest{
 		TransactionId: TransactionId{
 			ClientId:  ClientId(rand.Uint64()),
 			Timestamp: ts,
 		},
-		Args: TMReadArgs{
+		Args: TMStaticReadArgs{
 			ObjsParams: keyParams,
 			ReplyChan:  replyChan,
 		},

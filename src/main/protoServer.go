@@ -142,7 +142,6 @@ func handleStaticReadObjects(proto *antidote.ApbStaticReadObjects,
 	return
 }
 
-
 func protoObjectsToAntidoteObjects(protoObjs []*antidote.ApbBoundObject) (objs []antidote.KeyParams) {
 
 	objs = make([]antidote.KeyParams, len(protoObjs))
@@ -163,10 +162,10 @@ func handleStaticUpdateObjects(proto *antidote.ApbStaticUpdateObjects,
 	replyChan := make(chan antidote.TMUpdateReply)
 
 	tmChan <- antidote.TransactionManagerRequest{
-		Args: antidote.TMUpdateArgs{
+		Args: antidote.TMStaticUpdateArgs{TMUpdateArgs: antidote.TMUpdateArgs{
 			UpdateParams: updates,
 			ReplyChan:    replyChan,
-		},
+		}},
 		TransactionId: antidote.TransactionId{
 			ClientId:  clientId,
 			Timestamp: clientClock,
@@ -174,6 +173,7 @@ func handleStaticUpdateObjects(proto *antidote.ApbStaticUpdateObjects,
 	}
 
 	reply := <-replyChan
+	close(replyChan)
 	//TODO: Actually not ignore error
 	ignore(reply.Err)
 
@@ -186,46 +186,92 @@ func handleReadObjects(proto *antidote.ApbReadObjects,
 
 	//didn't test, but this one should definitelly return ApbReadObjectsResp. Success should also be always true unless there is a type error?
 
-	notSupported(proto)
-	return nil
+	clientClock := clocksi.ClockSiTimestamp{}.FromBytes(proto.GetTransactionDescriptor())
+
+	objs := protoObjectsToAntidoteObjects(proto.GetBoundobjects())
+	replyChan := make(chan antidote.TMReadReply)
+
+	tmChan <- antidote.TransactionManagerRequest{
+		Args: antidote.TMStaticReadArgs{TMReadArgs: antidote.TMReadArgs{
+			ObjsParams: objs,
+			ReplyChan:  replyChan,
+		}},
+		TransactionId: antidote.TransactionId{
+			ClientId:  clientId,
+			Timestamp: clientClock,
+		},
+	}
+	reply := <-replyChan
+	close(replyChan)
+
+	respProto = antidote.CreateReadObjectsResp(reply.States)
+	return
 }
 
 func handleUpdateObjects(proto *antidote.ApbUpdateObjects,
-	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *antidote.ApbErrorResp) {
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *antidote.ApbOperationResp) {
 	notSupported(proto)
 
-	//return type 111, success: true. I guess this always returns success unless there is a type error.
+	clientClock := clocksi.ClockSiTimestamp{}.FromBytes(proto.GetTransactionDescriptor())
 
-	return nil
+	updates := protoUpdateOpToAntidoteUpdate(proto.GetUpdates())
+	replyChan := make(chan antidote.TMUpdateReply)
+
+	tmChan <- antidote.TransactionManagerRequest{
+		Args: antidote.TMStaticUpdateArgs{TMUpdateArgs: antidote.TMUpdateArgs{
+			UpdateParams: updates,
+			ReplyChan:    replyChan,
+		}},
+		TransactionId: antidote.TransactionId{
+			ClientId:  clientId,
+			Timestamp: clientClock,
+		},
+	}
+
+	reply := <-replyChan
+	close(replyChan)
+	//TODO: Actually not ignore error
+	ignore(reply.Err)
+
+	respProto = antidote.CreateOperationResp()
+	return
+	//return type 111, success: true. I guess this always returns success unless there is a type error.
 }
 
 func handleStartTxn(proto *antidote.ApbStartTransaction,
 	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *antidote.ApbStartTransactionResp) {
 
-		clientClock := clocksi.ClockSiTimestamp{}.FromBytes(proto.GetTimestamp())
-		replyChan := make(chan antidote.TMStartTxnReply)
+	clientClock := clocksi.ClockSiTimestamp{}.FromBytes(proto.GetTimestamp())
+	replyChan := make(chan antidote.TMStartTxnReply)
 
-		tmChan <- antidote.TransactionManagerRequest{
-			Args: antidote.TMStartTxnArgs{
-				ReplyChan: replyChan,
-			},
-			TransactionId: antidote.TransactionId{
-				ClientId:  clientId,
-				Timestamp: clientClock,
-			},
-		}
-	
-		reply := <-replyChan
-	
-		//TODO: Consider properties?
-		respProto = antidote.CreateStartTxnResp(reply.Timestamp)
-	return 
+	tmChan <- antidote.TransactionManagerRequest{
+		Args: antidote.TMStartTxnArgs{
+			ReplyChan: replyChan,
+		},
+		TransactionId: antidote.TransactionId{
+			ClientId:  clientId,
+			Timestamp: clientClock,
+		},
+	}
+
+	reply := <-replyChan
+	close(replyChan)
+
+	//Examples of txn descriptors in antidote:
+	//{tx_id,1550320956784892,<0.4144.0>}.
+	//{tx_id,1550321073482453,<0.4143.0>}. (obtained on the op after the previous timestamp)
+	//{tx_id,1550321245370469,<0.4146.0>}. (obtained after deleting the logs)
+	//It's basically a timestamp plus some kind of counter?
+
+	//TODO: Consider properties?
+	respProto = antidote.CreateStartTransactionResp(reply.Timestamp)
+	return
 }
 
 func handleAbortTxn(proto *antidote.ApbAbortTransaction,
 	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *antidote.ApbCommitResp) {
 
-	clientClock := clocksi.ClockSiTimestamp{}.FromBytes(proto.GetTimestamp())
+	clientClock := clocksi.ClockSiTimestamp{}.FromBytes(proto.GetTransactionDescriptor())
 
 	tmChan <- antidote.TransactionManagerRequest{
 		Args: antidote.TMAbortTxnArgs{},
@@ -234,35 +280,36 @@ func handleAbortTxn(proto *antidote.ApbAbortTransaction,
 			Timestamp: clientClock,
 		},
 	}
-	
+
 	//TODO: Errors such as transaction does not exist, txn already commited or aborted, etc?
 	//TODO: Should I wait for a msg from TM?
-	
-	respProto = antidote.CreateStartTxnResp(clientClock)
+
+	respProto = antidote.CreateCommitOkResp(clientClock)
 	//Returns a clock and success set as true. I assume the clock is the same as the one returned in startTxn?
 	return
 }
 
 func handleCommitTxn(proto *antidote.ApbCommitTransaction,
 	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *antidote.ApbCommitResp) {
-	
-		clientClock := clocksi.ClockSiTimestamp{}.FromBytes(proto.GetTimestamp())
-		replyChan := make(chan antidote.TMStartTxnReply)
 
-		tmChan <- antidote.TransactionManagerRequest{
-			Args: antidote.TMCommitTxnArgs{
-				ReplyChan: replyChan,
-			},
-			TransactionId: antidote.TransactionId{
-				ClientId:  clientId,
-				Timestamp: clientClock,
-			},
-		}
-	
-		reply := <-replyChan
-	
-		//TODO: Consider properties?
-		respProto = antidote.CreateStartTxnResp(reply.Timestamp)
+	clientClock := clocksi.ClockSiTimestamp{}.FromBytes(proto.GetTransactionDescriptor())
+	replyChan := make(chan antidote.TMCommitTxnReply)
+
+	tmChan <- antidote.TransactionManagerRequest{
+		Args: antidote.TMCommitTxnArgs{
+			ReplyChan: replyChan,
+		},
+		TransactionId: antidote.TransactionId{
+			ClientId:  clientId,
+			Timestamp: clientClock,
+		},
+	}
+
+	reply := <-replyChan
+
+	//TODO: Errors?
+	respProto = antidote.CreateCommitOkResp(reply.Timestamp)
+	return
 }
 
 //TODO: Maybe the two methods below should be moved to protoLib?
