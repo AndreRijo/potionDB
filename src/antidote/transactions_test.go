@@ -35,7 +35,7 @@ func TestWrites1(t *testing.T) {
 	}
 
 	firstWriteParams := createRandomSetAdd(firstKey)
-	firstWriteReq, firstWriteChan := createWrite(clocksi.NewClockSiTimestamp(), firstWriteParams)
+	firstWriteReq, firstWriteChan := createWrite(TransactionId(rand.Uint64()), clocksi.NewClockSiTimestamp(), firstWriteParams)
 
 	go handleStaticTMUpdate(firstWriteReq)
 	firstWriteReply := <-firstWriteChan
@@ -45,7 +45,7 @@ func TestWrites1(t *testing.T) {
 	}
 
 	secondWriteParams := createRandomSetAdd(secondKey)
-	secondWriteReq, secondWriteChan := createWrite(firstWriteReply.Timestamp, secondWriteParams)
+	secondWriteReq, secondWriteChan := createWrite(firstWriteReply.TransactionId, firstWriteReply.Timestamp, secondWriteParams)
 
 	go handleStaticTMUpdate(secondWriteReq)
 	secondWriteReply := <-secondWriteChan
@@ -55,7 +55,7 @@ func TestWrites1(t *testing.T) {
 	}
 
 	readKeysParams := []KeyParams{firstKey, secondKey}
-	readReq, readChan := createRead(secondWriteReply.Timestamp, readKeysParams)
+	readReq, readChan := createRead(secondWriteReply.TransactionId, secondWriteReply.Timestamp, readKeysParams)
 
 	go handleStaticTMRead(readReq)
 	readReply := <-readChan
@@ -93,7 +93,7 @@ func TestWrites2(t *testing.T) {
 	}
 
 	firstWriteParams := createRandomSetAdd(firstKey)
-	firstWriteReq, firstWriteChan := createWrite(clocksi.NewClockSiTimestamp(), firstWriteParams)
+	firstWriteReq, firstWriteChan := createWrite(TransactionId(rand.Uint64()), clocksi.NewClockSiTimestamp(), firstWriteParams)
 
 	//fmt.Println("Sending 1st write")
 	go handleStaticTMUpdate(firstWriteReq)
@@ -105,7 +105,7 @@ func TestWrites2(t *testing.T) {
 	}
 
 	secondWriteParams := createRandomSetAdd(secondKey)
-	secondWriteReq, secondWriteChan := createWrite(firstWriteReply.Timestamp, secondWriteParams)
+	secondWriteReq, secondWriteChan := createWrite(firstWriteReply.TransactionId, firstWriteReply.Timestamp, secondWriteParams)
 
 	//fmt.Println("Sending 2nd write")
 	go handleStaticTMUpdate(secondWriteReq)
@@ -117,7 +117,7 @@ func TestWrites2(t *testing.T) {
 	}
 
 	thirdWriteParams := createRandomSetAdd(firstKey)
-	thirdWriteReq, thirdWriteChan := createWrite(secondWriteReply.Timestamp, thirdWriteParams)
+	thirdWriteReq, thirdWriteChan := createWrite(secondWriteReply.TransactionId, secondWriteReply.Timestamp, thirdWriteParams)
 
 	//fmt.Println("Sending 3rd write")
 	go handleStaticTMUpdate(thirdWriteReq)
@@ -129,7 +129,7 @@ func TestWrites2(t *testing.T) {
 	}
 
 	readKeysParams := []KeyParams{firstKey, secondKey}
-	readReq, readChan := createRead(thirdWriteReply.Timestamp, readKeysParams)
+	readReq, readChan := createRead(thirdWriteReply.TransactionId, thirdWriteReply.Timestamp, readKeysParams)
 
 	//fmt.Println("Sending read")
 	go handleStaticTMRead(readReq)
@@ -162,7 +162,7 @@ func TestWrites3(t *testing.T) {
 	firstKey := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), CRDTType_ORSET, "bkt")
 
 	firstWriteParams := createRandomSetAdd(firstKey)
-	firstWriteReq, firstWriteChan := createWrite(clocksi.NewClockSiTimestamp(), firstWriteParams)
+	firstWriteReq, firstWriteChan := createWrite(TransactionId(0), clocksi.NewClockSiTimestamp(), firstWriteParams)
 
 	go handleStaticTMUpdate(firstWriteReq)
 	firstWriteReply := <-firstWriteChan
@@ -172,7 +172,7 @@ func TestWrites3(t *testing.T) {
 	}
 
 	secondWriteParams := createRandomSetAdd(firstKey)
-	secondWriteReq, secondWriteChan := createWrite(firstWriteReply.Timestamp, secondWriteParams)
+	secondWriteReq, secondWriteChan := createWrite(firstWriteReply.TransactionId, firstWriteReply.Timestamp, secondWriteParams)
 
 	go handleStaticTMUpdate(secondWriteReq)
 	secondWriteReply := <-secondWriteChan
@@ -182,7 +182,7 @@ func TestWrites3(t *testing.T) {
 	}
 
 	thirdWriteParams := createRandomSetAdd(firstKey)
-	thirdWriteReq, thirdWriteChan := createWrite(clocksi.NewClockSiTimestamp(), thirdWriteParams)
+	thirdWriteReq, thirdWriteChan := createWrite(TransactionId(0), clocksi.NewClockSiTimestamp(), thirdWriteParams)
 
 	go handleStaticTMUpdate(thirdWriteReq)
 	thirdWriteReply := <-thirdWriteChan
@@ -192,7 +192,7 @@ func TestWrites3(t *testing.T) {
 	}
 
 	readKeysParams := []KeyParams{firstKey}
-	readReq, readChan := createRead(secondWriteReply.Timestamp, readKeysParams)
+	readReq, readChan := createRead(secondWriteReply.TransactionId, secondWriteReply.Timestamp, readKeysParams)
 
 	go handleStaticTMRead(readReq)
 	readReply := <-readChan
@@ -233,7 +233,7 @@ func TestWritesAndReads(t *testing.T) {
 	firstKey := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), CRDTType_ORSET, "bkt")
 
 	firstWriteParams := createRandomSetAdd(firstKey)
-	firstWriteReq, firstWriteChan := createWrite(clocksi.NewClockSiTimestamp(), firstWriteParams)
+	firstWriteReq, firstWriteChan := createWrite(TransactionId(rand.Uint64()), clocksi.NewClockSiTimestamp(), firstWriteParams)
 
 	go handleStaticTMUpdate(firstWriteReq)
 	firstWriteReply := <-firstWriteChan
@@ -243,7 +243,7 @@ func TestWritesAndReads(t *testing.T) {
 	}
 
 	secondWriteParams := createRandomSetAdd(firstKey)
-	secondWriteReq, secondWriteChan := createWrite(firstWriteReply.Timestamp.NextTimestamp(), secondWriteParams)
+	secondWriteReq, secondWriteChan := createWrite(firstWriteReply.TransactionId, firstWriteReply.Timestamp.NextTimestamp(), secondWriteParams)
 
 	go handleStaticTMUpdate(secondWriteReq)
 	secondWriteReply := <-secondWriteChan
@@ -253,7 +253,7 @@ func TestWritesAndReads(t *testing.T) {
 	}
 
 	thirdWriteParams := createRandomSetAdd(firstKey)
-	thirdWriteReq, thirdWriteChan := createWrite(firstWriteReply.Timestamp, thirdWriteParams)
+	thirdWriteReq, thirdWriteChan := createWrite(firstWriteReply.TransactionId, firstWriteReply.Timestamp, thirdWriteParams)
 
 	go handleStaticTMUpdate(thirdWriteReq)
 	thirdWriteReply := <-thirdWriteChan
@@ -269,7 +269,7 @@ func TestWritesAndReads(t *testing.T) {
 		futureTs = thirdWriteReply.Timestamp.NextTimestamp()
 	}
 	readKeysParams := []KeyParams{firstKey}
-	firstReadReq, firstReadChan := createRead(futureTs, readKeysParams)
+	firstReadReq, firstReadChan := createRead(TransactionId(0), futureTs, readKeysParams)
 
 	go handleStaticTMRead(firstReadReq)
 
@@ -294,7 +294,7 @@ func TestWritesAndReads(t *testing.T) {
 	}
 
 	fourthWriteParams := createRandomSetAdd(firstKey)
-	fourthWriteReq, fourthWriteChan := createWrite(thirdWriteReply.Timestamp, fourthWriteParams)
+	fourthWriteReq, fourthWriteChan := createWrite(thirdWriteReply.TransactionId, thirdWriteReply.Timestamp, fourthWriteParams)
 
 	go handleStaticTMUpdate(fourthWriteReq)
 	fourthWriteReply := <-fourthWriteChan
@@ -303,7 +303,7 @@ func TestWritesAndReads(t *testing.T) {
 		t.Error("Error on fourth write: ", fourthWriteReply.Err)
 	}
 
-	secondReadReq, secondReadChan := createRead(fourthWriteReply.Timestamp, readKeysParams)
+	secondReadReq, secondReadChan := createRead(fourthWriteReply.TransactionId, fourthWriteReply.Timestamp, readKeysParams)
 
 	go handleStaticTMRead(secondReadReq)
 	secondReadReply := <-secondReadChan
@@ -316,14 +316,12 @@ func TestWritesAndReads(t *testing.T) {
 	}
 }
 
-func createWrite(ts clocksi.Timestamp, updParams []UpdateObjectParams) (request TransactionManagerRequest, replyChan chan TMUpdateReply) {
-	replyChan = make(chan TMUpdateReply)
+func createWrite(txnId TransactionId, ts clocksi.Timestamp, updParams []UpdateObjectParams) (request TransactionManagerRequest, replyChan chan TMStaticUpdateReply) {
+	replyChan = make(chan TMStaticUpdateReply)
 	request = TransactionManagerRequest{
-		TransactionId: TransactionId{
-			ClientId:  ClientId(rand.Uint64()),
-			Timestamp: ts,
-		},
-		Args: TMUpdateArgs{
+		TransactionId: txnId,
+		Timestamp:     ts,
+		Args: TMStaticUpdateArgs{
 			UpdateParams: updParams,
 			ReplyChan:    replyChan,
 		},
@@ -331,13 +329,11 @@ func createWrite(ts clocksi.Timestamp, updParams []UpdateObjectParams) (request 
 	return
 }
 
-func createRead(ts clocksi.Timestamp, keyParams []KeyParams) (request TransactionManagerRequest, replyChan chan TMStaticReadReply) {
+func createRead(txnId TransactionId, ts clocksi.Timestamp, keyParams []KeyParams) (request TransactionManagerRequest, replyChan chan TMStaticReadReply) {
 	replyChan = make(chan TMStaticReadReply)
 	request = TransactionManagerRequest{
-		TransactionId: TransactionId{
-			ClientId:  ClientId(rand.Uint64()),
-			Timestamp: ts,
-		},
+		TransactionId: txnId,
+		Timestamp:     ts,
 		Args: TMStaticReadArgs{
 			ObjsParams: keyParams,
 			ReplyChan:  replyChan,

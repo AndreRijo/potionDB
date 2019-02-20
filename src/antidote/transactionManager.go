@@ -7,6 +7,7 @@ import (
 	"clocksi"
 	"crdt"
 	fmt "fmt"
+	"math/rand"
 )
 
 /////*****************TYPE DEFINITIONS***********************/////
@@ -29,8 +30,9 @@ type ReadObjectParams struct {
 }
 
 type TransactionManagerRequest struct {
-	TransactionId
-	Args TMRequestArgs
+	TransactionId //TODO: Remove this, as most requests don't need it (iirc, only staticWrite, commit and abort use it)
+	Timestamp     clocksi.Timestamp
+	Args          TMRequestArgs
 }
 
 type TMRequestArgs interface {
@@ -48,7 +50,8 @@ type TMUpdateArgs struct {
 }
 
 type TMStaticUpdateArgs struct {
-	TMUpdateArgs
+	UpdateParams []UpdateObjectParams
+	ReplyChan    chan TMStaticUpdateReply
 }
 
 type TMStaticReadArgs struct {
@@ -75,34 +78,40 @@ type TMStaticReadReply struct {
 	Timestamp clocksi.Timestamp
 }
 
-type TMUpdateReply struct {
-	TMTimestampErrorPairReply
-}
-
-//TODO: I need to refactor this error thing most prob...
-type TMTimestampErrorPairReply struct {
+type TMStaticUpdateReply struct {
+	TransactionId
 	Timestamp clocksi.Timestamp
 	Err       error
 }
 
+type TMUpdateReply struct {
+	Success bool
+	Err     error
+}
+
 type TMStartTxnReply struct {
+	TransactionId
 	Timestamp clocksi.Timestamp
 }
 
 type TMCommitReply struct {
-	TMTimestampErrorPairReply
+	Timestamp clocksi.Timestamp
+	Err       error
 }
 
 type TMRequestType int
 
 type ClientId uint64
 
+/*
 type TransactionId struct {
 	ClientId  ClientId
 	Timestamp clocksi.Timestamp
 }
+*/
+type TransactionId uint64
 
-type matReqSet map[chan MaterializerRequest]struct{}
+type partSet map[uint64]struct{}
 
 /////*****************CONSTANTS AND VARIABLES***********************/////
 
@@ -118,7 +127,8 @@ const (
 )
 
 var (
-	txnPartitions map[TransactionId]matReqSet //map of txnID -> partitions which had at least one update of that txn
+	//map of txnID -> partitions which had at least one update of that txn
+	txnPartitions map[TransactionId]partSet = make(map[TransactionId]partSet)
 )
 
 /////*****************TYPE METHODS***********************/////
@@ -155,13 +165,13 @@ func (args TMAbortArgs) getRequestType() (requestType TMRequestType) {
 	return abortTMRequest
 }
 
-func makeMatReqSet() (set matReqSet) {
-	set = matReqSet(make(map[chan MaterializerRequest]struct{}))
+func makePartSet() (set partSet) {
+	set = partSet(make(map[uint64]struct{}))
 	return
 }
 
-func (set matReqSet) add(channel chan MaterializerRequest) {
-	set[channel] = struct{}{}
+func (set partSet) add(partId uint64) {
+	set[partId] = struct{}{}
 }
 
 /////*****************TRANSACTION MANAGER CODE***********************/////
@@ -282,37 +292,40 @@ func handleStaticTMRead(request TransactionManagerRequest) {
 func handleStaticTMUpdate(request TransactionManagerRequest) {
 	updateArgs := request.Args.(TMStaticUpdateArgs)
 
+	newTxnId := TransactionId(rand.Uint64())
 	//1st step: discover involved partitions and group updates
 	updsPerPartition := groupWrites(updateArgs.UpdateParams)
 
 	replyChannels := make([]chan TimestampErrorPair, 0, len(updsPerPartition))
 	var currChan chan TimestampErrorPair
+	var currRequest MaterializerRequest
 	//2nd step: send update operations to each involved partition
 	for partId, partUpdates := range updsPerPartition {
 		if partUpdates != nil {
 			currChan = make(chan TimestampErrorPair)
-			matRequest := MaterializerRequest{
+			currRequest = MaterializerRequest{
 				MatRequestArgs: MatStaticUpdateArgs{
-					TransactionId: request.TransactionId,
+					TransactionId: newTxnId,
 					Updates:       partUpdates,
 					ReplyChan:     currChan,
 				},
 			}
 			replyChannels = append(replyChannels, currChan)
-			SendRequestToChannel(matRequest, uint64(partId))
+			SendRequestToChannel(currRequest, uint64(partId))
 		}
 	}
 
 	var maxTimestamp *clocksi.Timestamp = &clocksi.DummyTs
 	//Also 2nd step: wait for reply of each partition
+	//TODO: Update the current timestamp?
 	//TODO: Possibly paralelize? What if errors occour?
 	for _, channel := range replyChannels {
 		reply := <-channel
 		if reply.Timestamp == nil {
-			updateArgs.ReplyChan <- TMUpdateReply{TMTimestampErrorPairReply{
+			updateArgs.ReplyChan <- TMStaticUpdateReply{
 				Timestamp: nil,
 				Err:       reply.error,
-			}}
+			}
 			return
 		}
 		if reply.Timestamp.IsHigherOrEqual(*maxTimestamp) {
@@ -323,18 +336,21 @@ func handleStaticTMUpdate(request TransactionManagerRequest) {
 	//3rd step: send commit to involved partitions
 	//TODO: Should I not assume that the 2nd phase of commit is fail-safe?
 	commitReq := MaterializerRequest{MatRequestArgs: MatCommitArgs{
-		TransactionId:   request.TransactionId,
+		TransactionId:   newTxnId,
 		CommitTimestamp: *maxTimestamp,
 	}}
-	for partId := range updsPerPartition {
-		SendRequestToChannel(commitReq, uint64(partId))
+	for partId, partUpdates := range updsPerPartition {
+		if partUpdates != nil {
+			SendRequestToChannel(commitReq, uint64(partId))
+		}
 	}
 
 	//4th step: send ok to client
-	updateArgs.ReplyChan <- TMUpdateReply{TMTimestampErrorPairReply{
-		Timestamp: *maxTimestamp,
-		Err:       nil,
-	}}
+	updateArgs.ReplyChan <- TMStaticUpdateReply{
+		TransactionId: newTxnId,
+		Timestamp:     *maxTimestamp,
+		Err:           nil,
+	}
 
 	/*
 		Algorithm:
@@ -353,17 +369,6 @@ func handleStaticTMUpdate(request TransactionManagerRequest) {
 					- commit(highest timestamp)
 			4th step: send ok to client
 	*/
-}
-
-func askForCommitTs(txnId TransactionId) {
-	for partition := range txnPartitions {
-
-		//Send timestamp request; store answer channels in var
-	}
-	for reply := range replyChans {
-		//Read timestamp; save the biggest.
-	}
-	//TODO: Update the current timestamp?
 }
 
 //TODO: Group reads.
@@ -402,11 +407,14 @@ func handleTMUpdate(request TransactionManagerRequest) {
 
 	replyChannels := make([]chan BoolErrorPair, 0, len(updsPerPartition))
 	var currChan chan BoolErrorPair
+	var currRequest MaterializerRequest
+	var partId uint64
 
-	for partId, partUpdates := range updsPerPartition {
+	for id, partUpdates := range updsPerPartition {
 		if partUpdates != nil {
+			partId = uint64(id)
 			currChan = make(chan BoolErrorPair)
-			matRequest := MaterializerRequest{
+			currRequest = MaterializerRequest{
 				MatRequestArgs: MatUpdateArgs{
 					TransactionId: request.TransactionId,
 					Updates:       partUpdates,
@@ -414,7 +422,11 @@ func handleTMUpdate(request TransactionManagerRequest) {
 				},
 			}
 			replyChannels = append(replyChannels, currChan)
-			SendRequestToChannel(matRequest, uint64(partId))
+			//Mark this partition as one of the involved in this txnId
+			if _, hasPart := txnPartitions[request.TransactionId][partId]; !hasPart {
+				txnPartitions[request.TransactionId].add(partId)
+			}
+			SendRequestToChannel(currRequest, partId)
 		}
 	}
 
@@ -428,15 +440,16 @@ func handleTMUpdate(request TransactionManagerRequest) {
 	}
 
 	if errString == "" {
-		updateArgs.ReplyChan <- TMUpdateReply{TMBoolErrorPairReply{
+		updateArgs.ReplyChan <- TMUpdateReply{
 			Success: true,
 			Err:     nil,
-		}}
+		}
 	} else {
-		updateArgs.ReplyChan <- TMUpdateReply{TMBoolErrorPairReply{
+		//TODO: Send abort on error?
+		updateArgs.ReplyChan <- TMUpdateReply{
 			Success: false,
-			Err:     error(errString),
-		}}
+			Err:     fmt.Errorf(errString),
+		}
 	}
 
 }
@@ -484,27 +497,69 @@ func handleTMStartTxn(request TransactionManagerRequest) {
 
 	//TODO: Ensure that the new clock is higher than the one received from the client. Also, take in consideration txn properties?
 	newClock := clocksi.NewClockSiTimestamp().NextTimestamp()
-	newTxnId := TransactionId{
-		ClientId:  request.ClientId,
-		Timestamp: newClock,
-	}
-	txnPartitions[newTxnId] = makeMatReqSet()
+	var newTxnId TransactionId = TransactionId(rand.Uint64())
+	txnPartitions[newTxnId] = makePartSet()
 
-	startTxnArgs.ReplyChan <- TMStartTxnReply{Timestamp: newClock}
+	startTxnArgs.ReplyChan <- TMStartTxnReply{TransactionId: newTxnId, Timestamp: newClock}
 }
 
 func handleTMCommit(request TransactionManagerRequest) {
 	commitArgs := request.Args.(TMCommitArgs)
 
-	ignore(commitArgs)
-	//TODO: At the end, clean up txnPartitions.
+	//PREPARE
+	involvedPartitions := txnPartitions[request.TransactionId]
+	replyChannels := make([]chan clocksi.Timestamp, 0, len(involvedPartitions))
+	var currRequest MaterializerRequest
+	//TODO: Use bounded channels and send the same channel to every partition?
+	var currChan chan clocksi.Timestamp
+
+	fmt.Println("Number of involved partitions:", len(involvedPartitions))
+
+	//Send prepare to each partition involved
+	for partId, _ := range involvedPartitions {
+		currChan = make(chan clocksi.Timestamp)
+		currRequest = MaterializerRequest{MatRequestArgs: MatPrepareArgs{TransactionId: request.TransactionId, ReplyChan: currChan}}
+		replyChannels = append(replyChannels, currChan)
+		SendRequestToChannel(currRequest, partId)
+	}
+
+	//Collect proposed timestamps and accept the maximum one
+	//TODO: Update the current timestamp?
+	var maxTimestamp *clocksi.Timestamp = &clocksi.DummyTs
+	//TODO: Possibly paralelize?
+	for _, channel := range replyChannels {
+		replyTs := <-channel
+		if replyTs.IsHigherOrEqual(*maxTimestamp) {
+			maxTimestamp = &replyTs
+		}
+	}
+
+	//COMMIT
+	//Send commit to involved partitions
+	//TODO: Should I not assume that the 2nd phase of commit is fail-safe?
+	commitReq := MaterializerRequest{MatRequestArgs: MatCommitArgs{
+		TransactionId:   request.TransactionId,
+		CommitTimestamp: *maxTimestamp,
+	}}
+	for partId, _ := range involvedPartitions {
+		SendRequestToChannel(commitReq, uint64(partId))
+	}
+
+	delete(txnPartitions, request.TransactionId)
+
+	//Send ok to client
+	commitArgs.ReplyChan <- TMCommitReply{
+		Timestamp: *maxTimestamp,
+		Err:       nil,
+	}
 }
 
 func handleTMAbort(request TransactionManagerRequest) {
-	abortArgs := request.Args.(TMAbortArgs)
-
-	ignore(abortArgs)
-	//TODO: At the end, clean up txnPartitions.
+	abortReq := MaterializerRequest{MatRequestArgs: MatAbortArgs{TransactionId: request.TransactionId}}
+	for partId, _ := range txnPartitions[request.TransactionId] {
+		SendRequestToChannel(abortReq, uint64(partId))
+	}
+	delete(txnPartitions, request.TransactionId)
 }
 
 //TODO: Possibly cache the hashing results and return them? That would allow to include them in the requests and paralelize the read requests

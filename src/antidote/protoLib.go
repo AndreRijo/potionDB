@@ -5,6 +5,7 @@ import (
 	"crdt"
 	"encoding/binary"
 	"io"
+	"math/rand"
 	"tools"
 
 	proto "github.com/golang/protobuf/proto"
@@ -214,18 +215,18 @@ func createUpdateOps(updates []UpdateObjectParams) (protobufs []*ApbUpdateOp) {
 
 /*****REPLY/RESP PROTOS*****/
 
-func CreateStartTransactionResp(ts clocksi.Timestamp) (protobuf *ApbStartTransactionResp) {
+func CreateStartTransactionResp(txnId TransactionId, ts clocksi.Timestamp) (protobuf *ApbStartTransactionResp) {
 	protobuf = &ApbStartTransactionResp{
 		Success:               proto.Bool(true),
-		TransactionDescriptor: ts.ToBytes(),
+		TransactionDescriptor: createTxnDescriptorBytes(txnId, ts),
 	}
 	return
 }
 
-func CreateCommitOkResp(ts clocksi.Timestamp) (protobuf *ApbCommitResp) {
+func CreateCommitOkResp(txnId TransactionId, ts clocksi.Timestamp) (protobuf *ApbCommitResp) {
 	protobuf = &ApbCommitResp{
 		Success:    proto.Bool(true),
-		CommitTime: ts.ToBytes(),
+		CommitTime: createTxnDescriptorBytes(txnId, ts),
 	}
 	return
 }
@@ -240,10 +241,10 @@ func CreateCommitFailedResp(errorCode uint32) (protobuf *ApbCommitResp) {
 
 //TODO: Check if these replies are being given just like in antidote (i.e., same arguments in case of success/failure, etc.)
 //func CreateStaticReadResp(readReplies []*ApbReadObjectResp, ts clocksi.Timestamp) (protobuf *ApbStaticReadObjectsResp) {
-func CreateStaticReadResp(objectStates []crdt.State, ts clocksi.Timestamp) (protobuf *ApbStaticReadObjectsResp) {
+func CreateStaticReadResp(objectStates []crdt.State, txnId TransactionId, ts clocksi.Timestamp) (protobuf *ApbStaticReadObjectsResp) {
 	protobuf = &ApbStaticReadObjectsResp{
 		Objects:    CreateReadObjectsResp(objectStates),
-		Committime: CreateCommitOkResp(ts),
+		Committime: CreateCommitOkResp(txnId, ts),
 	}
 	return
 }
@@ -260,6 +261,24 @@ func CreateReadObjectsResp(objectStates []crdt.State) (protobuf *ApbReadObjectsR
 func CreateOperationResp() (protoBuf *ApbOperationResp) {
 	protoBuf = &ApbOperationResp{
 		Success: proto.Bool(true),
+	}
+	return
+}
+
+func createTxnDescriptorBytes(txnId TransactionId, ts clocksi.Timestamp) (bytes []byte) {
+	tsBytes := ts.ToBytes()
+	bytes = make([]byte, len(tsBytes)+8)
+	binary.BigEndian.PutUint64(bytes[0:8], uint64(txnId))
+	copy(bytes[8:], tsBytes)
+	return
+}
+
+func DecodeTxnDescriptor(bytes []byte) (txnId TransactionId, ts clocksi.Timestamp) {
+	if bytes == nil || len(bytes) == 0 {
+		//FromBytes of clocksi can handle nil arrays
+		txnId, ts = TransactionId(rand.Uint64()), clocksi.ClockSiTimestamp{}.FromBytes(bytes)
+	} else {
+		txnId, ts = TransactionId(binary.BigEndian.Uint64(bytes[0:8])), clocksi.ClockSiTimestamp{}.FromBytes(bytes[8:])
 	}
 	return
 }

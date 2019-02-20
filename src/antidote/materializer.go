@@ -52,11 +52,6 @@ type MatStaticUpdateArgs struct {
 	ReplyChan chan TimestampErrorPair
 }
 
-type MatStartTransactionArgs struct {
-	ChannelId uint64
-	TransactionId
-}
-
 type MatCommitArgs struct {
 	TransactionId   TransactionId
 	CommitTimestamp clocksi.Timestamp
@@ -67,7 +62,8 @@ type MatAbortArgs struct {
 }
 
 type MatPrepareArgs struct {
-	ReplyChan chan clocksi.Timestamp
+	TransactionId TransactionId
+	ReplyChan     chan clocksi.Timestamp
 }
 
 type MatRequestType byte
@@ -107,15 +103,14 @@ type UnknownCrdtTypeError struct {
 
 const (
 	//Types of requests
-	readStaticMatRequest       MatRequestType = 0
-	writeStaticMatRequest      MatRequestType = 1
-	readMatRequest             MatRequestType = 2
-	writeMatRequest            MatRequestType = 3
-	startTransactionMatRequest MatRequestType = 4
-	commitMatRequest           MatRequestType = 5
-	abortMatRequest            MatRequestType = 6
-	prepareMatRequest          MatRequestType = 7
-	versionMatRequest          MatRequestType = 255
+	readStaticMatRequest  MatRequestType = 0
+	writeStaticMatRequest MatRequestType = 1
+	readMatRequest        MatRequestType = 2
+	writeMatRequest       MatRequestType = 3
+	commitMatRequest      MatRequestType = 4
+	abortMatRequest       MatRequestType = 5
+	prepareMatRequest     MatRequestType = 6
+	versionMatRequest     MatRequestType = 255
 
 	//TODO: Maybe each bucket should correspond to one goroutine...?
 	//Number of goroutines in the pool to access the database. Each goroutine has a (automatically assigned) range of keys that it can access.
@@ -166,13 +161,6 @@ func (args MatVersionArgs) getRequestType() (requestType MatRequestType) {
 	return versionMatRequest
 }
 func (args MatVersionArgs) getChannel() (channelId uint64) {
-	return args.ChannelId
-}
-
-func (args MatStartTransactionArgs) getRequestType() (requestType MatRequestType) {
-	return startTransactionMatRequest
-}
-func (args MatStartTransactionArgs) getChannel() (channelId uint64) {
 	return args.ChannelId
 }
 
@@ -239,26 +227,41 @@ func listenForTransactionManagerRequests(id uint64) {
 
 func handleMatRequest(request MaterializerRequest, partitionData *partitionData) {
 	switch request.getRequestType() {
+	case readStaticMatRequest:
+		handleMatStaticRead(request, partitionData)
 	case readMatRequest:
 		handleMatRead(request, partitionData)
 	case writeStaticMatRequest:
 		handleMatStaticWrite(request, partitionData)
 	case writeMatRequest:
 		handleMatWrite(request, partitionData)
-	case versionMatRequest:
-		handleMatVersion(request, partitionData)
 	case commitMatRequest:
 		handleMatCommit(request, partitionData)
+	case abortMatRequest:
+		handleMatAbort(request, partitionData)
+	case prepareMatRequest:
+		handleMatPrepare(request, partitionData)
+	case versionMatRequest:
+		handleMatVersion(request, partitionData)
 	}
 }
 
+func handleMatStaticRead(request MaterializerRequest, partitionData *partitionData) {
+	auxiliaryRead(request.MatRequestArgs.(MatStaticReadArgs).MatReadArgs, partitionData)
+}
+
 func handleMatRead(request MaterializerRequest, partitionData *partitionData) {
+	//TODO: This read should reflect updates issued in this transaction which weren't yet applied
+	auxiliaryRead(request.MatRequestArgs.(MatReadArgs), partitionData)
+}
+
+func auxiliaryRead(readArgs MatReadArgs, partitionData *partitionData) {
 	//TODO: Actually take in consideration the timestamp to read the correct version
-	readArgs := request.MatRequestArgs.(MatReadArgs)
 	if canRead(readArgs.Timestamp, partitionData) {
 		applyReadAndReply(&readArgs, partitionData)
 	} else {
 		//Queue the request.
+		fmt.Println("[Materializer]Warning - Queuing read")
 		queue, exists := partitionData.pendingReads[readArgs.Timestamp]
 		if !exists {
 			queue = make([]*MatReadArgs, 0, readQueueSize)
@@ -297,13 +300,7 @@ func applyReadAndReply(readArgs *MatReadArgs, partitionData *partitionData) {
 	readArgs.ReplyChan <- state
 }
 
-func handleStartTransaction(request MaterializerRequest, partitionData *partitionData) {
-	startTransArgs := request.MatRequestArgs.(MatStartTransactionArgs)
-	auxiliaryStartTransaction(startTransArgs.TransactionId, partitionData)
-	startTransArgs.ReplyChan <- partitionData.suggestedTimestamps[startTransArgs.TransactionId]
-}
-
-//Contains code shared between startTransaction and staticWrite
+//Contains code shared between ??? and staticWrite
 func auxiliaryStartTransaction(transactionId TransactionId, partitionData *partitionData) {
 	var newTimestamp clocksi.Timestamp
 	if partitionData.highestPendingTs == nil {
@@ -369,14 +366,21 @@ func typecheckWrites(updates []UpdateObjectParams) (ok bool, err error) {
 	return
 }
 
+func handleMatPrepare(request MaterializerRequest, partitionData *partitionData) {
+	prepareArgs := request.MatRequestArgs.(MatPrepareArgs)
+	auxiliaryStartTransaction(prepareArgs.TransactionId, partitionData)
+	prepareArgs.ReplyChan <- partitionData.suggestedTimestamps[prepareArgs.TransactionId]
+}
+
 func handleMatVersion(request MaterializerRequest, partitionData *partitionData) {
 	request.MatRequestArgs.(MatVersionArgs).ReplyChan <- partitionData.stableVersion
 }
 
-/*
-	Note: This is received by every partition even if no operations are targeted to some partitions.
-	This is because every partition needs to know the latest version commited, so that reads are applied succesfully
-*/
+func handleMatAbort(request MaterializerRequest, partitionData *partitionData) {
+	delete(partitionData.pendingOps, request.MatRequestArgs.(MatAbortArgs).TransactionId)
+	//TODO: What about reads that were pending? We don't know which ones belong to this transaction and which belong to other transactions with the same TS...
+}
+
 func handleMatCommit(request MaterializerRequest, partitionData *partitionData) {
 	commitArgs := request.MatRequestArgs.(MatCommitArgs)
 
@@ -386,6 +390,7 @@ func handleMatCommit(request MaterializerRequest, partitionData *partitionData) 
 	} else {
 		//A transaction with smaller version is pending, so we need to queue this commit.
 		partitionData.commitedWaitToApply[commitArgs.TransactionId] = commitArgs.CommitTimestamp
+		fmt.Println("[Materializer]Warning - Queuing commit")
 	}
 }
 
