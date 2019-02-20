@@ -5,6 +5,7 @@ import (
 	"crdt"
 	"encoding/binary"
 	"io"
+	"math/rand"
 	"tools"
 
 	proto "github.com/golang/protobuf/proto"
@@ -121,6 +122,8 @@ func unmarshallProto(code byte, msgBuf []byte) (protobuf proto.Message) {
 	return
 }
 
+/*****REQUEST PROTOS*****/
+
 //Note: timestamp can be nil.
 func CreateStartTransaction(timestamp []byte) (protoBuf *ApbStartTransaction) {
 	transProps := &ApbTxnProperties{
@@ -129,7 +132,7 @@ func CreateStartTransaction(timestamp []byte) (protoBuf *ApbStartTransaction) {
 	}
 	protoBuf = &ApbStartTransaction{
 		Properties: transProps,
-		Timestamp: timestamp,
+		Timestamp:  timestamp,
 	}
 	return
 }
@@ -141,7 +144,7 @@ func CreateCommitTransaction(transId []byte) (protoBuf *ApbCommitTransaction) {
 	return
 }
 
-func CreateAbortTransaction(transId[] byte) (protoBuf *ApbAbortTransaction) {
+func CreateAbortTransaction(transId []byte) (protoBuf *ApbAbortTransaction) {
 	protoBuf = &ApbAbortTransaction{
 		TransactionDescriptor: transId,
 	}
@@ -160,6 +163,178 @@ func CreateReadObjs(transId []byte, key string, crdtType CRDTType,
 	protoBuf = &ApbReadObjects{
 		Boundobjects:          boundObjArray,
 		TransactionDescriptor: transId,
+	}
+	return
+}
+
+//TODO: Use a struct different from the one in transactionManager. Also, support receiving transId
+func CreateStaticReadObjs(readParams []ReadObjectParams) (protobuf *ApbStaticReadObjects) {
+	protobuf = &ApbStaticReadObjects{
+		Transaction: CreateStartTransaction(nil),
+		Objects:     createBoundObjectsArray(readParams),
+	}
+	return
+}
+
+func createBoundObjectsArray(readParams []ReadObjectParams) (protobufs []*ApbBoundObject) {
+	protobufs = make([]*ApbBoundObject, len(readParams))
+	for i, param := range readParams {
+		protobufs[i] = createBoundObject(param.Key, param.CrdtType, param.Bucket)
+	}
+	return
+}
+
+func createBoundObject(key string, crdtType CRDTType, bucket string) (protobuf *ApbBoundObject) {
+	protobuf = &ApbBoundObject{
+		Key:    []byte(key),
+		Type:   &crdtType,
+		Bucket: []byte(bucket),
+	}
+	return
+}
+
+//TODO: Use a different struct from the one in transactionManager. Also, support receiving transId
+func CreateStaticUpdateObjs(updates []UpdateObjectParams) (protobuf *ApbStaticUpdateObjects) {
+	protobuf = &ApbStaticUpdateObjects{
+		Transaction: CreateStartTransaction(nil),
+		Updates:     createUpdateOps(updates),
+	}
+	return
+}
+
+func createUpdateOps(updates []UpdateObjectParams) (protobufs []*ApbUpdateOp) {
+	protobufs = make([]*ApbUpdateOp, len(updates))
+	for i, upd := range updates {
+		protobufs[i] = &ApbUpdateOp{
+			Boundobject: createBoundObject(upd.Key, upd.CrdtType, upd.Bucket),
+			Operation:   createUpdateOperation(upd.UpdateArgs, upd.CrdtType),
+		}
+	}
+	return
+}
+
+/*****REPLY/RESP PROTOS*****/
+
+func CreateStartTransactionResp(txnId TransactionId, ts clocksi.Timestamp) (protobuf *ApbStartTransactionResp) {
+	protobuf = &ApbStartTransactionResp{
+		Success:               proto.Bool(true),
+		TransactionDescriptor: createTxnDescriptorBytes(txnId, ts),
+	}
+	return
+}
+
+func CreateCommitOkResp(txnId TransactionId, ts clocksi.Timestamp) (protobuf *ApbCommitResp) {
+	protobuf = &ApbCommitResp{
+		Success:    proto.Bool(true),
+		CommitTime: createTxnDescriptorBytes(txnId, ts),
+	}
+	return
+}
+
+func CreateCommitFailedResp(errorCode uint32) (protobuf *ApbCommitResp) {
+	protobuf = &ApbCommitResp{
+		Success:   proto.Bool(false),
+		Errorcode: proto.Uint32(errorCode),
+	}
+	return
+}
+
+//TODO: Check if these replies are being given just like in antidote (i.e., same arguments in case of success/failure, etc.)
+//func CreateStaticReadResp(readReplies []*ApbReadObjectResp, ts clocksi.Timestamp) (protobuf *ApbStaticReadObjectsResp) {
+func CreateStaticReadResp(objectStates []crdt.State, txnId TransactionId, ts clocksi.Timestamp) (protobuf *ApbStaticReadObjectsResp) {
+	protobuf = &ApbStaticReadObjectsResp{
+		Objects:    CreateReadObjectsResp(objectStates),
+		Committime: CreateCommitOkResp(txnId, ts),
+	}
+	return
+}
+
+func CreateReadObjectsResp(objectStates []crdt.State) (protobuf *ApbReadObjectsResp) {
+	readReplies := convertAntidoteStatesToProto(objectStates)
+	protobuf = &ApbReadObjectsResp{
+		Success: proto.Bool(true),
+		Objects: readReplies,
+	}
+	return
+}
+
+func CreateOperationResp() (protoBuf *ApbOperationResp) {
+	protoBuf = &ApbOperationResp{
+		Success: proto.Bool(true),
+	}
+	return
+}
+
+func createTxnDescriptorBytes(txnId TransactionId, ts clocksi.Timestamp) (bytes []byte) {
+	tsBytes := ts.ToBytes()
+	bytes = make([]byte, len(tsBytes)+8)
+	binary.BigEndian.PutUint64(bytes[0:8], uint64(txnId))
+	copy(bytes[8:], tsBytes)
+	return
+}
+
+func DecodeTxnDescriptor(bytes []byte) (txnId TransactionId, ts clocksi.Timestamp) {
+	if bytes == nil || len(bytes) == 0 {
+		//FromBytes of clocksi can handle nil arrays
+		txnId, ts = TransactionId(rand.Uint64()), clocksi.ClockSiTimestamp{}.FromBytes(bytes)
+	} else {
+		txnId, ts = TransactionId(binary.BigEndian.Uint64(bytes[0:8])), clocksi.ClockSiTimestamp{}.FromBytes(bytes[8:])
+	}
+	return
+}
+
+/***** CRDT SPECIFIC METHODS*****/
+
+func CreateCounterUpdate(amount int) (protoBuf *ApbCounterUpdate) {
+	protoBuf = &ApbCounterUpdate{
+		Inc: proto.Int64(int64(amount)),
+	}
+	return
+}
+
+func CreateTopkUpdate(playerId int, score int) (protoBuf *ApbTopkUpdate) {
+	protoBuf = &ApbTopkUpdate{
+		PlayerId: proto.Int64(int64(playerId)),
+		Score:    proto.Int64(int64(score)),
+	}
+	return
+}
+
+func CreateSetUpdate(opType ApbSetUpdate_SetOpType, elems []string) (protoBuf *ApbSetUpdate) {
+	byteArray := make([][]byte, len(elems))
+	for i, elem := range elems {
+		byteArray[i] = []byte(elem)
+	}
+	switch opType {
+	case ApbSetUpdate_ADD:
+		protoBuf = &ApbSetUpdate{
+			Optype: &opType,
+			Adds:   byteArray,
+		}
+	case ApbSetUpdate_REMOVE:
+		protoBuf = &ApbSetUpdate{
+			Optype: &opType,
+			Rems:   byteArray,
+		}
+	}
+	return
+}
+
+//TODO: Get rid of so many type conversions (this will depend on CRDT's implementation)
+func createCounterReadResp(value int32) (protobuf *ApbReadObjectResp) {
+	protobuf = &ApbReadObjectResp{
+		Counter: &ApbGetCounterResp{
+			Value: proto.Int32(value),
+		},
+	}
+	return
+}
+
+func createSetReadResp(elems []crdt.Element) (protobuf *ApbReadObjectResp) {
+	protobuf = &ApbReadObjectResp{
+		Set: &ApbGetSetResp{
+			Value: crdt.ElementArrayToByteMatrix(elems),
+		},
 	}
 	return
 }
@@ -207,141 +382,6 @@ func CreateUpdateObjs(transId []byte, key string, crdtType CRDTType,
 	default:
 		//fmt.Println("Didn't recognize CRDTType:", crdtType)
 		protoBuf = nil
-	}
-	return
-}
-
-func CreateCounterUpdate(amount int) (protoBuf *ApbCounterUpdate) {
-	protoBuf = &ApbCounterUpdate{
-		Inc: proto.Int64(int64(amount)),
-	}
-	return
-}
-
-func CreateTopkUpdate(playerId int, score int) (protoBuf *ApbTopkUpdate) {
-	protoBuf = &ApbTopkUpdate{
-		PlayerId: proto.Int64(int64(playerId)),
-		Score:    proto.Int64(int64(score)),
-	}
-	return
-}
-
-func CreateSetUpdate(opType ApbSetUpdate_SetOpType, elems []string) (protoBuf *ApbSetUpdate) {
-	byteArray := make([][]byte, len(elems))
-	for i, elem := range elems {
-		byteArray[i] = []byte(elem)
-	}
-	switch opType {
-	case ApbSetUpdate_ADD:
-		protoBuf = &ApbSetUpdate{
-			Optype: &opType,
-			Adds:   byteArray,
-		}
-	case ApbSetUpdate_REMOVE:
-		protoBuf = &ApbSetUpdate{
-			Optype: &opType,
-			Rems:   byteArray,
-		}
-	}
-	return
-}
-
-//TODO: Use a struct different from the one in transactionManager. Also, support receiving transId
-func CreateStaticReadObjs(readParams []ReadObjectParams) (protobuf *ApbStaticReadObjects) {
-	protobuf = &ApbStaticReadObjects{
-		Transaction: CreateStartTransaction(nil),
-		Objects:     createBoundObjectsArray(readParams),
-	}
-	return
-}
-
-func createBoundObjectsArray(readParams []ReadObjectParams) (protobufs []*ApbBoundObject) {
-	protobufs = make([]*ApbBoundObject, len(readParams))
-	for i, param := range readParams {
-		protobufs[i] = createBoundObject(param.Key, param.CrdtType, param.Bucket)
-	}
-	return
-}
-
-func createBoundObject(key string, crdtType CRDTType, bucket string) (protobuf *ApbBoundObject) {
-	protobuf = &ApbBoundObject{
-		Key:    []byte(key),
-		Type:   &crdtType,
-		Bucket: []byte(bucket),
-	}
-	return
-}
-
-//TODO: Check if these replies are being given just like in antidote (i.e., same arguments in case of success/failure, etc.)
-//func CreateStaticReadResp(readReplies []*ApbReadObjectResp, ts clocksi.Timestamp) (protobuf *ApbStaticReadObjectsResp) {
-func CreateStaticReadResp(objectStates []crdt.State, ts clocksi.Timestamp) (protobuf *ApbStaticReadObjectsResp) {
-	protobuf = &ApbStaticReadObjectsResp{
-		Objects:    CreateReadObjectsResp(objectStates),
-		Committime: CreateCommitOkResp(ts),
-	}
-	return
-}
-
-func CreateCommitOkResp(ts clocksi.Timestamp) (protobuf *ApbCommitResp) {
-	protobuf = &ApbCommitResp{
-		Success:    proto.Bool(true),
-		CommitTime: ts.ToBytes(),
-	}
-	return
-}
-
-func CreateCommitFailedResp(errorCode uint32) (protobuf *ApbCommitResp) {
-	protobuf = &ApbCommitResp{
-		Success:   proto.Bool(false),
-		Errorcode: proto.Uint32(errorCode),
-	}
-	return
-}
-
-//TODO: Get rid of so many type conversions (this will depend on CRDT's implementation)
-func createCounterReadResp(value int32) (protobuf *ApbReadObjectResp) {
-	protobuf = &ApbReadObjectResp{
-		Counter: &ApbGetCounterResp{
-			Value: proto.Int32(value),
-		},
-	}
-	return
-}
-
-func createSetReadResp(elems []crdt.Element) (protobuf *ApbReadObjectResp) {
-	protobuf = &ApbReadObjectResp{
-		Set: &ApbGetSetResp{
-			Value: crdt.ElementArrayToByteMatrix(elems),
-		},
-	}
-	return
-}
-
-func CreateReadObjectsResp(objectStates []crdt.State) (protobuf *ApbReadObjectsResp) {
-	readReplies := convertAntidoteStatesToProto(objectStates)
-	protobuf = &ApbReadObjectsResp{
-		Success: proto.Bool(true),
-		Objects: readReplies,
-	}
-	return
-}
-
-//TODO: Use a different struct from the one in transactionManager. Also, support receiving transId
-func CreateStaticUpdateObjs(updates []UpdateObjectParams) (protobuf *ApbStaticUpdateObjects) {
-	protobuf = &ApbStaticUpdateObjects{
-		Transaction: CreateStartTransaction(nil),
-		Updates:     createUpdateOps(updates),
-	}
-	return
-}
-
-func createUpdateOps(updates []UpdateObjectParams) (protobufs []*ApbUpdateOp) {
-	protobufs = make([]*ApbUpdateOp, len(updates))
-	for i, upd := range updates {
-		protobufs[i] = &ApbUpdateOp{
-			Boundobject: createBoundObject(upd.Key, upd.CrdtType, upd.Bucket),
-			Operation:   createUpdateOperation(upd.UpdateArgs, upd.CrdtType),
-		}
 	}
 	return
 }
