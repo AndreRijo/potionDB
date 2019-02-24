@@ -71,9 +71,10 @@ type MatRequestType byte
 //////////********************Other types************************//////////
 //Struct that represents local data to each goroutine/partition
 type partitionData struct {
-	db                    map[uint64]crdt.CRDT //CRDT database of this partition
-	stableVersion         clocksi.Timestamp    //latest commited timestamp
-	twoSmallestPendingTxn [2]*TransactionId    //Contains the two transactionIds that have been prepared with the smallest timestamps.
+	//db                    map[uint64]crdt.CRDT //CRDT database of this partition
+	db                    map[uint64]VersionManager
+	stableVersion         clocksi.Timestamp //latest commited timestamp
+	twoSmallestPendingTxn [2]*TransactionId //Contains the two transactionIds that have been prepared with the smallest timestamps.
 	//Idea: avoids the issue of the txn we're verying being the one with the lowest proposed timestamp (in this case, check the 2nd entry)
 	highestPendingTs    clocksi.Timestamp                      //Contains the highest timestamp that was prepared. Used to check if a read can be executed or not.
 	pendingOps          map[TransactionId][]UpdateObjectParams //pending transactions waiting for commit
@@ -208,7 +209,7 @@ func listenForTransactionManagerRequests(id uint64) {
 	//Where keyRangeSize = math.MaxUint64 / number of goroutines
 
 	partitionData := partitionData{
-		db:                  make(map[uint64]crdt.CRDT),
+		db:                  make(map[uint64]VersionManager),
 		stableVersion:       clocksi.ClockSiTimestamp{}.NewTimestamp(),
 		highestPendingTs:    nil,
 		pendingOps:          make(map[TransactionId][]UpdateObjectParams),
@@ -257,8 +258,8 @@ func handleMatRead(request MaterializerRequest, partitionData *partitionData) {
 
 func auxiliaryRead(readArgs MatReadArgs, partitionData *partitionData) {
 	//TODO: Actually take in consideration the timestamp to read the correct version
-	if canRead(readArgs.Timestamp, partitionData) {
-		applyReadAndReply(&readArgs, partitionData)
+	if canRead, readLatest := canRead(readArgs.Timestamp, partitionData); canRead {
+		applyReadAndReply(&readArgs, readLatest, readArgs.Timestamp, partitionData)
 	} else {
 		//Queue the request.
 		fmt.Println("[Materializer]Warning - Queuing read")
@@ -270,31 +271,39 @@ func auxiliaryRead(readArgs MatReadArgs, partitionData *partitionData) {
 	}
 }
 
-func canRead(readTs clocksi.Timestamp, partitionData *partitionData) (canRead bool) {
-	if readTs.IsLowerOrEqual(partitionData.stableVersion) {
-		canRead = true
+func canRead(readTs clocksi.Timestamp, partitionData *partitionData) (canRead bool, readLatest bool) {
+	compResult := readTs.Compare(partitionData.stableVersion)
+	if compResult == clocksi.EqualTs {
+		canRead, readLatest = true, true
+	} else if compResult == clocksi.LowerTs {
+		canRead, readLatest = true, false
 	} else if partitionData.twoSmallestPendingTxn[0] != nil &&
 		partitionData.suggestedTimestamps[*partitionData.twoSmallestPendingTxn[0]].IsLower(readTs) {
 		//There's a commit prepared with a timestamp lower than read's
-		canRead = false
+		canRead, readLatest = false, false
 	} else {
 		localTs := clocksi.NewClockSiTimestamp().NextTimestamp()
 		if localTs.IsHigherOrEqual(readTs) {
-			canRead = true
+			canRead, readLatest = true, true
 		}
 	}
 	return
 }
 
-func applyReadAndReply(readArgs *MatReadArgs, partitionData *partitionData) {
+func applyReadAndReply(readArgs *MatReadArgs, readLatest bool, readTs clocksi.Timestamp, partitionData *partitionData) {
 	hashKey := getHash(getCombinedKey(readArgs.KeyParams))
 	obj, hasKey := partitionData.db[hashKey]
 	var state crdt.State
 	if !hasKey {
 		//TODO: Handle error as antidote does (check what it does? I think it just returns the object with the initial state)
-		state = initializeCrdt(readArgs.CrdtType).GetValue()
+		state = initializeCrdt(readArgs.CrdtType).Read(crdt.StateReadArguments{})
 	} else {
-		state = obj.GetValue()
+		//TODO: Actually use the right arguments (same above)
+		if readLatest {
+			state = obj.ReadLatest(crdt.StateReadArguments{})
+		} else {
+			state = obj.ReadOld(crdt.StateReadArguments{}, readTs)
+		}
 	}
 
 	readArgs.ReplyChan <- state
@@ -413,7 +422,7 @@ func canCommit(commitArgs MatCommitArgs, partitionData *partitionData) (canCommi
 }
 
 func applyCommit(transactionId *TransactionId, commitTimestamp *clocksi.Timestamp, partitionData *partitionData) {
-	applyUpdates(partitionData.pendingOps[*transactionId], partitionData)
+	applyUpdates(partitionData.pendingOps[*transactionId], commitTimestamp, partitionData)
 
 	updatePartitionDataWithCommit(transactionId, commitTimestamp, partitionData)
 }
@@ -464,26 +473,26 @@ func handlePendingCommits(partitionData *partitionData) {
 	return
 }
 
-func applyUpdates(updates []UpdateObjectParams, partitionData *partitionData) {
+func applyUpdates(updates []UpdateObjectParams, commitTimestamp *clocksi.Timestamp, partitionData *partitionData) {
 	for _, upd := range updates {
 		hashKey := getHash(getCombinedKey(upd.KeyParams))
 
 		obj, hasKey := partitionData.db[hashKey]
 		if !hasKey {
-			obj = initializeCrdt(upd.CrdtType)
+			obj = initializeVersionManager(upd.CrdtType)
 			partitionData.db[hashKey] = obj
 		}
 		downstreamArgs := obj.Update(upd.UpdateArgs)
-		obj.Downstream(downstreamArgs)
+		obj.Downstream(*commitTimestamp, downstreamArgs)
 	}
 }
 
 func applyPendingReads(partitionData *partitionData) {
 	for ts, readSlices := range partitionData.pendingReads {
-		if ts.IsLowerOrEqual(partitionData.stableVersion) {
+		if canRead, readLatest := canRead(ts, partitionData); canRead {
 			//Apply all reads of that transaction
 			for _, readArgs := range readSlices {
-				applyReadAndReply(readArgs, partitionData)
+				applyReadAndReply(readArgs, readLatest, ts, partitionData)
 			}
 			delete(partitionData.pendingReads, ts)
 		}
@@ -502,6 +511,13 @@ func initializeCrdt(crdtType CRDTType) (newCrdt crdt.CRDT) {
 		newCrdt = nil
 	}
 	return
+}
+
+func initializeVersionManager(crdtType CRDTType) (newVM VersionManager) {
+	//For now, all CRDTs use the same version manager
+	crdt := initializeCrdt(crdtType)
+	tmpVM := (&InverseOpVM{}).Initialize(crdt)
+	return &tmpVM
 }
 
 /*

@@ -60,14 +60,14 @@ func TestWrites1(t *testing.T) {
 	go handleStaticTMRead(readReq)
 	readReply := <-readChan
 
-	if len(readReply.States[0].(crdt.SetAWState).Elems) == 0 || readReply.States[0].(crdt.SetAWState).Elems[0] != firstWriteParams[0].UpdateArgs.(crdt.Add).Element {
+	if len(readReply.States[0].(crdt.SetAWValueState).Elems) == 0 || readReply.States[0].(crdt.SetAWValueState).Elems[0] != firstWriteParams[0].UpdateArgs.(crdt.Add).Element {
 		t.Error("Read of first key doesn't match")
-		t.Error("Received: ", readReply.States[0].(crdt.SetAWState).Elems)
+		t.Error("Received: ", readReply.States[0].(crdt.SetAWValueState).Elems)
 		t.Error("Expected: ", firstWriteParams[0].UpdateArgs.(crdt.Add).Element)
 	}
-	if len(readReply.States[1].(crdt.SetAWState).Elems) == 0 || readReply.States[1].(crdt.SetAWState).Elems[0] != secondWriteParams[0].UpdateArgs.(crdt.Add).Element {
+	if len(readReply.States[1].(crdt.SetAWValueState).Elems) == 0 || readReply.States[1].(crdt.SetAWValueState).Elems[0] != secondWriteParams[0].UpdateArgs.(crdt.Add).Element {
 		t.Error("Read of second key doesn't match")
-		t.Error("Received: ", readReply.States[1].(crdt.SetAWState).Elems)
+		t.Error("Received: ", readReply.States[1].(crdt.SetAWValueState).Elems)
 		t.Error("Expected: ", secondWriteParams[0].UpdateArgs.(crdt.Add).Element)
 	}
 
@@ -137,14 +137,14 @@ func TestWrites2(t *testing.T) {
 	//fmt.Println("Got read reply")
 
 	firstKeyWrites := []UpdateObjectParams{firstWriteParams[0], thirdWriteParams[0]}
-	if !checkWriteReadSetMatch(readReply.States[0].(crdt.SetAWState), firstKeyWrites) {
+	if !checkWriteReadSetMatch(readReply.States[0].(crdt.SetAWValueState), firstKeyWrites) {
 		t.Error("Read of first key doesn't match")
-		t.Error("Received: ", readReply.States[0].(crdt.SetAWState).Elems)
+		t.Error("Received: ", readReply.States[0].(crdt.SetAWValueState).Elems)
 		t.Error("Expected: ", firstKeyWrites)
 	}
-	if !checkWriteReadSetMatch(readReply.States[1].(crdt.SetAWState), secondWriteParams) {
+	if !checkWriteReadSetMatch(readReply.States[1].(crdt.SetAWValueState), secondWriteParams) {
 		t.Error("Read of second key doesn't match")
-		t.Error("Received: ", readReply.States[1].(crdt.SetAWState).Elems[0])
+		t.Error("Received: ", readReply.States[1].(crdt.SetAWValueState).Elems[0])
 		t.Error("Expected: ", secondWriteParams[0].UpdateArgs.(crdt.Add).Element)
 	}
 }
@@ -198,9 +198,9 @@ func TestWrites3(t *testing.T) {
 	readReply := <-readChan
 
 	firstKeyWrites := []UpdateObjectParams{firstWriteParams[0], secondWriteParams[0], thirdWriteParams[0]}
-	if !checkWriteReadSetMatch(readReply.States[0].(crdt.SetAWState), firstKeyWrites) {
+	if !checkWriteReadSetMatch(readReply.States[0].(crdt.SetAWValueState), firstKeyWrites) {
 		t.Error("Read of key doesn't match")
-		t.Error("Received: ", readReply.States[0].(crdt.SetAWState).Elems)
+		t.Error("Received: ", readReply.States[0].(crdt.SetAWValueState).Elems)
 		t.Error("Expected: ", firstKeyWrites)
 	}
 }
@@ -287,9 +287,9 @@ func TestWritesAndReads(t *testing.T) {
 
 	firstReadReply := <-firstReadChan
 	firstReadWrites := []UpdateObjectParams{firstWriteParams[0], secondWriteParams[0], thirdWriteParams[0]}
-	if !checkWriteReadSetMatch(firstReadReply.States[0].(crdt.SetAWState), firstReadWrites) {
+	if !checkWriteReadSetMatch(firstReadReply.States[0].(crdt.SetAWValueState), firstReadWrites) {
 		t.Error("First read of key doesn't match")
-		t.Error("Received: ", firstReadReply.States[0].(crdt.SetAWState).Elems)
+		t.Error("Received: ", firstReadReply.States[0].(crdt.SetAWValueState).Elems)
 		t.Error("Expected: ", firstReadWrites)
 	}
 
@@ -309,9 +309,9 @@ func TestWritesAndReads(t *testing.T) {
 	secondReadReply := <-secondReadChan
 
 	secondReadWrites := []UpdateObjectParams{firstWriteParams[0], secondWriteParams[0], thirdWriteParams[0], fourthWriteParams[0]}
-	if !checkWriteReadSetMatch(secondReadReply.States[0].(crdt.SetAWState), secondReadWrites) {
+	if !checkWriteReadSetMatch(secondReadReply.States[0].(crdt.SetAWValueState), secondReadWrites) {
 		t.Error("Second read of key doesn't match")
-		t.Error("Received: ", secondReadReply.States[0].(crdt.SetAWState).Elems)
+		t.Error("Received: ", secondReadReply.States[0].(crdt.SetAWValueState).Elems)
 		t.Error("Expected: ", secondReadWrites)
 	}
 }
@@ -354,7 +354,7 @@ func createRandomSetAdd(keyParams KeyParams) (writeParams []UpdateObjectParams) 
 }
 
 //Note: assumes that each write in UpdateObjectParams contains only one update
-func checkWriteReadSetMatch(state crdt.SetAWState, writeParams []UpdateObjectParams) (ok bool) {
+func checkWriteReadSetMatch(state crdt.SetAWValueState, writeParams []UpdateObjectParams) (ok bool) {
 	if len(state.Elems) != len(writeParams) {
 		return false
 	}

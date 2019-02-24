@@ -3,6 +3,7 @@ package clocksi
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -32,6 +33,9 @@ type Timestamp interface {
 	IsEqual(otherTs Timestamp) (compResult bool)
 	//Returns true when Compare(otherTs) would return ConcurrentTs.
 	IsConcurrent(otherTs Timestamp) (compResult bool)
+	//Returns the timestamp resulting of merging this timestamp and the argument timestamp
+	//In a vector clock, it represents keeping the highest value of each position
+	Merge(otherTs Timestamp) (mergedTs Timestamp)
 	//Converts the timestamp to a byte array
 	ToBytes() (bytes []byte)
 	//Gets the timestamp that is represented in the byte array
@@ -61,7 +65,17 @@ const (
 var (
 	//Useful for comparations or other situations in which we need a temporary, non-significant, timestamp
 	DummyTs = NewClockSiTimestamp()
+	//Useful for situations in which we need a timestamp bigger than all others
+	DummyHighTs = prepareDummyHighTs()
 )
+
+func prepareDummyHighTs() (ts Timestamp) {
+	vc := make([]int64, 1)
+	clockSiTs := ClockSiTimestamp{vectorClock: &vc}
+	(*clockSiTs.vectorClock)[0] = math.MaxInt64
+	ts = clockSiTs
+	return
+}
 
 //Creates a new timestamp. This gives the same result as doing: newTs = ClockSiTimestamp{}.NewTimestamp().
 //Use whichever option feels more natural.
@@ -221,6 +235,23 @@ func (ts ClockSiTimestamp) IsEqual(otherTs Timestamp) (compResult bool) {
 func (ts ClockSiTimestamp) IsConcurrent(otherTs Timestamp) (compResult bool) {
 	//I don't know of a more efficient way to check for concurrency than as it is implemented in Compare.
 	return ts.Compare(otherTs) == ConcurrentTs
+}
+
+func (ts ClockSiTimestamp) Merge(otherTs Timestamp) (mergedTs Timestamp) {
+	vc := make([]int64, len(*ts.vectorClock))
+	mergedTs = ClockSiTimestamp{vectorClock: &vc}
+	otherTsVc := *otherTs.(ClockSiTimestamp).vectorClock
+
+	for i, value := range *ts.vectorClock {
+		//Keep the max of each position
+		if value > otherTsVc[i] {
+			vc[i] = value
+		} else {
+			vc[i] = otherTsVc[i]
+		}
+	}
+
+	return
 }
 
 func (ts ClockSiTimestamp) ToBytes() (bytes []byte) {

@@ -15,11 +15,39 @@ func (set uniqueSet) add(uniqueId unique) {
 	set[uniqueId] = struct{}{}
 }
 
-//Returns the set
+func (set uniqueSet) addAll(otherSet uniqueSet) {
+	for key := range otherSet {
+		set[key] = struct{}{}
+	}
+}
+
+//Removes all elements in the intersection of both sets.
 func (set uniqueSet) removeAllIn(sourceSet uniqueSet) {
 	for key := range sourceSet {
 		delete(set, key)
 	}
+}
+
+//Same as removeAllIn, but also returns the set of intersected uniques
+func (set uniqueSet) getAndRemoveIntersection(sourceSet uniqueSet) (intersectionSet uniqueSet) {
+	intersectionSet = makeUniqueSet()
+	hasKey := false
+	for key := range sourceSet {
+		_, hasKey = set[key]
+		if hasKey {
+			intersectionSet[key] = struct{}{}
+			delete(set, key)
+		}
+	}
+	return
+}
+
+func (set uniqueSet) copy() (copySet uniqueSet) {
+	copySet = makeUniqueSet()
+	for unique := range set {
+		copySet[unique] = struct{}{}
+	}
+	return
 }
 
 /***** CONVERSION STUFF *****/

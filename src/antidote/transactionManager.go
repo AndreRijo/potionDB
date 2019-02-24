@@ -234,7 +234,8 @@ func handleTMRequest(request TransactionManagerRequest) (shouldStop bool) {
 //TODO: Group reads. Also, send a "read operation" instead of just key params.
 func handleStaticTMRead(request TransactionManagerRequest) {
 	readArgs := request.Args.(TMStaticReadArgs)
-	tsToUse := request.Timestamp
+	//tsToUse := request.Timestamp
+	tsToUse := clocksi.ClockSiTimestamp{}.NextTimestamp() //TODO: Maybe some care and use latest commited timestamp?
 
 	var currReadChan chan crdt.State = nil
 	var currRequest MaterializerRequest
