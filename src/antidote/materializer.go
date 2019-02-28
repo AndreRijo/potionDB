@@ -268,7 +268,6 @@ func auxiliaryRead(readArgs MatReadCommonArgs, txnId TransactionId, partitionDat
 		applyReadAndReply(&readArgs, readLatest, readArgs.Timestamp, txnId, partitionData)
 	} else {
 		//Queue the request.
-		fmt.Println("[Materializer]Warning - Queuing read")
 		queue, exists := partitionData.pendingReads[readArgs.Timestamp]
 		if !exists {
 			queue = make([]*MatReadCommonArgs, 0, readQueueSize)
@@ -308,8 +307,6 @@ func applyReadAndReply(readArgs *MatReadCommonArgs, readLatest bool, readTs cloc
 	var pendingObjOps []crdt.UpdateArguments = nil
 	if hasPending {
 		pendingObjOps = getObjectPendingOps(readArgs.KeyParams, pendingOps)
-	} else {
-		fmt.Println("Materializer - no pending reads for this txnId", txnId)
 	}
 	if readLatest {
 		state = obj.ReadLatest(crdt.StateReadArguments{}, pendingObjOps)
@@ -321,10 +318,8 @@ func applyReadAndReply(readArgs *MatReadCommonArgs, readLatest bool, readTs cloc
 }
 
 func getObjectPendingOps(keyParams KeyParams, allPending []UpdateObjectParams) (objPending []crdt.UpdateArguments) {
-	fmt.Println("Materializer - has pending OPs. Len:", len(allPending))
 	objPending = make([]crdt.UpdateArguments, 0, len(allPending))
 	for _, upd := range allPending {
-		fmt.Println("Materializer - checking if key matches")
 		if upd.Key == keyParams.Key && upd.Bucket == keyParams.Bucket && upd.CrdtType == keyParams.CrdtType {
 			objPending = append(objPending, upd.UpdateArgs)
 		}
