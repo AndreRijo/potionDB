@@ -39,8 +39,20 @@ func (crdt *CounterCrdt) Initialize() (newCrdt CRDT) {
 }
 
 //TODO: Implement proper read
-func (crdt *CounterCrdt) Read(args ReadArguments) (state State) {
-	return crdt.GetValue()
+func (crdt *CounterCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
+	if updsNotYetApplied == nil || len(updsNotYetApplied) > 0 {
+		return crdt.GetValue()
+	}
+	counterState := crdt.GetValue().(CounterState)
+	for _, upd := range updsNotYetApplied {
+		switch typedUpd := upd.(type) {
+		case Increment:
+			counterState.Value += typedUpd.Change
+		case Decrement:
+			counterState.Value -= typedUpd.Change
+		}
+	}
+	return counterState
 }
 
 func (crdt *CounterCrdt) GetValue() (state State) {

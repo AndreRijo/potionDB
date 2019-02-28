@@ -25,11 +25,11 @@ func (vm *InverseOpVM) Initialize(newCrdt crdt.CRDT) (newVm InverseOpVM) {
 	return
 }
 
-func (vm *InverseOpVM) ReadLatest(readArgs crdt.ReadArguments) (state crdt.State) {
-	return vm.Read(readArgs)
+func (vm *InverseOpVM) ReadLatest(readArgs crdt.ReadArguments, updsNotYetApplied []crdt.UpdateArguments) (state crdt.State) {
+	return vm.Read(readArgs, updsNotYetApplied)
 }
 
-func (vm *InverseOpVM) ReadOld(readArgs crdt.ReadArguments, readTs clocksi.Timestamp) (state crdt.State) {
+func (vm *InverseOpVM) ReadOld(readArgs crdt.ReadArguments, readTs clocksi.Timestamp, updsNotYetApplied []crdt.UpdateArguments) (state crdt.State) {
 	readTsKey := readTs.GetMapKey()
 	cachedCRDT, hasCached := vm.OldVersions[readTsKey]
 	//Requested version isn't in cache, so we need to reconstruct the CRDT
@@ -38,7 +38,7 @@ func (vm *InverseOpVM) ReadOld(readArgs crdt.ReadArguments, readTs clocksi.Times
 		cachedCRDT = vm.reverseOperations(oldCrdt, readTs)
 		vm.OldVersions[readTsKey] = cachedCRDT
 	}
-	return cachedCRDT.Read(readArgs)
+	return cachedCRDT.Read(readArgs, updsNotYetApplied)
 }
 
 //PRIVATE METHODS

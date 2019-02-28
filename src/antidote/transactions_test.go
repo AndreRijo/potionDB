@@ -338,13 +338,19 @@ func TestNonStaticTransaction1(t *testing.T) {
 	time.Sleep(initializeTime * time.Millisecond)
 
 	txnRep := createAndProcessStartTxn(TransactionId(rand.Uint64()), clocksi.NewClockSiTimestamp())
+	fmt.Println(txnRep.TransactionId)
 
 	firstKey := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), CRDTType_ORSET, "bkt")
-	_, firstWriteReply := createAndProcessWrite(nonStatic, firstKey, createRandomSetAdd, txnRep.TransactionId, txnRep.Timestamp)
+	firstWriteParams, firstWriteReply := createAndProcessWrite(nonStatic, firstKey, createRandomSetAdd, txnRep.TransactionId, txnRep.Timestamp)
 	checkUpdateError(1, firstWriteReply.updateReply, t)
 
 	readKeyParams := []KeyParams{firstKey}
-	createAndProccessRead(nonStatic, readKeyParams, txnRep.TransactionId, txnRep.Timestamp)
+	readReply := createAndProccessRead(nonStatic, readKeyParams, txnRep.TransactionId, txnRep.Timestamp)
+	if !checkWriteReadSetMatch(readReply.readReply[0].(crdt.SetAWValueState), firstWriteParams) {
+		t.Error("Read of key doesn't match")
+		t.Error("Received: ", readReply.readReply[0].(crdt.SetAWValueState).Elems)
+		t.Error("Expected: ", firstWriteParams)
+	}
 	//TODO: Check that read reflects the previous write effects
 
 	_, secondWriteReply := createAndProcessWrite(nonStatic, firstKey, createRandomSetAdd, txnRep.TransactionId, txnRep.Timestamp)
@@ -375,8 +381,14 @@ func TestNonStaticTransaction2(t *testing.T) {
 	checkUpdateError(1, firstTxnWriteReply.updateReply, t)
 
 	readKeyParams := []KeyParams{key}
-	createAndProccessRead(nonStatic, readKeyParams, firstTxnRep.TransactionId, firstTxnRep.Timestamp)
-	//TODO: Check that read reflects the previous write effects
+	firstTxnReadReply := createAndProccessRead(nonStatic, readKeyParams, firstTxnRep.TransactionId, firstTxnRep.Timestamp)
+
+	readExpectedUpds := []UpdateObjectParams{staticTxnWriteParams[0], firstTxnWriteParams[0]}
+	if !checkWriteReadSetMatch(firstTxnReadReply.readReply[0].(crdt.SetAWValueState), readExpectedUpds) {
+		t.Error("Read of key doesn't match")
+		t.Error("Received: ", firstTxnReadReply.readReply[0].(crdt.SetAWValueState).Elems)
+		t.Error("Expected: ", readExpectedUpds)
+	}
 
 	//2nd txn
 	secondTxnReadReply := createAndProccessRead(nonStatic, readKeyParams, secondTxnRep.TransactionId, secondTxnRep.Timestamp)
@@ -393,12 +405,11 @@ func TestNonStaticTransaction2(t *testing.T) {
 	//3rd txn
 	thirdTxnRep := createAndProcessStartTxn(firstTxnRep.TransactionId, firstCommitRep.Timestamp)
 
-	thirdReadExpectedUpds := []UpdateObjectParams{staticTxnWriteParams[0], firstTxnWriteParams[0]}
 	thirdTxnReadReply := createAndProccessRead(nonStatic, readKeyParams, thirdTxnRep.TransactionId, thirdTxnRep.Timestamp)
-	if !checkWriteReadSetMatch(thirdTxnReadReply.readReply[0].(crdt.SetAWValueState), thirdReadExpectedUpds) {
+	if !checkWriteReadSetMatch(thirdTxnReadReply.readReply[0].(crdt.SetAWValueState), readExpectedUpds) {
 		t.Error("Third txn read of key doesn't match")
 		t.Error("Received: ", thirdTxnReadReply.readReply[0].(crdt.SetAWValueState).Elems)
-		t.Error("Expected: ", thirdReadExpectedUpds)
+		t.Error("Expected: ", readExpectedUpds)
 	}
 
 	//Commit both 2nd and 3rd txns. Order of commit is irrelevant here.

@@ -28,11 +28,16 @@ type MatVersionArgs struct {
 	ReplyChan chan clocksi.Timestamp
 }
 
-//Args for read request
-type MatReadArgs struct {
+type MatReadCommonArgs struct {
 	KeyParams
 	clocksi.Timestamp
 	ReplyChan chan crdt.State
+}
+
+//Args for read request
+type MatReadArgs struct {
+	MatReadCommonArgs
+	TransactionId
 }
 
 //Args for update request. Note that unlike with MatReadArgs, a MatUpdateArgs represents multiple updates, but all for the same partition
@@ -43,7 +48,7 @@ type MatUpdateArgs struct {
 }
 
 type MatStaticReadArgs struct {
-	MatReadArgs
+	MatReadCommonArgs
 }
 
 type MatStaticUpdateArgs struct {
@@ -81,8 +86,8 @@ type partitionData struct {
 	suggestedTimestamps map[TransactionId]clocksi.Timestamp    //map of transactionId -> timestamp suggested on first write request for transactionId
 	commitedWaitToApply map[TransactionId]clocksi.Timestamp    //set of transactionId -> commit timestamp of commited transactions that couldn't be applied due to pending versions
 	//TODO: Choose a better option to hold pending reads? Checking the whole map takes a long time...
-	//TODO: This WON'T work in non-static transactions with multiple reads. I need to use something else as key, but I also need the timestamp... Maybe a map of tsKey -> struct with ts + matreadargs?
-	pendingReads map[clocksi.Timestamp][]*MatReadArgs //pending reads that require a more recent version than stableVersion
+	//TODO: This WON'T work in non-static transactions with multiple reads (when using client instead of transactions_test.go). I need to use something else as key, but I also need the timestamp... Maybe a map of tsKey -> struct with ts + matreadargs?
+	pendingReads map[clocksi.Timestamp][]*MatReadCommonArgs //pending reads that require a more recent version than stableVersion
 }
 
 type BoolErrorPair struct {
@@ -216,7 +221,7 @@ func listenForTransactionManagerRequests(id uint64) {
 		pendingOps:          make(map[TransactionId][]UpdateObjectParams),
 		suggestedTimestamps: make(map[TransactionId]clocksi.Timestamp),
 		commitedWaitToApply: make(map[TransactionId]clocksi.Timestamp),
-		pendingReads:        make(map[clocksi.Timestamp][]*MatReadArgs),
+		pendingReads:        make(map[clocksi.Timestamp][]*MatReadCommonArgs),
 	}
 	//Listens to the channel and processes requests
 	channel := make(chan MaterializerRequest)
@@ -249,23 +254,24 @@ func handleMatRequest(request MaterializerRequest, partitionData *partitionData)
 }
 
 func handleMatStaticRead(request MaterializerRequest, partitionData *partitionData) {
-	auxiliaryRead(request.MatRequestArgs.(MatStaticReadArgs).MatReadArgs, partitionData)
+	auxiliaryRead(request.MatRequestArgs.(MatStaticReadArgs).MatReadCommonArgs, math.MaxInt64, partitionData)
 }
 
 func handleMatRead(request MaterializerRequest, partitionData *partitionData) {
 	//TODO: This read should reflect updates issued in this transaction which weren't yet applied
-	auxiliaryRead(request.MatRequestArgs.(MatReadArgs), partitionData)
+	matReadArgs := request.MatRequestArgs.(MatReadArgs)
+	auxiliaryRead(matReadArgs.MatReadCommonArgs, matReadArgs.TransactionId, partitionData)
 }
 
-func auxiliaryRead(readArgs MatReadArgs, partitionData *partitionData) {
+func auxiliaryRead(readArgs MatReadCommonArgs, txnId TransactionId, partitionData *partitionData) {
 	if canRead, readLatest := canRead(readArgs.Timestamp, partitionData); canRead {
-		applyReadAndReply(&readArgs, readLatest, readArgs.Timestamp, partitionData)
+		applyReadAndReply(&readArgs, readLatest, readArgs.Timestamp, txnId, partitionData)
 	} else {
 		//Queue the request.
 		fmt.Println("[Materializer]Warning - Queuing read")
 		queue, exists := partitionData.pendingReads[readArgs.Timestamp]
 		if !exists {
-			queue = make([]*MatReadArgs, 0, readQueueSize)
+			queue = make([]*MatReadCommonArgs, 0, readQueueSize)
 		}
 		partitionData.pendingReads[readArgs.Timestamp] = append(queue, &readArgs)
 	}
@@ -290,23 +296,40 @@ func canRead(readTs clocksi.Timestamp, partitionData *partitionData) (canRead bo
 	return
 }
 
-func applyReadAndReply(readArgs *MatReadArgs, readLatest bool, readTs clocksi.Timestamp, partitionData *partitionData) {
+func applyReadAndReply(readArgs *MatReadCommonArgs, readLatest bool, readTs clocksi.Timestamp, txnId TransactionId, partitionData *partitionData) {
 	hashKey := getHash(getCombinedKey(readArgs.KeyParams))
 	obj, hasKey := partitionData.db[hashKey]
 	var state crdt.State
 	if !hasKey {
+		obj = initializeVersionManager(readArgs.CrdtType)
 		//TODO: Handle error as antidote does (check what it does? I think it just returns the object with the initial state)
-		state = initializeCrdt(readArgs.CrdtType).Read(crdt.StateReadArguments{})
+	}
+	pendingOps, hasPending := partitionData.pendingOps[txnId]
+	var pendingObjOps []crdt.UpdateArguments = nil
+	if hasPending {
+		pendingObjOps = getObjectPendingOps(readArgs.KeyParams, pendingOps)
 	} else {
-		//TODO: Actually use the right arguments (same above)
-		if readLatest {
-			state = obj.ReadLatest(crdt.StateReadArguments{})
-		} else {
-			state = obj.ReadOld(crdt.StateReadArguments{}, readTs)
-		}
+		fmt.Println("Materializer - no pending reads for this txnId", txnId)
+	}
+	if readLatest {
+		state = obj.ReadLatest(crdt.StateReadArguments{}, pendingObjOps)
+	} else {
+		state = obj.ReadOld(crdt.StateReadArguments{}, readTs, pendingObjOps)
 	}
 
 	readArgs.ReplyChan <- state
+}
+
+func getObjectPendingOps(keyParams KeyParams, allPending []UpdateObjectParams) (objPending []crdt.UpdateArguments) {
+	fmt.Println("Materializer - has pending OPs. Len:", len(allPending))
+	objPending = make([]crdt.UpdateArguments, 0, len(allPending))
+	for _, upd := range allPending {
+		fmt.Println("Materializer - checking if key matches")
+		if upd.Key == keyParams.Key && upd.Bucket == keyParams.Bucket && upd.CrdtType == keyParams.CrdtType {
+			objPending = append(objPending, upd.UpdateArgs)
+		}
+	}
+	return
 }
 
 //Contains code shared between prepare and staticWrite
@@ -484,7 +507,8 @@ func applyPendingReads(partitionData *partitionData) {
 		if canRead, readLatest := canRead(ts, partitionData); canRead {
 			//Apply all reads of that transaction
 			for _, readArgs := range readSlices {
-				applyReadAndReply(readArgs, readLatest, ts, partitionData)
+				//TODO: Someway to get TransactionID in this case.
+				applyReadAndReply(readArgs, readLatest, ts, math.MaxInt64, partitionData)
 			}
 			delete(partitionData.pendingReads, ts)
 		}

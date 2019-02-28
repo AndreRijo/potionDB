@@ -88,8 +88,71 @@ func (crdt *SetAWCrdt) Initialize() (newCrdt CRDT) {
 }
 
 //TODO: Implement proper read
+/*
 func (crdt *SetAWCrdt) Read(args ReadArguments) (state State) {
 	return crdt.GetValue()
+}
+*/
+
+//TODO: Implement proper read
+func (crdt *SetAWCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
+	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+		return crdt.GetValue()
+	}
+
+	adds := make(map[Element]struct{})
+	rems := make(map[Element]struct{})
+
+	//Idea: go through the updates and check which elements were added/removed compared to the original state.
+	//Note that we shouldn't use the state returned by GetValue() - that state is an array of elements,
+	//which would be very inneficient for checking which elements to add/remove (not to mention expand the array capacity)
+
+	for _, upd := range updsNotYetApplied {
+		switch typedUpd := upd.(type) {
+		case Add:
+			if crdt.elems[typedUpd.Element] == nil {
+				adds[typedUpd.Element] = struct{}{}
+			} else {
+				delete(rems, typedUpd.Element)
+			}
+		case AddAll:
+			for _, elem := range typedUpd.Elems {
+				if crdt.elems[elem] == nil {
+					adds[elem] = struct{}{}
+				} else {
+					delete(rems, elem)
+				}
+			}
+		case Remove:
+			if crdt.elems[typedUpd.Element] != nil {
+				rems[typedUpd.Element] = struct{}{}
+			} else {
+				delete(adds, typedUpd.Element)
+			}
+		case RemoveAll:
+			for _, elem := range typedUpd.Elems {
+				if crdt.elems[elem] != nil {
+					rems[elem] = struct{}{}
+				} else {
+					delete(adds, elem)
+				}
+			}
+		}
+	}
+
+	elems := make([]Element, len(crdt.elems)+len(adds)-len(rems))
+	i := 0
+	for elem := range crdt.elems {
+		if _, hasRem := rems[elem]; !hasRem {
+			elems[i] = elem
+			i++
+		}
+	}
+	for elem := range adds {
+		elems[i] = elem
+		i++
+	}
+	return SetAWValueState{Elems: elems}
 }
 
 func (crdt *SetAWCrdt) GetValue() (state State) {
@@ -98,7 +161,6 @@ func (crdt *SetAWCrdt) GetValue() (state State) {
 	//So, unfortunatelly, we need to built it here.
 	elems := make([]Element, len(crdt.elems))
 	i := 0
-	//TODO: Check if "key" actually has keys or values
 	for key := range crdt.elems {
 		elems[i] = key
 		i++

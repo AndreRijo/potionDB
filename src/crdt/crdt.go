@@ -5,7 +5,7 @@ import "clocksi"
 type CRDT interface {
 	Initialize() (newCrdt CRDT)
 
-	Read(args ReadArguments) (state State) //TODO: Implement this and get rid of GetValue()
+	Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) //TODO: Properly implement this and get rid of GetValue()
 
 	GetValue() (state State)
 
