@@ -81,6 +81,7 @@ type partitionData struct {
 	suggestedTimestamps map[TransactionId]clocksi.Timestamp    //map of transactionId -> timestamp suggested on first write request for transactionId
 	commitedWaitToApply map[TransactionId]clocksi.Timestamp    //set of transactionId -> commit timestamp of commited transactions that couldn't be applied due to pending versions
 	//TODO: Choose a better option to hold pending reads? Checking the whole map takes a long time...
+	//TODO: This WON'T work in non-static transactions with multiple reads. I need to use something else as key, but I also need the timestamp... Maybe a map of tsKey -> struct with ts + matreadargs?
 	pendingReads map[clocksi.Timestamp][]*MatReadArgs //pending reads that require a more recent version than stableVersion
 }
 
@@ -257,7 +258,6 @@ func handleMatRead(request MaterializerRequest, partitionData *partitionData) {
 }
 
 func auxiliaryRead(readArgs MatReadArgs, partitionData *partitionData) {
-	//TODO: Actually take in consideration the timestamp to read the correct version
 	if canRead, readLatest := canRead(readArgs.Timestamp, partitionData); canRead {
 		applyReadAndReply(&readArgs, readLatest, readArgs.Timestamp, partitionData)
 	} else {
@@ -309,7 +309,7 @@ func applyReadAndReply(readArgs *MatReadArgs, readLatest bool, readTs clocksi.Ti
 	readArgs.ReplyChan <- state
 }
 
-//Contains code shared between ??? and staticWrite
+//Contains code shared between prepare and staticWrite
 func auxiliaryStartTransaction(transactionId TransactionId, partitionData *partitionData) {
 	var newTimestamp clocksi.Timestamp
 	if partitionData.highestPendingTs == nil {
@@ -411,14 +411,6 @@ func canCommit(commitArgs MatCommitArgs, partitionData *partitionData) (canCommi
 		canCommit = partitionData.twoSmallestPendingTxn[1] == nil || commitArgs.CommitTimestamp.IsLower(partitionData.suggestedTimestamps[*partitionData.twoSmallestPendingTxn[1]])
 	}
 	return
-	/*
-		for txnId, ts := range partitionData.suggestedTimestamps {
-			if txnId != commitArgs.TransactionId && ts.IsLower(commitArgs.CommitTimestamp) {
-				return false
-			}
-		}
-		return true
-	*/
 }
 
 func applyCommit(transactionId *TransactionId, commitTimestamp *clocksi.Timestamp, partitionData *partitionData) {
@@ -571,59 +563,3 @@ func getHash(combKey string) (hash uint64) {
 	hash = hashFunc.StringSum64(combKey)
 	return
 }
-
-//Old code before goroutines
-//This structure should be always created by using createDbKeyStruct, as it automatically generates dbKey
-/*
-type internalKey struct {
-	keyParams
-	dbKey    combinedKey //auto generated. The result is stored to avoid repeating unecessary computation
-}
-
-func (keyStruct *internalKey) generateDbKey() {
-	keyStruct.dbKey = combinedKey(keyStruct.bucket + keyStruct.crdtType.String() + keyStruct.key)
-}
-
-func createDbKeyStruct(key string, crdtType CRDTType, bucket string) (keyStruct internalKey) {
-	keyStruct = internalKey{
-		key:      key,
-		crdtType: crdtType,
-		bucket:   bucket,
-	}
-	keyStruct.generateDbKey()
-	return
-}
-
-
-*/
-/*
-func ReadObject(key string, crdtType CRDTType, bucket string, timestamp clocksi.Timestamp) (state crdt.State) {
-	hashKey := getHash(getCombinedKey(key, crdtType, bucket))
-
-	obj, hasKey := db[hashKey]
-	if !hasKey {
-		//TODO: Handle error as antidote does (check what it does? I think it just returns the object with the initial state)
-		state = initializeCrdt(crdtType).GetValue()
-	} else {
-		state = obj.GetValue()
-	}
-
-	return
-}
-*/
-
-/*
-func UpdateObject(key string, crdtType CRDTType, bucket string, opArgs crdt.UpdateArguments, timestamp clocksi.Timestamp) {
-	//TODO: typechecking (check if opArgs is valid for the CRDT it is being applied to)
-	hashKey := getHash(getCombinedKey(key, crdtType, bucket))
-
-	obj, hasKey := db[hashKey]
-	if !hasKey {
-		obj = initializeCrdt(crdtType)
-		db[hashKey] = obj
-	}
-	downstreamArgs := obj.Update(opArgs)
-	//TODO: Replicate the operation or store in list to replicate of current transaction...? Maybe return to caller...?
-	obj.Downstream(downstreamArgs)
-}
-*/

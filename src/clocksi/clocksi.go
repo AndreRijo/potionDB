@@ -43,6 +43,8 @@ type Timestamp interface {
 	FromBytes(bytes []byte) (newTs Timestamp)
 	//Useful for debugging purposes
 	ToString() (tsString string)
+	//Gets a representation of this clock that is safe to use in GO maps
+	GetMapKey() (key TimestampKey)
 }
 
 type ClockSiTimestamp struct {
@@ -50,6 +52,8 @@ type ClockSiTimestamp struct {
 }
 
 type TsResult int
+
+type TimestampKey interface{}
 
 const (
 	//Common to all clocks
@@ -288,5 +292,13 @@ func (ts ClockSiTimestamp) ToString() (tsString string) {
 		builder.WriteString(fmt.Sprint(value) + ",")
 	}
 	builder.WriteString("]}")
+	return builder.String()
+}
+
+func (ts ClockSiTimestamp) GetMapKey() (key TimestampKey) {
+	var builder strings.Builder
+	for _, value := range *ts.vectorClock {
+		builder.WriteString(fmt.Sprint(value, ","))
+	}
 	return builder.String()
 }

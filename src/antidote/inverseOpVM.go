@@ -9,16 +9,18 @@ import (
 //The main idea here is to rebuild old versions by applying the inverse operations on a more recent version
 
 type InverseOpVM struct {
-	crdt.CRDT                                   //Note that CRDT is embedded, so we can access its methods directly
-	OldVersions map[clocksi.Timestamp]crdt.CRDT //TODO: We can't use Timestamp here! I need to fix this somehow...
+	crdt.CRDT                                                  //Note that CRDT is embedded, so we can access its methods directly
+	OldVersions     map[clocksi.TimestampKey]crdt.CRDT         //Contains the previously calculated old versions of the CRDT
+	KeysToTimestamp map[clocksi.TimestampKey]clocksi.Timestamp //Allows to obtain the timestamp from its map key representation. Useful because we can't use Timestamp as key...
 }
 
 //PUBLIC METHODS
 
 func (vm *InverseOpVM) Initialize(newCrdt crdt.CRDT) (newVm InverseOpVM) {
 	newVm = InverseOpVM{
-		CRDT:        newCrdt,
-		OldVersions: make(map[clocksi.Timestamp]crdt.CRDT),
+		CRDT:            newCrdt,
+		OldVersions:     make(map[clocksi.TimestampKey]crdt.CRDT),
+		KeysToTimestamp: make(map[clocksi.TimestampKey]clocksi.Timestamp),
 	}
 	return
 }
@@ -28,12 +30,13 @@ func (vm *InverseOpVM) ReadLatest(readArgs crdt.ReadArguments) (state crdt.State
 }
 
 func (vm *InverseOpVM) ReadOld(readArgs crdt.ReadArguments, readTs clocksi.Timestamp) (state crdt.State) {
-	cachedCRDT, hasCached := vm.OldVersions[readTs]
+	readTsKey := readTs.GetMapKey()
+	cachedCRDT, hasCached := vm.OldVersions[readTsKey]
 	//Requested version isn't in cache, so we need to reconstruct the CRDT
 	if !hasCached {
 		oldCrdt := vm.getClosestMatch(readTs)
 		cachedCRDT = vm.reverseOperations(oldCrdt, readTs)
-		vm.OldVersions[readTs] = cachedCRDT
+		vm.OldVersions[readTsKey] = cachedCRDT
 	}
 	return cachedCRDT.Read(readArgs)
 }
@@ -43,9 +46,9 @@ func (vm *InverseOpVM) ReadOld(readArgs crdt.ReadArguments, readTs clocksi.Times
 func (vm *InverseOpVM) getClosestMatch(readTs clocksi.Timestamp) (crdt crdt.CRDT) {
 	var smallestClk clocksi.Timestamp = clocksi.DummyHighTs
 
-	for cacheClk, cacheCrdt := range vm.OldVersions {
+	for cacheClkKey, cacheClk := range vm.KeysToTimestamp {
 		if cacheClk.IsHigher(readTs) && cacheClk.IsLower(smallestClk) {
-			smallestClk, crdt = cacheClk, cacheCrdt
+			smallestClk, crdt = cacheClk, vm.OldVersions[cacheClkKey]
 		}
 	}
 	//Either there's no version cached or all cached are too old, so we'll need to use the latest version
