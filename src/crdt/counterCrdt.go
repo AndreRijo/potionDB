@@ -1,7 +1,10 @@
 package crdt
 
+import "clocksi"
+
+//Note: Implements both CRDT and InversibleCRDT
 type CounterCrdt struct {
-	genericCRDT
+	genericInversibleCRDT
 	value int32
 }
 
@@ -17,11 +20,39 @@ type Decrement struct {
 	Change int32
 }
 
+type IncrementEffect struct {
+	Change int32
+}
+
+type DecrementEffect struct {
+	Change int32
+}
+
 //Note: crdt can (and most often will be) nil
 func (crdt *CounterCrdt) Initialize() (newCrdt CRDT) {
-	crdt = &CounterCrdt{value: 0} //TODO: Assign to crdt is potencially unecessary (idea: Updates self in the map (reset operation?))
+	crdt = &CounterCrdt{
+		genericInversibleCRDT: genericInversibleCRDT{}.initialize(),
+		value:                 0,
+	} //TODO: Assign to crdt is potencially unecessary (idea: Updates self in the map (reset operation?))
 	newCrdt = crdt
 	return
+}
+
+//TODO: Implement proper read
+func (crdt *CounterCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
+	if updsNotYetApplied == nil || len(updsNotYetApplied) > 0 {
+		return crdt.GetValue()
+	}
+	counterState := crdt.GetValue().(CounterState)
+	for _, upd := range updsNotYetApplied {
+		switch typedUpd := upd.(type) {
+		case Increment:
+			counterState.Value += typedUpd.Change
+		case Decrement:
+			counterState.Value -= typedUpd.Change
+		}
+	}
+	return counterState
 }
 
 func (crdt *CounterCrdt) GetValue() (state State) {
@@ -34,16 +65,53 @@ func (crdt *CounterCrdt) Update(args UpdateArguments) (downstreamArgs UpdateArgu
 	return
 }
 
-func (crdt *CounterCrdt) Downstream(downstreamArgs UpdateArguments) {
+//TODO: Generate effects
+func (crdt *CounterCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs UpdateArguments) {
+	effect := crdt.applyDownstream(downstreamArgs)
+	//Necessary for inversibleCrdt
+	crdt.addToHistory(&updTs, &downstreamArgs, effect)
+}
+
+func (crdt *CounterCrdt) applyDownstream(downstreamArgs UpdateArguments) (effect *Effect) {
+	var effectValue Effect
 	switch incOrDec := downstreamArgs.(type) {
 	case Increment:
 		crdt.value += incOrDec.Change
+		effectValue = IncrementEffect{Change: incOrDec.Change}
 	case Decrement:
 		crdt.value -= incOrDec.Change
+		effectValue = DecrementEffect{Change: incOrDec.Change}
 	}
+	return &effectValue
 }
 
 func (crdt *CounterCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err error) {
 	//TODO: Typechecking
 	return true, nil
+}
+
+func (crdt *CounterCrdt) Copy() (copyCRDT InversibleCRDT) {
+	newCRDT := CounterCrdt{
+		genericInversibleCRDT: crdt.genericInversibleCRDT.copy(),
+		value:                 crdt.value,
+	}
+	return &newCRDT
+}
+
+func (crdt *CounterCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
+	//TODO: Optimize and make one specific for counters (no need to redo operations!)
+	crdt.genericInversibleCRDT.rebuildCRDTToVersion(targetTs, crdt.undoEffect, crdt.reapplyOp)
+}
+
+func (crdt *CounterCrdt) reapplyOp(updArgs UpdateArguments) (effect *Effect) {
+	return crdt.applyDownstream(updArgs)
+}
+
+func (crdt *CounterCrdt) undoEffect(effect *Effect) {
+	switch typedEffect := (*effect).(type) {
+	case IncrementEffect:
+		crdt.value -= typedEffect.Change
+	case DecrementEffect:
+		crdt.value += typedEffect.Change
+	}
 }

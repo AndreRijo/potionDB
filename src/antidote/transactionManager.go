@@ -234,7 +234,8 @@ func handleTMRequest(request TransactionManagerRequest) (shouldStop bool) {
 //TODO: Group reads. Also, send a "read operation" instead of just key params.
 func handleStaticTMRead(request TransactionManagerRequest) {
 	readArgs := request.Args.(TMStaticReadArgs)
-	tsToUse := request.Timestamp
+	//tsToUse := request.Timestamp
+	tsToUse := clocksi.ClockSiTimestamp{}.NextTimestamp() //TODO: Maybe some care and use latest commited timestamp?
 
 	var currReadChan chan crdt.State = nil
 	var currRequest MaterializerRequest
@@ -245,7 +246,7 @@ func handleStaticTMRead(request TransactionManagerRequest) {
 		currReadChan = make(chan crdt.State)
 
 		currRequest = MaterializerRequest{
-			MatRequestArgs: MatStaticReadArgs{MatReadArgs: MatReadArgs{
+			MatRequestArgs: MatStaticReadArgs{MatReadCommonArgs: MatReadCommonArgs{
 				Timestamp: tsToUse,
 				KeyParams: currRead,
 				ReplyChan: currReadChan,
@@ -385,11 +386,11 @@ func handleTMRead(request TransactionManagerRequest) {
 		currReadChan = make(chan crdt.State)
 
 		currRequest = MaterializerRequest{
-			MatRequestArgs: MatReadArgs{
+			MatRequestArgs: MatReadArgs{MatReadCommonArgs: MatReadCommonArgs{
 				Timestamp: tsToUse,
 				KeyParams: currRead,
 				ReplyChan: currReadChan,
-			},
+			}, TransactionId: request.TransactionId},
 		}
 		SendRequest(currRequest)
 		//TODO: Wait for reply in different for
@@ -512,8 +513,6 @@ func handleTMCommit(request TransactionManagerRequest) {
 	var currRequest MaterializerRequest
 	//TODO: Use bounded channels and send the same channel to every partition?
 	var currChan chan clocksi.Timestamp
-
-	fmt.Println("Number of involved partitions:", len(involvedPartitions))
 
 	//Send prepare to each partition involved
 	for partId, _ := range involvedPartitions {

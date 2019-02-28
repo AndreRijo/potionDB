@@ -5,13 +5,15 @@ import "clocksi"
 type CRDT interface {
 	Initialize() (newCrdt CRDT)
 
+	Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) //TODO: Properly implement this and get rid of GetValue()
+
 	GetValue() (state State)
 
 	Update(args UpdateArguments) (downstreamArgs UpdateArguments)
 
-	Downstream(downstreamArgs UpdateArguments)
+	Downstream(updTs clocksi.Timestamp, downstreamArgs UpdateArguments)
 
-	GetVersion() (ts clocksi.Timestamp)
+	GetVersion() (ts clocksi.Timestamp) //TODO: This is probably not needed at all
 
 	IsOperationWellTyped(args UpdateArguments) (ok bool, err error)
 }
@@ -24,8 +26,16 @@ type genericCRDT struct {
 type State interface {
 }
 
-//Represents the arguments specific to each CRDT.
+//Represents the update arguments specific to each CRDT.
 type UpdateArguments interface {
+}
+
+//Represents the read arguments specific to each CRDT.
+type ReadArguments interface {
+}
+
+//Represents a read of the whole state
+type StateReadArguments struct {
 }
 
 type ArgsError struct {
@@ -39,4 +49,14 @@ type ArgsError struct {
 func (crdt genericCRDT) GetVersion() (ts clocksi.Timestamp) {
 	ts = crdt.ts
 	return
+}
+
+func (crdt genericCRDT) initialize() (newCrdt genericCRDT) {
+	return genericCRDT{ts: clocksi.NewClockSiTimestamp()}
+}
+
+//Note that this only copies the generic part
+func (crdt genericCRDT) copy() (copyCrdt genericCRDT) {
+	//Should be safe to use the same clock
+	return genericCRDT{ts: crdt.ts}
 }

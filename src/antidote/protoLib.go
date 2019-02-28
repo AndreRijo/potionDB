@@ -431,7 +431,7 @@ func convertAntidoteStatesToProto(objectStates []crdt.State) (protobufs []*ApbRe
 		switch convertedState := state.(type) {
 		case crdt.CounterState:
 			protobufs[i] = createCounterReadResp(convertedState.Value)
-		case crdt.SetAWState:
+		case crdt.SetAWValueState:
 			protobufs[i] = createSetReadResp(convertedState.Elems)
 		default:
 			tools.CheckErr("Unsupported data type in convertAntidoteStatesToProto", nil)

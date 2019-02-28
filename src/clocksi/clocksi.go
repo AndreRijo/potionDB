@@ -3,6 +3,7 @@ package clocksi
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -32,6 +33,9 @@ type Timestamp interface {
 	IsEqual(otherTs Timestamp) (compResult bool)
 	//Returns true when Compare(otherTs) would return ConcurrentTs.
 	IsConcurrent(otherTs Timestamp) (compResult bool)
+	//Returns the timestamp resulting of merging this timestamp and the argument timestamp
+	//In a vector clock, it represents keeping the highest value of each position
+	Merge(otherTs Timestamp) (mergedTs Timestamp)
 	//Converts the timestamp to a byte array
 	ToBytes() (bytes []byte)
 	//Gets the timestamp that is represented in the byte array
@@ -39,6 +43,8 @@ type Timestamp interface {
 	FromBytes(bytes []byte) (newTs Timestamp)
 	//Useful for debugging purposes
 	ToString() (tsString string)
+	//Gets a representation of this clock that is safe to use in GO maps
+	GetMapKey() (key TimestampKey)
 }
 
 type ClockSiTimestamp struct {
@@ -46,6 +52,8 @@ type ClockSiTimestamp struct {
 }
 
 type TsResult int
+
+type TimestampKey interface{}
 
 const (
 	//Common to all clocks
@@ -61,7 +69,17 @@ const (
 var (
 	//Useful for comparations or other situations in which we need a temporary, non-significant, timestamp
 	DummyTs = NewClockSiTimestamp()
+	//Useful for situations in which we need a timestamp bigger than all others
+	DummyHighTs = prepareDummyHighTs()
 )
+
+func prepareDummyHighTs() (ts Timestamp) {
+	vc := make([]int64, 1)
+	clockSiTs := ClockSiTimestamp{vectorClock: &vc}
+	(*clockSiTs.vectorClock)[0] = math.MaxInt64
+	ts = clockSiTs
+	return
+}
 
 //Creates a new timestamp. This gives the same result as doing: newTs = ClockSiTimestamp{}.NewTimestamp().
 //Use whichever option feels more natural.
@@ -223,6 +241,23 @@ func (ts ClockSiTimestamp) IsConcurrent(otherTs Timestamp) (compResult bool) {
 	return ts.Compare(otherTs) == ConcurrentTs
 }
 
+func (ts ClockSiTimestamp) Merge(otherTs Timestamp) (mergedTs Timestamp) {
+	vc := make([]int64, len(*ts.vectorClock))
+	mergedTs = ClockSiTimestamp{vectorClock: &vc}
+	otherTsVc := *otherTs.(ClockSiTimestamp).vectorClock
+
+	for i, value := range *ts.vectorClock {
+		//Keep the max of each position
+		if value > otherTsVc[i] {
+			vc[i] = value
+		} else {
+			vc[i] = otherTsVc[i]
+		}
+	}
+
+	return
+}
+
 func (ts ClockSiTimestamp) ToBytes() (bytes []byte) {
 	bytes = make([]byte, len(*ts.vectorClock)*entrySize)
 	for i, vcEntry := range *ts.vectorClock {
@@ -257,5 +292,13 @@ func (ts ClockSiTimestamp) ToString() (tsString string) {
 		builder.WriteString(fmt.Sprint(value) + ",")
 	}
 	builder.WriteString("]}")
+	return builder.String()
+}
+
+func (ts ClockSiTimestamp) GetMapKey() (key TimestampKey) {
+	var builder strings.Builder
+	for _, value := range *ts.vectorClock {
+		builder.WriteString(fmt.Sprint(value, ","))
+	}
 	return builder.String()
 }
