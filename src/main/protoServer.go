@@ -16,7 +16,6 @@ import (
 	rand "math/rand"
 	"net"
 	"os"
-	"strings"
 	"time"
 	"tools"
 
@@ -29,12 +28,14 @@ var (
 
 func main() {
 
-	fmt.Println("Port?")
-	portString, _ := in.ReadString('\n')
+	//fmt.Println("Port?")
+	//portString, _ := in.ReadString('\n')
 	rand.Seed(time.Now().UTC().UnixNano())
 	antidote.Initialize()
-	server, err := net.Listen("tcp", "127.0.0.1:"+strings.TrimSpace(portString))
+	//server, err := net.Listen("tcp", "127.0.0.1:"+strings.TrimSpace(portString))
+	server, err := net.Listen("tcp", "127.0.0.1:8087")
 	tools.CheckErr(tools.PORT_ERROR, err)
+	fmt.Println("PotionDB started.")
 
 	//Stop listening to port on shutdown
 	defer server.Close()
