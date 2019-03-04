@@ -126,7 +126,7 @@ func handleStaticReadObjects(proto *antidote.ApbStaticReadObjects,
 	objs := protoObjectsToAntidoteObjects(proto.GetObjects())
 	replyChan := make(chan antidote.TMStaticReadReply)
 
-	tmChan <- createTMRequest(antidote.TMStaticReadArgs{ObjsParams: objs, ReplyChan: replyChan}, txnId, clientClock)
+	tmChan <- createTMRequest(antidote.TMStaticReadArgs{ReadParams: objs, ReplyChan: replyChan}, txnId, clientClock)
 
 	reply := <-replyChan
 	close(replyChan)
@@ -165,7 +165,7 @@ func handleReadObjects(proto *antidote.ApbReadObjects,
 	objs := protoObjectsToAntidoteObjects(proto.GetBoundobjects())
 	replyChan := make(chan []crdt.State)
 
-	tmChan <- createTMRequest(antidote.TMReadArgs{ObjsParams: objs, ReplyChan: replyChan}, txnId, clientClock)
+	tmChan <- createTMRequest(antidote.TMReadArgs{ReadParams: objs, ReplyChan: replyChan}, txnId, clientClock)
 
 	reply := <-replyChan
 	close(replyChan)
@@ -246,12 +246,15 @@ func handleCommitTxn(proto *antidote.ApbCommitTransaction,
 	return
 }
 
-func protoObjectsToAntidoteObjects(protoObjs []*antidote.ApbBoundObject) (objs []antidote.KeyParams) {
+func protoObjectsToAntidoteObjects(protoObjs []*antidote.ApbBoundObject) (objs []antidote.ReadObjectParams) {
 
-	objs = make([]antidote.KeyParams, len(protoObjs))
+	objs = make([]antidote.ReadObjectParams, len(protoObjs))
 
 	for i, currObj := range protoObjs {
-		objs[i] = antidote.CreateKeyParams(string(currObj.GetKey()), currObj.GetType(), string(currObj.GetBucket()))
+		objs[i] = antidote.ReadObjectParams{
+			KeyParams: antidote.CreateKeyParams(string(currObj.GetKey()), currObj.GetType(), string(currObj.GetBucket())),
+			ReadArgs:  crdt.StateReadArguments{}, //TODO: Implement partial read in proto side
+		}
 	}
 	return
 }

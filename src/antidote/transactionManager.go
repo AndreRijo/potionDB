@@ -24,9 +24,9 @@ type UpdateObjectParams struct {
 	UpdateArgs crdt.UpdateArguments
 }
 
-//TODO: Remove this one, as it is only used by the client
 type ReadObjectParams struct {
-	KeyParams //This grants access to any of the fields in KeyParams
+	KeyParams
+	ReadArgs crdt.ReadArguments
 }
 
 type TransactionManagerRequest struct {
@@ -40,7 +40,7 @@ type TMRequestArgs interface {
 }
 
 type TMReadArgs struct {
-	ObjsParams []KeyParams
+	ReadParams []ReadObjectParams
 	ReplyChan  chan []crdt.State
 }
 
@@ -55,7 +55,7 @@ type TMStaticUpdateArgs struct {
 }
 
 type TMStaticReadArgs struct {
-	ObjsParams []KeyParams
+	ReadParams []ReadObjectParams
 	ReplyChan  chan TMStaticReadReply
 }
 
@@ -239,17 +239,17 @@ func handleStaticTMRead(request TransactionManagerRequest) {
 
 	var currReadChan chan crdt.State = nil
 	var currRequest MaterializerRequest
-	states := make([]crdt.State, len(readArgs.ObjsParams))
+	states := make([]crdt.State, len(readArgs.ReadParams))
 
 	//Now, ask to read the client requested version.
-	for i, currRead := range readArgs.ObjsParams {
+	for i, currRead := range readArgs.ReadParams {
 		currReadChan = make(chan crdt.State)
 
 		currRequest = MaterializerRequest{
 			MatRequestArgs: MatStaticReadArgs{MatReadCommonArgs: MatReadCommonArgs{
-				Timestamp: tsToUse,
-				KeyParams: currRead,
-				ReplyChan: currReadChan,
+				Timestamp:        tsToUse,
+				ReadObjectParams: currRead,
+				ReplyChan:        currReadChan,
 			}},
 		}
 		SendRequest(currRequest)
@@ -379,17 +379,17 @@ func handleTMRead(request TransactionManagerRequest) {
 
 	var currReadChan chan crdt.State = nil
 	var currRequest MaterializerRequest
-	states := make([]crdt.State, len(readArgs.ObjsParams))
+	states := make([]crdt.State, len(readArgs.ReadParams))
 
 	//Now, ask to read the client requested version.
-	for i, currRead := range readArgs.ObjsParams {
+	for i, currRead := range readArgs.ReadParams {
 		currReadChan = make(chan crdt.State)
 
 		currRequest = MaterializerRequest{
 			MatRequestArgs: MatReadArgs{MatReadCommonArgs: MatReadCommonArgs{
-				Timestamp: tsToUse,
-				KeyParams: currRead,
-				ReplyChan: currReadChan,
+				Timestamp:        tsToUse,
+				ReadObjectParams: currRead,
+				ReplyChan:        currReadChan,
 			}, TransactionId: request.TransactionId},
 		}
 		SendRequest(currRequest)

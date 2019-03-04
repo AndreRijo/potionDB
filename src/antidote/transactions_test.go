@@ -69,8 +69,8 @@ func TestWrites1(t *testing.T) {
 		t.Error("Error on second write: ", secondWriteReply.Err)
 	}
 
-	readKeysParams := []KeyParams{firstKey, secondKey}
-	readReq, readChan := createStaticRead(secondWriteReply.TransactionId, secondWriteReply.Timestamp, readKeysParams)
+	readParams := []ReadObjectParams{createReadObjParams(firstKey), createReadObjParams(secondKey)}
+	readReq, readChan := createStaticRead(secondWriteReply.TransactionId, secondWriteReply.Timestamp, readParams)
 
 	go handleStaticTMRead(readReq)
 	readReply := <-readChan
@@ -143,8 +143,8 @@ func TestWrites2(t *testing.T) {
 		t.Error("Error on third write: ", thirdWriteReply.Err)
 	}
 
-	readKeysParams := []KeyParams{firstKey, secondKey}
-	readReq, readChan := createStaticRead(thirdWriteReply.TransactionId, thirdWriteReply.Timestamp, readKeysParams)
+	readParams := []ReadObjectParams{createReadObjParams(firstKey), createReadObjParams(secondKey)}
+	readReq, readChan := createStaticRead(thirdWriteReply.TransactionId, thirdWriteReply.Timestamp, readParams)
 
 	//fmt.Println("Sending read")
 	go handleStaticTMRead(readReq)
@@ -206,8 +206,8 @@ func TestWrites3(t *testing.T) {
 		t.Error("Error on third write: ", thirdWriteReply.Err)
 	}
 
-	readKeysParams := []KeyParams{firstKey}
-	readReq, readChan := createStaticRead(secondWriteReply.TransactionId, secondWriteReply.Timestamp, readKeysParams)
+	readParams := []ReadObjectParams{createReadObjParams(firstKey)}
+	readReq, readChan := createStaticRead(secondWriteReply.TransactionId, secondWriteReply.Timestamp, readParams)
 
 	go handleStaticTMRead(readReq)
 	readReply := <-readChan
@@ -283,8 +283,8 @@ func TestWritesAndReads(t *testing.T) {
 	} else {
 		futureTs = thirdWriteReply.Timestamp.NextTimestamp()
 	}
-	readKeysParams := []KeyParams{firstKey}
-	firstReadReq, firstReadChan := createStaticRead(TransactionId(0), futureTs, readKeysParams)
+	readParams := []ReadObjectParams{createReadObjParams(firstKey)}
+	firstReadReq, firstReadChan := createStaticRead(TransactionId(0), futureTs, readParams)
 
 	go handleStaticTMRead(firstReadReq)
 
@@ -318,7 +318,7 @@ func TestWritesAndReads(t *testing.T) {
 		t.Error("Error on fourth write: ", fourthWriteReply.Err)
 	}
 
-	secondReadReq, secondReadChan := createStaticRead(fourthWriteReply.TransactionId, fourthWriteReply.Timestamp, readKeysParams)
+	secondReadReq, secondReadChan := createStaticRead(fourthWriteReply.TransactionId, fourthWriteReply.Timestamp, readParams)
 
 	go handleStaticTMRead(secondReadReq)
 	secondReadReply := <-secondReadChan
@@ -344,7 +344,7 @@ func TestNonStaticTransaction1(t *testing.T) {
 	firstWriteParams, firstWriteReply := createAndProcessWrite(nonStatic, firstKey, createRandomSetAdd, txnRep.TransactionId, txnRep.Timestamp)
 	checkUpdateError(1, firstWriteReply.updateReply, t)
 
-	readKeyParams := []KeyParams{firstKey}
+	readKeyParams := []ReadObjectParams{createReadObjParams(firstKey)}
 	readReply := createAndProccessRead(nonStatic, readKeyParams, txnRep.TransactionId, txnRep.Timestamp)
 	if !checkWriteReadSetMatch(readReply.readReply[0].(crdt.SetAWValueState), firstWriteParams) {
 		t.Error("Read of key doesn't match")
@@ -380,8 +380,8 @@ func TestNonStaticTransaction2(t *testing.T) {
 	firstTxnWriteParams, firstTxnWriteReply := createAndProcessWrite(nonStatic, key, createRandomSetAdd, firstTxnRep.TransactionId, firstTxnRep.Timestamp)
 	checkUpdateError(1, firstTxnWriteReply.updateReply, t)
 
-	readKeyParams := []KeyParams{key}
-	firstTxnReadReply := createAndProccessRead(nonStatic, readKeyParams, firstTxnRep.TransactionId, firstTxnRep.Timestamp)
+	readParams := []ReadObjectParams{createReadObjParams(key)}
+	firstTxnReadReply := createAndProccessRead(nonStatic, readParams, firstTxnRep.TransactionId, firstTxnRep.Timestamp)
 
 	readExpectedUpds := []UpdateObjectParams{staticTxnWriteParams[0], firstTxnWriteParams[0]}
 	if !checkWriteReadSetMatch(firstTxnReadReply.readReply[0].(crdt.SetAWValueState), readExpectedUpds) {
@@ -391,7 +391,7 @@ func TestNonStaticTransaction2(t *testing.T) {
 	}
 
 	//2nd txn
-	secondTxnReadReply := createAndProccessRead(nonStatic, readKeyParams, secondTxnRep.TransactionId, secondTxnRep.Timestamp)
+	secondTxnReadReply := createAndProccessRead(nonStatic, readParams, secondTxnRep.TransactionId, secondTxnRep.Timestamp)
 	if !checkWriteReadSetMatch(secondTxnReadReply.readReply[0].(crdt.SetAWValueState), staticTxnWriteParams) {
 		t.Error("Second txn read of key doesn't match")
 		t.Error("Received: ", secondTxnReadReply.readReply[0].(crdt.SetAWValueState).Elems)
@@ -405,7 +405,7 @@ func TestNonStaticTransaction2(t *testing.T) {
 	//3rd txn
 	thirdTxnRep := createAndProcessStartTxn(firstTxnRep.TransactionId, firstCommitRep.Timestamp)
 
-	thirdTxnReadReply := createAndProccessRead(nonStatic, readKeyParams, thirdTxnRep.TransactionId, thirdTxnRep.Timestamp)
+	thirdTxnReadReply := createAndProccessRead(nonStatic, readParams, thirdTxnRep.TransactionId, thirdTxnRep.Timestamp)
 	if !checkWriteReadSetMatch(thirdTxnReadReply.readReply[0].(crdt.SetAWValueState), readExpectedUpds) {
 		t.Error("Third txn read of key doesn't match")
 		t.Error("Received: ", thirdTxnReadReply.readReply[0].(crdt.SetAWValueState).Elems)
@@ -434,13 +434,13 @@ func createStaticWrite(txnId TransactionId, ts clocksi.Timestamp, updParams []Up
 	return
 }
 
-func createStaticRead(txnId TransactionId, ts clocksi.Timestamp, keyParams []KeyParams) (request TransactionManagerRequest, replyChan chan TMStaticReadReply) {
+func createStaticRead(txnId TransactionId, ts clocksi.Timestamp, readParams []ReadObjectParams) (request TransactionManagerRequest, replyChan chan TMStaticReadReply) {
 	replyChan = make(chan TMStaticReadReply)
 	request = TransactionManagerRequest{
 		TransactionId: txnId,
 		Timestamp:     ts,
 		Args: TMStaticReadArgs{
-			ObjsParams: keyParams,
+			ReadParams: readParams,
 			ReplyChan:  replyChan,
 		},
 	}
@@ -460,13 +460,13 @@ func createWrite(txnId TransactionId, ts clocksi.Timestamp, updParams []UpdateOb
 	return
 }
 
-func createRead(txnId TransactionId, ts clocksi.Timestamp, keyParams []KeyParams) (request TransactionManagerRequest, replyChan chan []crdt.State) {
+func createRead(txnId TransactionId, ts clocksi.Timestamp, readParams []ReadObjectParams) (request TransactionManagerRequest, replyChan chan []crdt.State) {
 	replyChan = make(chan []crdt.State)
 	request = TransactionManagerRequest{
 		TransactionId: txnId,
 		Timestamp:     ts,
 		Args: TMReadArgs{
-			ObjsParams: keyParams,
+			ReadParams: readParams,
 			ReplyChan:  replyChan,
 		},
 	}
@@ -504,6 +504,10 @@ func createRandomSetAdd(keyParams KeyParams) (writeParams []UpdateObjectParams) 
 	return
 }
 
+func createReadObjParams(keyParams KeyParams) (readParams ReadObjectParams) {
+	return ReadObjectParams{KeyParams: keyParams, ReadArgs: crdt.StateReadArguments{}}
+}
+
 func createAndProcessCommit(txnId TransactionId, ts clocksi.Timestamp) (commitReply TMCommitReply) {
 	commitReq, commitChan := createCommit(txnId, ts)
 	go handleTMCommit(commitReq)
@@ -527,13 +531,13 @@ func createAndProcessWrite(isStatic bool, key KeyParams, writeParamsFunc func(Ke
 	return
 }
 
-func createAndProccessRead(isStatic bool, keys []KeyParams, txnId TransactionId, ts clocksi.Timestamp) (readReply testReadReply) {
+func createAndProccessRead(isStatic bool, readParams []ReadObjectParams, txnId TransactionId, ts clocksi.Timestamp) (readReply testReadReply) {
 	if isStatic {
-		readReq, readChan := createStaticRead(txnId, ts, keys)
+		readReq, readChan := createStaticRead(txnId, ts, readParams)
 		go handleStaticTMRead(readReq)
 		readReply = testReadReply{staticReadReply: <-readChan}
 	} else {
-		readReq, readChan := createRead(txnId, ts, keys)
+		readReq, readChan := createRead(txnId, ts, readParams)
 		go handleTMRead(readReq)
 		readReply = testReadReply{readReply: <-readChan}
 	}

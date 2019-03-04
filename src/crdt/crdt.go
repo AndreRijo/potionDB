@@ -5,9 +5,7 @@ import "clocksi"
 type CRDT interface {
 	Initialize() (newCrdt CRDT)
 
-	Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) //TODO: Properly implement this and get rid of GetValue()
-
-	GetValue() (state State)
+	Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State)
 
 	Update(args UpdateArguments) (downstreamArgs UpdateArguments)
 
@@ -42,9 +40,6 @@ type ArgsError struct {
 	err  string
 	args UpdateArguments
 }
-
-//TODO: Seems like we can't implement methods with more specific structures (e.g: use CounterState when interface mention State).
-//TODO: This means that we'll need some kind of typechecking, as the counter CRDT should only deal with counter states/arguments.
 
 func (crdt genericCRDT) GetVersion() (ts clocksi.Timestamp) {
 	ts = crdt.ts

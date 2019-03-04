@@ -13,7 +13,7 @@ type SetAWCrdt struct {
 	genericInversibleCRDT
 	elems map[Element]uniqueSet
 	//elems map[Element]uniqueSet
-	//Used to generate unique identifiers. This does not need to be included in a serialization to transfer the state.
+	//Used to generate unique identifiers. This should not be included in a serialization to transfer the state.
 	random rand.Source
 }
 
@@ -87,26 +87,35 @@ func (crdt *SetAWCrdt) Initialize() (newCrdt CRDT) {
 	return
 }
 
-//TODO: Implement proper read
-/*
-func (crdt *SetAWCrdt) Read(args ReadArguments) (state State) {
-	return crdt.GetValue()
-}
-*/
-
-//TODO: Implement proper read
 func (crdt *SetAWCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
+	switch typedArg := args.(type) {
+	case StateReadArguments:
+		return crdt.getState(updsNotYetApplied)
+	case LookupReadArguments:
+		return crdt.lookup(typedArg.elem, updsNotYetApplied)
+	}
+	return nil
+}
+
+func (crdt *SetAWCrdt) getState(updsNotYetApplied []UpdateArguments) (state State) {
 	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
-		return crdt.GetValue()
+		//go doesn't have a set structure nor a way to get keys from map.
+		//Using an auxiliary array in the state with the elements isn't a good option either - remove would have to search for the element
+		//So, unfortunatelly, we need to built it here.
+		elems := make([]Element, len(crdt.elems))
+		i := 0
+		for key := range crdt.elems {
+			elems[i] = key
+			i++
+		}
+		return SetAWValueState{Elems: elems}
 	}
 
+	//Need to build temporary state
 	adds := make(map[Element]struct{})
 	rems := make(map[Element]struct{})
 
 	//Idea: go through the updates and check which elements were added/removed compared to the original state.
-	//Note that we shouldn't use the state returned by GetValue() - that state is an array of elements,
-	//which would be very inneficient for checking which elements to add/remove (not to mention expand the array capacity)
-
 	for _, upd := range updsNotYetApplied {
 		switch typedUpd := upd.(type) {
 		case Add:
@@ -155,18 +164,37 @@ func (crdt *SetAWCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArgume
 	return SetAWValueState{Elems: elems}
 }
 
-func (crdt *SetAWCrdt) GetValue() (state State) {
-	//go doesn't have a set structure nor a way to get keys from map.
-	//Using an auxiliary array in the state with the elements isn't a good option either - remove would have to search for the element
-	//So, unfortunatelly, we need to built it here.
-	elems := make([]Element, len(crdt.elems))
-	i := 0
-	for key := range crdt.elems {
-		elems[i] = key
-		i++
+func (crdt *SetAWCrdt) lookup(elem Element, updsNotYetApplied []UpdateArguments) (state State) {
+	_, hasElem := crdt.elems[elem]
+	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+		return SetAWLookupState{hasElem: hasElem}
 	}
-	state = SetAWValueState{Elems: elems}
-	return
+	//Need to go through pending updates to decide if the element is in the state or not
+	for _, upd := range updsNotYetApplied {
+		switch typedUpd := upd.(type) {
+		case Add:
+			if typedUpd.Element == elem {
+				hasElem = true
+			}
+		case AddAll:
+			for _, updElem := range typedUpd.Elems {
+				if updElem == elem {
+					hasElem = true
+				}
+			}
+		case Remove:
+			if typedUpd.Element == elem {
+				hasElem = false
+			}
+		case RemoveAll:
+			for _, updElem := range typedUpd.Elems {
+				if updElem == elem {
+					hasElem = false
+				}
+			}
+		}
+	}
+	return SetAWLookupState{hasElem: hasElem}
 }
 
 //TODO: Maybe one day implement add and remove with their own methods (i.e., avoid the overhead of creating/handling arrays and maps?)

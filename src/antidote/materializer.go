@@ -29,7 +29,7 @@ type MatVersionArgs struct {
 }
 
 type MatReadCommonArgs struct {
-	KeyParams
+	ReadObjectParams
 	clocksi.Timestamp
 	ReplyChan chan crdt.State
 }
@@ -309,9 +309,9 @@ func applyReadAndReply(readArgs *MatReadCommonArgs, readLatest bool, readTs cloc
 		pendingObjOps = getObjectPendingOps(readArgs.KeyParams, pendingOps)
 	}
 	if readLatest {
-		state = obj.ReadLatest(crdt.StateReadArguments{}, pendingObjOps)
+		state = obj.ReadLatest(readArgs.ReadArgs, pendingObjOps)
 	} else {
-		state = obj.ReadOld(crdt.StateReadArguments{}, readTs, pendingObjOps)
+		state = obj.ReadOld(readArgs.ReadArgs, readTs, pendingObjOps)
 	}
 
 	readArgs.ReplyChan <- state
