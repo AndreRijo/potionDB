@@ -1,6 +1,8 @@
 package crdt
 
-import "clocksi"
+import (
+	"clocksi"
+)
 
 type InversibleCRDT interface {
 	CRDT
@@ -37,24 +39,41 @@ const (
 	initialEffectsSize = 5
 )
 
-func (crdt genericInversibleCRDT) initialize() (newCrdt genericInversibleCRDT) {
-	return genericInversibleCRDT{
+func (crdt *genericInversibleCRDT) initialize() (newCrdt *genericInversibleCRDT) {
+	newCrdt = &genericInversibleCRDT{
 		genericCRDT: genericCRDT{}.initialize(),
-		history:     make([]*History, 0, initialHistSize),
+		history:     make([]*History, 1, initialHistSize),
 	}
+	//Add a "initial state" entry to history
+	newCrdt.history[0] = &History{ts: &clocksi.DummyTs, updsArgs: []*UpdateArguments{}, effects: []*Effect{}}
+	return
 }
 
 //Note that this only copies the generic part
-func (crdt genericInversibleCRDT) copy() (copyCrdt genericInversibleCRDT) {
-	copyCrdt = genericInversibleCRDT{
+func (crdt *genericInversibleCRDT) copy() (copyCrdt *genericInversibleCRDT) {
+	/*
+		copyCrdt = genericInversibleCRDT{
+			genericCRDT: crdt.genericCRDT.copy(),
+			history:     crdt.history,
+		}
+	*/
+	copyCrdt = &genericInversibleCRDT{
 		genericCRDT: crdt.genericCRDT.copy(),
-		history:     crdt.history,
+		history:     make([]*History, len(crdt.history), cap(crdt.history)),
+	}
+	//We need to make a deep copy of each history entry, as when we go back in history in a CRDT the effects of updates may change. We also need to copy the effects to a new array
+	for i, hist := range crdt.history {
+		copyCrdt.history[i] = &History{ts: hist.ts, updsArgs: hist.updsArgs, effects: make([]*Effect, len(hist.effects), cap(hist.effects))}
+		for j, eff := range hist.effects {
+			valueCopy := *eff
+			copyCrdt.history[i].effects[j] = &valueCopy
+		}
 	}
 	return
 }
 
 //Adds an operation to the history
-func (crdt genericInversibleCRDT) addToHistory(ts *clocksi.Timestamp, updArgs *UpdateArguments, effect *Effect) {
+func (crdt *genericInversibleCRDT) addToHistory(ts *clocksi.Timestamp, updArgs *UpdateArguments, effect *Effect) {
 	var hist *History
 	if len(crdt.history) == 0 || !(*crdt.history[len(crdt.history)-1].ts).IsEqual(*ts) {
 		hist = &History{
@@ -72,7 +91,7 @@ func (crdt genericInversibleCRDT) addToHistory(ts *clocksi.Timestamp, updArgs *U
 
 //Rebuilds the CRDT to match the CRDT's state in the version received as argument.
 //Note that both undoEffectFunc and downstreamFunc should be provided by each wrapping CRDT.
-func (crdt genericInversibleCRDT) rebuildCRDTToVersion(targetTs clocksi.Timestamp,
+func (crdt *genericInversibleCRDT) rebuildCRDTToVersion(targetTs clocksi.Timestamp,
 	undoEffectFunc func(*Effect), reapplyOpFunc func(UpdateArguments) *Effect) {
 	currTs := *crdt.history[len(crdt.history)-1].ts
 	var i int
@@ -83,19 +102,32 @@ func (crdt genericInversibleCRDT) rebuildCRDTToVersion(targetTs clocksi.Timestam
 		}
 		currTs = *crdt.history[i-1].ts
 	}
+	//We didn't undo the history to which i points atm
+	i++
+	canStop := false
 	//Go forward in history and re-apply only the relevant operations...
-	for ; !currTs.IsEqual(targetTs); i++ {
+	//Note that we might have to stop in a timestamp before targetTs. Example: history has [1], [4] (upds with ts [2], [3] was in other CRDTs) and targetTs is [3]
+	for ; !canStop; i++ {
 		//If the version in history[i] is concurrent to the target version, then we should skip this operation.
 		//E.g: target is [3, 2] and we're looking at [1, 3]. Skip [1, 3]
-		//If it isn't concurrent, then we can apply the update.
-		if !targetTs.IsConcurrent(*crdt.history[i].ts) {
+		tsCompare := (*crdt.history[i].ts).Compare(targetTs)
+		if tsCompare == clocksi.HigherTs {
+			canStop = true
+		} else if tsCompare != clocksi.ConcurrentTs {
+			//If it isn't concurrent nor higher, then we can apply the update.
 			for j, updArgs := range crdt.history[i].updsArgs {
 				crdt.history[i].effects[j] = reapplyOpFunc(*updArgs)
 			}
 			currTs = currTs.Merge(*crdt.history[i].ts)
+			//The history we applied might had the exact clock we were looking for
+			if tsCompare == clocksi.EqualTs {
+				canStop = true
+			}
 		} else {
 			crdt.history = append(crdt.history[:i], crdt.history[i+1:]...)
 			i--
 		}
 	}
+	//"delete" (in fact, hide) the remaining history
+	crdt.history = crdt.history[:i]
 }

@@ -71,6 +71,12 @@ type MatPrepareArgs struct {
 	ReplyChan     chan clocksi.Timestamp
 }
 
+type PendingReads struct {
+	TransactionId
+	clocksi.Timestamp
+	Reads []*MatReadCommonArgs
+}
+
 type MatRequestType byte
 
 //////////********************Other types************************//////////
@@ -86,8 +92,7 @@ type partitionData struct {
 	suggestedTimestamps map[TransactionId]clocksi.Timestamp    //map of transactionId -> timestamp suggested on first write request for transactionId
 	commitedWaitToApply map[TransactionId]clocksi.Timestamp    //set of transactionId -> commit timestamp of commited transactions that couldn't be applied due to pending versions
 	//TODO: Choose a better option to hold pending reads? Checking the whole map takes a long time...
-	//TODO: This WON'T work in non-static transactions with multiple reads (when using client instead of transactions_test.go). I need to use something else as key, but I also need the timestamp... Maybe a map of tsKey -> struct with ts + matreadargs?
-	pendingReads map[clocksi.Timestamp][]*MatReadCommonArgs //pending reads that require a more recent version than stableVersion
+	pendingReads map[clocksi.TimestampKey]*PendingReads //pending reads that require a more recent version than stableVersion
 }
 
 type BoolErrorPair struct {
@@ -221,7 +226,7 @@ func listenForTransactionManagerRequests(id uint64) {
 		pendingOps:          make(map[TransactionId][]UpdateObjectParams),
 		suggestedTimestamps: make(map[TransactionId]clocksi.Timestamp),
 		commitedWaitToApply: make(map[TransactionId]clocksi.Timestamp),
-		pendingReads:        make(map[clocksi.Timestamp][]*MatReadCommonArgs),
+		pendingReads:        make(map[clocksi.TimestampKey]*PendingReads),
 	}
 	//Listens to the channel and processes requests
 	channel := make(chan MaterializerRequest)
@@ -268,11 +273,16 @@ func auxiliaryRead(readArgs MatReadCommonArgs, txnId TransactionId, partitionDat
 		applyReadAndReply(&readArgs, readLatest, readArgs.Timestamp, txnId, partitionData)
 	} else {
 		//Queue the request.
-		queue, exists := partitionData.pendingReads[readArgs.Timestamp]
+		queue, exists := partitionData.pendingReads[readArgs.Timestamp.GetMapKey()]
 		if !exists {
-			queue = make([]*MatReadCommonArgs, 0, readQueueSize)
+			queue = &PendingReads{
+				Timestamp:     readArgs.Timestamp,
+				TransactionId: txnId,
+				Reads:         make([]*MatReadCommonArgs, 0, readQueueSize),
+			}
+			partitionData.pendingReads[readArgs.Timestamp.GetMapKey()] = queue
 		}
-		partitionData.pendingReads[readArgs.Timestamp] = append(queue, &readArgs)
+		queue.Reads = append(queue.Reads, &readArgs)
 	}
 }
 
@@ -498,14 +508,13 @@ func applyUpdates(updates []UpdateObjectParams, commitTimestamp *clocksi.Timesta
 }
 
 func applyPendingReads(partitionData *partitionData) {
-	for ts, readSlices := range partitionData.pendingReads {
-		if canRead, readLatest := canRead(ts, partitionData); canRead {
+	for tsKey, pendingReads := range partitionData.pendingReads {
+		if canRead, readLatest := canRead(pendingReads.Timestamp, partitionData); canRead {
 			//Apply all reads of that transaction
-			for _, readArgs := range readSlices {
-				//TODO: Someway to get TransactionID in this case.
-				applyReadAndReply(readArgs, readLatest, ts, math.MaxInt64, partitionData)
+			for _, readArgs := range pendingReads.Reads {
+				applyReadAndReply(readArgs, readLatest, pendingReads.Timestamp, pendingReads.TransactionId, partitionData)
 			}
-			delete(partitionData.pendingReads, ts)
+			delete(partitionData.pendingReads, tsKey)
 		}
 	}
 }

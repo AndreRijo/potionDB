@@ -10,7 +10,7 @@ type Element string
 
 //Note: Implements both CRDT and InversibleCRDT
 type SetAWCrdt struct {
-	genericInversibleCRDT
+	*genericInversibleCRDT
 	elems map[Element]uniqueSet
 	//elems map[Element]uniqueSet
 	//Used to generate unique identifiers. This should not be included in a serialization to transfer the state.
@@ -80,7 +80,7 @@ type RemoveAllEffect struct {
 //Note: crdt can (and most often will be) nil
 func (crdt *SetAWCrdt) Initialize() (newCrdt CRDT) {
 	crdt = &SetAWCrdt{
-		genericInversibleCRDT: genericInversibleCRDT{}.initialize(),
+		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(),
 		elems:                 make(map[Element]uniqueSet),
 		random:                rand.NewSource(time.Now().Unix())} //TODO: Assign to crdt is potencially unecessary (idea: Updates self in the map (reset operation?))
 	newCrdt = crdt
