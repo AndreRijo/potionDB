@@ -8,6 +8,7 @@ import (
 	"crdt"
 	fmt "fmt"
 	"math/rand"
+	"sync"
 )
 
 /////*****************TYPE DEFINITIONS***********************/////
@@ -113,6 +114,11 @@ type TransactionId uint64
 
 type partSet map[uint64]struct{}
 
+//"Extends" sync.Map with an additional load method
+type SyncMap struct {
+	sync.Map
+}
+
 /////*****************CONSTANTS AND VARIABLES***********************/////
 
 const (
@@ -127,8 +133,11 @@ const (
 )
 
 var (
+	//TODO: Optimization: have each thread store his entry of txnPartitions, similary to what is done in the Materializer. This avoids having to use a map with locks (sync.Map)
 	//map of txnID -> partitions which had at least one update of that txn
-	txnPartitions map[TransactionId]partSet = make(map[TransactionId]partSet)
+	//the normal go map isn't safe for concurrent writes even in different keys
+	//txnPartitions map[TransactionId]partSet = make(map[TransactionId]partSet)
+	txnPartitions SyncMap = SyncMap{}
 )
 
 /////*****************TYPE METHODS***********************/////
@@ -172,6 +181,11 @@ func makePartSet() (set partSet) {
 
 func (set partSet) add(partId uint64) {
 	set[partId] = struct{}{}
+}
+
+func (m *SyncMap) LoadSimple(key interface{}) (value interface{}) {
+	value, _ = m.Load(key)
+	return value
 }
 
 /////*****************TRANSACTION MANAGER CODE***********************/////
@@ -424,8 +438,10 @@ func handleTMUpdate(request TransactionManagerRequest) {
 			}
 			replyChannels = append(replyChannels, currChan)
 			//Mark this partition as one of the involved in this txnId
-			if _, hasPart := txnPartitions[request.TransactionId][partId]; !hasPart {
-				txnPartitions[request.TransactionId].add(partId)
+			//if _, hasPart := txnPartitions[request.TransactionId][partId]; !hasPart {
+			parts := txnPartitions.LoadSimple(request.TransactionId).(partSet)
+			if _, hasPart := parts[partId]; !hasPart {
+				parts.add(partId)
 			}
 			SendRequestToChannel(currRequest, partId)
 		}
@@ -499,7 +515,7 @@ func handleTMStartTxn(request TransactionManagerRequest) {
 	//TODO: Ensure that the new clock is higher than the one received from the client. Also, take in consideration txn properties?
 	newClock := clocksi.NewClockSiTimestamp().NextTimestamp()
 	var newTxnId TransactionId = TransactionId(rand.Uint64())
-	txnPartitions[newTxnId] = makePartSet()
+	txnPartitions.Store(newTxnId, makePartSet())
 
 	startTxnArgs.ReplyChan <- TMStartTxnReply{TransactionId: newTxnId, Timestamp: newClock}
 }
@@ -508,7 +524,7 @@ func handleTMCommit(request TransactionManagerRequest) {
 	commitArgs := request.Args.(TMCommitArgs)
 
 	//PREPARE
-	involvedPartitions := txnPartitions[request.TransactionId]
+	involvedPartitions := txnPartitions.LoadSimple(request.TransactionId).(partSet)
 	replyChannels := make([]chan clocksi.Timestamp, 0, len(involvedPartitions))
 	var currRequest MaterializerRequest
 	//TODO: Use bounded channels and send the same channel to every partition?
@@ -544,7 +560,7 @@ func handleTMCommit(request TransactionManagerRequest) {
 		SendRequestToChannel(commitReq, uint64(partId))
 	}
 
-	delete(txnPartitions, request.TransactionId)
+	txnPartitions.Delete(request.TransactionId)
 
 	//Send ok to client
 	commitArgs.ReplyChan <- TMCommitReply{
@@ -555,10 +571,10 @@ func handleTMCommit(request TransactionManagerRequest) {
 
 func handleTMAbort(request TransactionManagerRequest) {
 	abortReq := MaterializerRequest{MatRequestArgs: MatAbortArgs{TransactionId: request.TransactionId}}
-	for partId, _ := range txnPartitions[request.TransactionId] {
+	for partId, _ := range txnPartitions.LoadSimple(request.TransactionId).(partSet) {
 		SendRequestToChannel(abortReq, uint64(partId))
 	}
-	delete(txnPartitions, request.TransactionId)
+	txnPartitions.Delete(request.TransactionId)
 }
 
 //TODO: Possibly cache the hashing results and return them? That would allow to include them in the requests and paralelize the read requests
