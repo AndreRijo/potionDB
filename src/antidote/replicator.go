@@ -6,6 +6,7 @@ import (
 )
 
 type Replicator struct {
+	tm              *TransactionManager //to send request to downstream transactions
 	localPartitions []Logger
 	remoteReps      []chan ReplicatorRequest
 	txnCache        map[int][]PairClockUpdates //int: partitionID
@@ -30,8 +31,9 @@ const (
 	toSendInitialSize               = 10
 )
 
-func (repl *Replicator) Initialize(loggers []Logger) {
+func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger) {
 	if !repl.started {
+		repl.tm = tm
 		repl.started = true
 		//nGoRoutines: number of partitions (defined in Materializer)
 		repl.localPartitions = loggers
@@ -135,7 +137,7 @@ func (repl *Replicator) sendTxns(toSend []RemoteTxns) {
 func (repl *Replicator) receiveRemoteTxns() {
 	for {
 		remoteReq := <-repl.receiveReplChan
-		SendRemoteTxnRequest(TMRemoteTxn{
+		repl.tm.SendRemoteTxnRequest(TMRemoteTxn{
 			ReplicaID: remoteReq.senderID,
 			Upds:      remoteReq.txns,
 		})

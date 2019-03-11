@@ -118,6 +118,14 @@ type TimestampErrorPair struct {
 	error
 }
 
+type Materializer struct {
+	//uint64: result returned by the hash function
+	keyRangeSize uint64 //Number of keys that each goroutine is responsible, except for the last one which might have a bit more.
+	//Each goroutine is responsible for a certain range of keys (with no intersection between ranges)
+	//More precisely, a goroutine is responsible from its id * keyRangeSize (inclusive) to (id + 1) * keyRangeSize (exclusive)
+	channels []chan MaterializerRequest
+}
+
 //////////*******************Error types***********************//////////
 //TODO: Move this to crdt.go...?
 type UnknownCrdtTypeError struct {
@@ -147,10 +155,7 @@ const (
 
 var (
 	//uint64: result returned by the hash function
-	keyRangeSize uint64 //Number of keys that each goroutine is responsible, except for the last one which might have a bit more.
-	//Each goroutine is responsible for a certain range of keys (with no intersection between ranges)
-	//More precisely, a goroutine is responsible from its id * keyRangeSize (inclusive) to (id + 1) * keyRangeSize (exclusive)
-	channels = make([]chan MaterializerRequest, nGoRoutines)
+	keyRangeSize uint64 = math.MaxUint64 / nGoRoutines //Number of keys that each goroutine is responsible, except for the last one which might have a bit more.
 )
 
 /////*****************TYPE METHODS***********************/////
@@ -238,19 +243,21 @@ func (err UnknownCrdtTypeError) Error() (errString string) {
 /////*****************MATERIALIZER CODE***********************/////
 
 //Starts listening goroutines and channels. Also starts each partition's logger and returns it
-func InitializeMaterializer() (loggers []Logger) {
-	keyRangeSize = math.MaxUint64 / nGoRoutines
+func InitializeMaterializer() (mat *Materializer, loggers []Logger) {
+	mat = &Materializer{
+		channels: make([]chan MaterializerRequest, nGoRoutines),
+	}
 	loggers = make([]Logger, nGoRoutines)
 	var i uint64
 	for i = 0; i < nGoRoutines; i++ {
 		loggers[i] = &MemLogger{}
-		loggers[i].Initialize(i)
-		go listenForTransactionManagerRequests(i, loggers[i])
+		loggers[i].Initialize(mat, i)
+		go listenForTransactionManagerRequests(i, loggers[i], mat)
 	}
-	return loggers
+	return
 }
 
-func listenForTransactionManagerRequests(id uint64, logger Logger) {
+func listenForTransactionManagerRequests(id uint64, logger Logger, materializer *Materializer) {
 	//Each goroutine is responsible for the range of keys [keyRangeSize * id, keyRangeSize * (id + 1)[
 	//Where keyRangeSize = math.MaxUint64 / number of goroutines
 
@@ -267,7 +274,7 @@ func listenForTransactionManagerRequests(id uint64, logger Logger) {
 	}
 	//Listens to the channel and processes requests
 	channel := make(chan MaterializerRequest)
-	channels[id] = channel
+	materializer.channels[id] = channel
 	for {
 		request := <-channel
 		handleMatRequest(request, &partitionData)
@@ -627,19 +634,19 @@ func initializeVersionManager(crdtType CRDTType) (newVM VersionManager) {
 Called by the TransactionManager or any other entity that may want to communicate with the Materializer
 and doesn't yet know the appropriate channel
 */
-func SendRequest(request MaterializerRequest) {
-	channels[request.getChannel()] <- request
+func (mat *Materializer) SendRequest(request MaterializerRequest) {
+	mat.channels[request.getChannel()] <- request
 }
 
 /*
 Called by the TransactionManager or any other entity that may want to communicate with the Materializer
 when they know the appropriate channel. Avoids computing an extra hash.
 */
-func SendRequestToChannel(request MaterializerRequest, channelKey uint64) {
-	channels[channelKey] <- request
+func (mat *Materializer) SendRequestToChannel(request MaterializerRequest, channelKey uint64) {
+	mat.channels[channelKey] <- request
 }
 
-func SendRequestToChannels(request MaterializerRequest, channelsToSend ...chan MaterializerRequest) {
+func (mat *Materializer) SendRequestToChannels(request MaterializerRequest, channelsToSend ...chan MaterializerRequest) {
 	for _, channel := range channelsToSend {
 		//Copy the request to avoid concurrent access problems
 		newReq := request
@@ -647,8 +654,8 @@ func SendRequestToChannels(request MaterializerRequest, channelsToSend ...chan M
 	}
 }
 
-func SendRequestToAllChannels(request MaterializerRequest) {
-	for _, channel := range channels {
+func (mat *Materializer) SendRequestToAllChannels(request MaterializerRequest) {
+	for _, channel := range mat.channels {
 		//Copy the request to avoid concurrent access problems
 		newReq := request
 		channel <- newReq

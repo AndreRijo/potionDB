@@ -118,16 +118,24 @@ type TransactionId struct {
 */
 type TransactionId uint64
 
-type partSet map[uint64]struct{}
-
-//"Extends" sync.Map with an additional load method
-type SyncMap struct {
-	sync.Map
+type ongoingTxn struct {
+	TransactionId
+	partSet
 }
+
+type partSet map[uint64]struct{}
 
 type ProtectedClock struct {
 	clocksi.Timestamp
 	sync.Mutex
+}
+
+type TransactionManager struct {
+	mat           *Materializer
+	remoteTxnChan chan TMRemoteTxn
+	//TODO: Currently downstreaming txns holds the lock until the whole process is done (i.e., all transactions are either downstreamed to Materialized or queued). This can be a problem if we need to wait for Materializer - use bounded chans?
+	localClock      ProtectedClock
+	downstreamQueue map[int64][]RemoteTxns
 }
 
 /////*****************CONSTANTS AND VARIABLES***********************/////
@@ -143,21 +151,6 @@ const (
 	lostConnRequest       TMRequestType = 255
 	//TODO: This should be configurable or received somehow
 	ReplicaID int64 = 0
-)
-
-var (
-	//TODO: Optimization: have each thread store his entry of txnPartitions, similary to what is done in the Materializer. This avoids having to use a map with locks (sync.Map)
-	//map of txnID -> partitions which had at least one update of that txn
-	//the normal go map isn't safe for concurrent writes even in different keys
-	//txnPartitions map[TransactionId]partSet = make(map[TransactionId]partSet)
-	txnPartitions SyncMap          = SyncMap{}
-	remoteTxnChan chan TMRemoteTxn = make(chan TMRemoteTxn)
-	//TODO: Currently downstreaming txns holds the lock until the whole process is done (i.e., all transactions are either downstreamed to Materialized or queued). This can be a problem if we need to wait for Materializer - use bounded chans?
-	localClock ProtectedClock = ProtectedClock{
-		Timestamp: clocksi.NewClockSiTimestamp(),
-		Mutex:     sync.Mutex{},
-	}
-	downstreamQueue = make(map[int64][]RemoteTxns)
 )
 
 /////*****************TYPE METHODS***********************/////
@@ -203,17 +196,27 @@ func (set partSet) add(partId uint64) {
 	set[partId] = struct{}{}
 }
 
-func (m *SyncMap) LoadSimple(key interface{}) (value interface{}) {
-	value, _ = m.Load(key)
-	return value
+func (txnPartitions *ongoingTxn) reset() {
+	txnPartitions.TransactionId = 0
+	txnPartitions.partSet = nil
 }
 
 /////*****************TRANSACTION MANAGER CODE***********************/////
 
-func Initialize() {
-	loggers := InitializeMaterializer()
-	(&Replicator{}).Initialize(loggers) //For now, we don't need to store the replicator instance, as it is independent and works by itself
-	go handleRemoteTxnRequest()
+func Initialize() (tm *TransactionManager) {
+	mat, loggers := InitializeMaterializer()
+	tm = &TransactionManager{
+		mat:           mat,
+		remoteTxnChan: make(chan TMRemoteTxn),
+		localClock: ProtectedClock{
+			Mutex:     sync.Mutex{},
+			Timestamp: clocksi.NewClockSiTimestamp(),
+		},
+		downstreamQueue: make(map[int64][]RemoteTxns),
+	}
+	(&Replicator{}).Initialize(tm, loggers) //For now, we don't need to store the replicator instance, as it is independent and works by itself
+	go tm.handleRemoteTxnRequest()
+	return tm
 }
 
 func CreateKeyParams(key string, crdtType CRDTType, bucket string) (keyParams KeyParams) {
@@ -226,44 +229,46 @@ func CreateKeyParams(key string, crdtType CRDTType, bucket string) (keyParams Ke
 }
 
 //Starts a goroutine to handle the client requests. Returns a channel to communicate with that goroutine
-func CreateClientHandler() (channel chan TransactionManagerRequest) {
+func (tm *TransactionManager) CreateClientHandler() (channel chan TransactionManagerRequest) {
 	channel = make(chan TransactionManagerRequest)
-	go listenForProtobufRequests(channel)
+	go tm.listenForProtobufRequests(channel)
 	return
 }
 
-func SendRemoteTxnRequest(request TMRemoteTxn) {
-	remoteTxnChan <- request
+func (tm *TransactionManager) SendRemoteTxnRequest(request TMRemoteTxn) {
+	tm.remoteTxnChan <- request
 }
 
-func listenForProtobufRequests(channel chan TransactionManagerRequest) {
+func (tm *TransactionManager) listenForProtobufRequests(channel chan TransactionManagerRequest) {
 	stop := false
+	var txnPartitions *ongoingTxn = &ongoingTxn{}
 	for !stop {
 		request := <-channel
-		stop = handleTMRequest(request)
+		stop = tm.handleTMRequest(request, txnPartitions)
 	}
 
 	fmt.Println("TransactionManager - connection lost, shutting down goroutine.")
 }
 
-func handleTMRequest(request TransactionManagerRequest) (shouldStop bool) {
+func (tm *TransactionManager) handleTMRequest(request TransactionManagerRequest,
+	txnPartitions *ongoingTxn) (shouldStop bool) {
 	shouldStop = false
 
 	switch request.Args.getRequestType() {
 	case readStaticTMRequest:
-		handleStaticTMRead(request)
+		tm.handleStaticTMRead(request)
 	case updateStaticTMRequest:
-		handleStaticTMUpdate(request)
+		tm.handleStaticTMUpdate(request)
 	case readTMRequest:
-		handleTMRead(request)
+		tm.handleTMRead(request)
 	case updateTMRequest:
-		handleTMUpdate(request)
+		tm.handleTMUpdate(request, txnPartitions)
 	case startTxnTMRequest:
-		handleTMStartTxn(request)
+		tm.handleTMStartTxn(request, txnPartitions)
 	case commitTMRequest:
-		handleTMCommit(request)
+		tm.handleTMCommit(request, txnPartitions)
 	case abortTMRequest:
-		handleTMAbort(request)
+		tm.handleTMAbort(request, txnPartitions)
 	case lostConnRequest:
 		shouldStop = true
 	}
@@ -272,20 +277,20 @@ func handleTMRequest(request TransactionManagerRequest) (shouldStop bool) {
 	return
 }
 
-func handleRemoteTxnRequest() {
+func (tm *TransactionManager) handleRemoteTxnRequest() {
 	for {
-		request := <-remoteTxnChan
-		applyRemoteTxn(request.ReplicaID, request.Upds)
+		request := <-tm.remoteTxnChan
+		tm.applyRemoteTxn(request.ReplicaID, request.Upds)
 	}
 }
 
 //TODO: Group reads. Also, send a "read operation" instead of just key params.
-func handleStaticTMRead(request TransactionManagerRequest) {
+func (tm *TransactionManager) handleStaticTMRead(request TransactionManagerRequest) {
 	readArgs := request.Args.(TMStaticReadArgs)
 	//tsToUse := request.Timestamp
-	localClock.Lock()
-	tsToUse := localClock.Timestamp //TODO: Should we use here directly localClock or localClock.NextTimestamp()?
-	localClock.Unlock()
+	tm.localClock.Lock()
+	tsToUse := tm.localClock.Timestamp //TODO: Should we use here directly localClock or localClock.NextTimestamp()?
+	tm.localClock.Unlock()
 
 	var currReadChan chan crdt.State = nil
 	var currRequest MaterializerRequest
@@ -302,7 +307,7 @@ func handleStaticTMRead(request TransactionManagerRequest) {
 				ReplyChan:        currReadChan,
 			}},
 		}
-		SendRequest(currRequest)
+		tm.mat.SendRequest(currRequest)
 		//TODO: Wait for reply in different for
 		states[i] = <-currReadChan
 		close(currReadChan)
@@ -340,7 +345,7 @@ func handleStaticTMRead(request TransactionManagerRequest) {
 }
 
 //TODO: Separate in parts?
-func handleStaticTMUpdate(request TransactionManagerRequest) {
+func (tm *TransactionManager) handleStaticTMUpdate(request TransactionManagerRequest) {
 	updateArgs := request.Args.(TMStaticUpdateArgs)
 
 	newTxnId := TransactionId(rand.Uint64())
@@ -362,7 +367,7 @@ func handleStaticTMUpdate(request TransactionManagerRequest) {
 				},
 			}
 			replyChannels = append(replyChannels, currChan)
-			SendRequestToChannel(currRequest, uint64(partId))
+			tm.mat.SendRequestToChannel(currRequest, uint64(partId))
 		}
 	}
 
@@ -391,12 +396,12 @@ func handleStaticTMUpdate(request TransactionManagerRequest) {
 	}}
 	for partId, partUpdates := range updsPerPartition {
 		if partUpdates != nil {
-			SendRequestToChannel(commitReq, uint64(partId))
+			tm.mat.SendRequestToChannel(commitReq, uint64(partId))
 		}
 	}
-	localClock.Lock()
-	localClock.Timestamp = localClock.Merge(*maxTimestamp)
-	localClock.Unlock()
+	tm.localClock.Lock()
+	tm.localClock.Timestamp = tm.localClock.Merge(*maxTimestamp)
+	tm.localClock.Unlock()
 
 	//4th step: send ok to client
 	updateArgs.ReplyChan <- TMStaticUpdateReply{
@@ -425,7 +430,7 @@ func handleStaticTMUpdate(request TransactionManagerRequest) {
 }
 
 //TODO: Group reads.
-func handleTMRead(request TransactionManagerRequest) {
+func (tm *TransactionManager) handleTMRead(request TransactionManagerRequest) {
 	readArgs := request.Args.(TMReadArgs)
 	tsToUse := request.Timestamp
 
@@ -444,7 +449,7 @@ func handleTMRead(request TransactionManagerRequest) {
 				ReplyChan:        currReadChan,
 			}, TransactionId: request.TransactionId},
 		}
-		SendRequest(currRequest)
+		tm.mat.SendRequest(currRequest)
 		//TODO: Wait for reply in different for
 		states[i] = <-currReadChan
 		close(currReadChan)
@@ -453,7 +458,7 @@ func handleTMRead(request TransactionManagerRequest) {
 	readArgs.ReplyChan <- states
 }
 
-func handleTMUpdate(request TransactionManagerRequest) {
+func (tm *TransactionManager) handleTMUpdate(request TransactionManagerRequest, txnPartitions *ongoingTxn) {
 	updateArgs := request.Args.(TMUpdateArgs)
 
 	updsPerPartition := groupWrites(updateArgs.UpdateParams)
@@ -476,12 +481,10 @@ func handleTMUpdate(request TransactionManagerRequest) {
 			}
 			replyChannels = append(replyChannels, currChan)
 			//Mark this partition as one of the involved in this txnId
-			//if _, hasPart := txnPartitions[request.TransactionId][partId]; !hasPart {
-			parts := txnPartitions.LoadSimple(request.TransactionId).(partSet)
-			if _, hasPart := parts[partId]; !hasPart {
-				parts.add(partId)
+			if _, hasPart := txnPartitions.partSet[partId]; !hasPart {
+				txnPartitions.add(partId)
 			}
-			SendRequestToChannel(currRequest, partId)
+			tm.mat.SendRequestToChannel(currRequest, partId)
 		}
 	}
 
@@ -547,24 +550,25 @@ func groupWrites(updates []UpdateObjectParams) (updsPerPartition [][]UpdateObjec
 	return
 }
 
-func handleTMStartTxn(request TransactionManagerRequest) {
+func (tm *TransactionManager) handleTMStartTxn(request TransactionManagerRequest, txnPartitions *ongoingTxn) {
 	startTxnArgs := request.Args.(TMStartTxnArgs)
 
 	//TODO: Ensure that the new clock is higher than the one received from the client. Also, take in consideration txn properties?
-	localClock.Lock()
-	newClock := localClock.NextTimestamp()
-	localClock.Unlock()
-	var newTxnId TransactionId = TransactionId(rand.Uint64())
-	txnPartitions.Store(newTxnId, makePartSet())
+	tm.localClock.Lock()
+	newClock := tm.localClock.NextTimestamp()
+	tm.localClock.Unlock()
+	txnPartitions.TransactionId = TransactionId(rand.Uint64())
+	txnPartitions.partSet = makePartSet()
 
-	startTxnArgs.ReplyChan <- TMStartTxnReply{TransactionId: newTxnId, Timestamp: newClock}
+	startTxnArgs.ReplyChan <- TMStartTxnReply{TransactionId: txnPartitions.TransactionId, Timestamp: newClock}
+	return
 }
 
-func handleTMCommit(request TransactionManagerRequest) {
+func (tm *TransactionManager) handleTMCommit(request TransactionManagerRequest, txnPartitions *ongoingTxn) {
 	commitArgs := request.Args.(TMCommitArgs)
 
 	//PREPARE
-	involvedPartitions := txnPartitions.LoadSimple(request.TransactionId).(partSet)
+	involvedPartitions := txnPartitions.partSet
 	replyChannels := make([]chan clocksi.Timestamp, 0, len(involvedPartitions))
 	var currRequest MaterializerRequest
 	//TODO: Use bounded channels and send the same channel to every partition?
@@ -575,7 +579,7 @@ func handleTMCommit(request TransactionManagerRequest) {
 		currChan = make(chan clocksi.Timestamp)
 		currRequest = MaterializerRequest{MatRequestArgs: MatPrepareArgs{TransactionId: request.TransactionId, ReplyChan: currChan}}
 		replyChannels = append(replyChannels, currChan)
-		SendRequestToChannel(currRequest, partId)
+		tm.mat.SendRequestToChannel(currRequest, partId)
 	}
 
 	//Collect proposed timestamps and accept the maximum one
@@ -597,14 +601,14 @@ func handleTMCommit(request TransactionManagerRequest) {
 			TransactionId:   request.TransactionId,
 			CommitTimestamp: *maxTimestamp,
 		}}
-		SendRequestToChannel(currRequest, uint64(partId))
+		tm.mat.SendRequestToChannel(currRequest, uint64(partId))
 	}
 
-	txnPartitions.Delete(request.TransactionId)
+	tm.localClock.Lock()
+	tm.localClock.Timestamp = tm.localClock.Merge(*maxTimestamp)
+	tm.localClock.Unlock()
 
-	localClock.Lock()
-	localClock.Timestamp = localClock.Merge(*maxTimestamp)
-	localClock.Unlock()
+	txnPartitions.reset()
 
 	//Send ok to client
 	commitArgs.ReplyChan <- TMCommitReply{
@@ -613,37 +617,37 @@ func handleTMCommit(request TransactionManagerRequest) {
 	}
 }
 
-func handleTMAbort(request TransactionManagerRequest) {
+func (tm *TransactionManager) handleTMAbort(request TransactionManagerRequest, txnPartitions *ongoingTxn) {
 	abortReq := MaterializerRequest{MatRequestArgs: MatAbortArgs{TransactionId: request.TransactionId}}
-	for partId, _ := range txnPartitions.LoadSimple(request.TransactionId).(partSet) {
-		SendRequestToChannel(abortReq, uint64(partId))
+	for partId, _ := range txnPartitions.partSet {
+		tm.mat.SendRequestToChannel(abortReq, uint64(partId))
 	}
-	txnPartitions.Delete(request.TransactionId)
+	txnPartitions.reset()
 }
 
-func applyRemoteTxn(replicaID int64, upds []RemoteTxns) {
-	localClock.Lock()
+func (tm *TransactionManager) applyRemoteTxn(replicaID int64, upds []RemoteTxns) {
+	tm.localClock.Lock()
 	for i, txn := range upds {
-		isLowerOrEqual := txn.Timestamp.IsLowerOrEqualExceptFor(localClock.Timestamp, replicaID)
+		isLowerOrEqual := txn.Timestamp.IsLowerOrEqualExceptFor(tm.localClock.Timestamp, replicaID)
 		if isLowerOrEqual {
-			downstreamRemoteTxn(replicaID, txn.Timestamp, txn.upds)
+			tm.downstreamRemoteTxn(replicaID, txn.Timestamp, txn.upds)
 		} else {
 			//Check if txn.upds is empty - if it is, then it's just a clock update, which can be applied right away
 			if len(*txn.upds) == 0 {
-				localClock.Timestamp = localClock.Timestamp.UpdatePos(replicaID, txn.Timestamp.GetPos(replicaID))
+				tm.localClock.Timestamp = tm.localClock.Timestamp.UpdatePos(replicaID, txn.Timestamp.GetPos(replicaID))
 			} else {
 				//Queue all others
-				downstreamQueue[replicaID] = append(downstreamQueue[replicaID], upds[i:]...)
+				tm.downstreamQueue[replicaID] = append(tm.downstreamQueue[replicaID], upds[i:]...)
 			}
 			break
 		}
 	}
-	checkPendingRemoteTxns()
-	localClock.Unlock()
+	tm.checkPendingRemoteTxns()
+	tm.localClock.Unlock()
 }
 
 //Pre-condition: localClock's mutex is hold
-func downstreamRemoteTxn(replicaID int64, txnClk clocksi.Timestamp, txnOps *map[int][]UpdateObjectParams) {
+func (tm *TransactionManager) downstreamRemoteTxn(replicaID int64, txnClk clocksi.Timestamp, txnOps *map[int][]UpdateObjectParams) {
 	var currRequest MaterializerRequest
 	for partId, partOps := range *txnOps {
 		currRequest = MaterializerRequest{MatRequestArgs: MatRemoteTxnArgs{
@@ -651,24 +655,24 @@ func downstreamRemoteTxn(replicaID int64, txnClk clocksi.Timestamp, txnOps *map[
 			Timestamp: txnClk,
 			Upds:      partOps,
 		}}
-		SendRequestToChannel(currRequest, uint64(partId))
+		tm.mat.SendRequestToChannel(currRequest, uint64(partId))
 	}
-	localClock.Timestamp = localClock.Timestamp.UpdatePos(replicaID, txnClk.GetPos(replicaID))
+	tm.localClock.Timestamp = tm.localClock.Timestamp.UpdatePos(replicaID, txnClk.GetPos(replicaID))
 }
 
 //Pre-condition: localClock's mutex is hold
-func checkPendingRemoteTxns() {
+func (tm *TransactionManager) checkPendingRemoteTxns() {
 	appliedAtLeastOne := true
 	for appliedAtLeastOne {
-		for replicaID, pendingTxns := range downstreamQueue {
+		for replicaID, pendingTxns := range tm.downstreamQueue {
 			if !appliedAtLeastOne {
 				break
 			}
 			appliedAtLeastOne = false
 			for _, txn := range pendingTxns {
-				isLowerOrEqual := txn.Timestamp.IsLowerOrEqualExceptFor(localClock.Timestamp, replicaID)
+				isLowerOrEqual := txn.Timestamp.IsLowerOrEqualExceptFor(tm.localClock.Timestamp, replicaID)
 				if isLowerOrEqual {
-					downstreamRemoteTxn(replicaID, txn.Timestamp, txn.upds)
+					tm.downstreamRemoteTxn(replicaID, txn.Timestamp, txn.upds)
 					appliedAtLeastOne = true
 					if len(pendingTxns) > 1 {
 						pendingTxns = pendingTxns[1:]
@@ -680,16 +684,16 @@ func checkPendingRemoteTxns() {
 				}
 			}
 			if pendingTxns == nil {
-				delete(downstreamQueue, replicaID)
+				delete(tm.downstreamQueue, replicaID)
 			} else {
-				downstreamQueue[replicaID] = pendingTxns
+				tm.downstreamQueue[replicaID] = pendingTxns
 			}
 		}
 	}
 }
 
 //TODO: Possibly cache the hashing results and return them? That would allow to include them in the requests and paralelize the read requests
-func findCommonTimestamp(objsParams []KeyParams, clientTs clocksi.Timestamp) (ts clocksi.Timestamp) {
+func (tm *TransactionManager) findCommonTimestamp(objsParams []KeyParams, clientTs clocksi.Timestamp) (ts clocksi.Timestamp) {
 	verifiedPartitions := make([]bool, nGoRoutines)
 	var nVerified uint64 = 0
 	readChannels := make([]chan crdt.State, nGoRoutines)
@@ -711,7 +715,7 @@ func findCommonTimestamp(objsParams []KeyParams, clientTs clocksi.Timestamp) (ts
 					ChannelId: currChanKey,
 				},
 			}
-			SendRequestToChannel(currTSRequest, currChanKey)
+			tm.mat.SendRequestToChannel(currTSRequest, currChanKey)
 			currTS := <-replyTSChan
 			close(replyTSChan)
 

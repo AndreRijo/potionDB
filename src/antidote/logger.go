@@ -10,7 +10,7 @@ import (
 
 type Logger interface {
 	//Initializes the logger belogging to partition partitionID. Must be called before any other method of the Logger.
-	Initialize(partitionID uint64)
+	Initialize(mat *Materializer, partitionID uint64)
 	//Send a request to the logger.
 	//Each logger implementation must support the following requests: LogCommitArgs, LogNextClkArgs, LogOldTxnArgs
 	SendLoggerRequest(request LoggerRequest)
@@ -88,6 +88,7 @@ type MemLogger struct {
 	currLogPos int
 	sendChan   chan LoggerRequest
 	partId     uint64
+	mat        *Materializer //Used to send the safeClk request
 }
 
 type PairClockUpdates struct {
@@ -104,13 +105,14 @@ func (logger *MemLogger) SendLoggerRequest(request LoggerRequest) {
 }
 
 //Starts goroutine that listens to requests
-func (logger *MemLogger) Initialize(partId uint64) {
+func (logger *MemLogger) Initialize(mat *Materializer, partId uint64) {
 	if !logger.started {
 		logger.log = make([]PairClockUpdates, 0, initLogCapacity)
 		logger.currLogPos = 0
 		logger.sendChan = make(chan LoggerRequest)
 		logger.started = true
 		logger.partId = partId
+		logger.mat = mat
 		go logger.handleRequests()
 	}
 }
@@ -144,7 +146,7 @@ func (logger *MemLogger) handleTxnLogRequest(request LogTxnArgs) {
 		logger.currLogPos = len(logger.log)
 	}
 	replyChan := make(chan clocksi.Timestamp)
-	SendRequestToChannel(MaterializerRequest{MatRequestArgs: MatSafeClkArgs{ReplyChan: replyChan}}, uint64(logger.partId))
+	logger.mat.SendRequestToChannel(MaterializerRequest{MatRequestArgs: MatSafeClkArgs{ReplyChan: replyChan}}, uint64(logger.partId))
 	stableClk := <-replyChan
 	request.ReplyChan <- StableClkUpdatesPair{stableClock: stableClk, upds: txns}
 

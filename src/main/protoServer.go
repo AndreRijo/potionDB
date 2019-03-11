@@ -31,7 +31,7 @@ func main() {
 	//fmt.Println("Port?")
 	//portString, _ := in.ReadString('\n')
 	rand.Seed(time.Now().UTC().UnixNano())
-	antidote.Initialize()
+	tm := antidote.Initialize()
 	//server, err := net.Listen("tcp", "127.0.0.1:"+strings.TrimSpace(portString))
 	server, err := net.Listen("tcp", "127.0.0.1:8087")
 	tools.CheckErr(tools.PORT_ERROR, err)
@@ -43,7 +43,7 @@ func main() {
 	for {
 		conn, err := server.Accept()
 		tools.CheckErr(tools.NEW_CONN_ERROR, err)
-		go processConnection(conn)
+		go processConnection(conn, tm)
 	}
 }
 
@@ -55,8 +55,8 @@ Note that this is the same interaction type as in antidote.
 
 conn - the TCP connection between the client and this server.
 */
-func processConnection(conn net.Conn) {
-	tmChan := antidote.CreateClientHandler()
+func processConnection(conn net.Conn, tm *antidote.TransactionManager) {
+	tmChan := tm.CreateClientHandler()
 	//TODO: Change this to a random ID generated inside the transaction. This ID should be different from transaction to transaction
 	//The current solution can give problems in the Materializer when a commited transaction is put on hold and another transaction from the same client arrives
 	var clientId antidote.ClientId = antidote.ClientId(rand.Uint64())
