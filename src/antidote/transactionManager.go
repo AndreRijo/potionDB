@@ -74,6 +74,12 @@ type TMCommitArgs struct {
 type TMAbortArgs struct {
 }
 
+//Used by the Replicatoin Layer. Use a different thread to handle this
+type TMRemoteTxn struct {
+	ReplicaID int64
+	Upds      []RemoteTxns
+}
+
 type TMStaticReadReply struct {
 	States    []crdt.State
 	Timestamp clocksi.Timestamp
@@ -119,6 +125,11 @@ type SyncMap struct {
 	sync.Map
 }
 
+type ProtectedClock struct {
+	clocksi.Timestamp
+	sync.Mutex
+}
+
 /////*****************CONSTANTS AND VARIABLES***********************/////
 
 const (
@@ -130,6 +141,8 @@ const (
 	commitTMRequest       TMRequestType = 5
 	abortTMRequest        TMRequestType = 6
 	lostConnRequest       TMRequestType = 255
+	//TODO: This should be configurable or received somehow
+	ReplicaID int64 = 0
 )
 
 var (
@@ -137,7 +150,14 @@ var (
 	//map of txnID -> partitions which had at least one update of that txn
 	//the normal go map isn't safe for concurrent writes even in different keys
 	//txnPartitions map[TransactionId]partSet = make(map[TransactionId]partSet)
-	txnPartitions SyncMap = SyncMap{}
+	txnPartitions SyncMap          = SyncMap{}
+	remoteTxnChan chan TMRemoteTxn = make(chan TMRemoteTxn)
+	//TODO: Currently downstreaming txns holds the lock until the whole process is done (i.e., all transactions are either downstreamed to Materialized or queued). This can be a problem if we need to wait for Materializer - use bounded chans?
+	localClock ProtectedClock = ProtectedClock{
+		Timestamp: clocksi.NewClockSiTimestamp(),
+		Mutex:     sync.Mutex{},
+	}
+	downstreamQueue = make(map[int64][]RemoteTxns)
 )
 
 /////*****************TYPE METHODS***********************/////
@@ -191,7 +211,9 @@ func (m *SyncMap) LoadSimple(key interface{}) (value interface{}) {
 /////*****************TRANSACTION MANAGER CODE***********************/////
 
 func Initialize() {
-	InitializeMaterializer()
+	loggers := InitializeMaterializer()
+	(&Replicator{}).Initialize(loggers) //For now, we don't need to store the replicator instance, as it is independent and works by itself
+	go handleRemoteTxnRequest()
 }
 
 func CreateKeyParams(key string, crdtType CRDTType, bucket string) (keyParams KeyParams) {
@@ -208,6 +230,10 @@ func CreateClientHandler() (channel chan TransactionManagerRequest) {
 	channel = make(chan TransactionManagerRequest)
 	go listenForProtobufRequests(channel)
 	return
+}
+
+func SendRemoteTxnRequest(request TMRemoteTxn) {
+	remoteTxnChan <- request
 }
 
 func listenForProtobufRequests(channel chan TransactionManagerRequest) {
@@ -241,15 +267,25 @@ func handleTMRequest(request TransactionManagerRequest) (shouldStop bool) {
 	case lostConnRequest:
 		shouldStop = true
 	}
+	//remoteTxnRequest is handled separatelly
 
 	return
+}
+
+func handleRemoteTxnRequest() {
+	for {
+		request := <-remoteTxnChan
+		applyRemoteTxn(request.ReplicaID, request.Upds)
+	}
 }
 
 //TODO: Group reads. Also, send a "read operation" instead of just key params.
 func handleStaticTMRead(request TransactionManagerRequest) {
 	readArgs := request.Args.(TMStaticReadArgs)
 	//tsToUse := request.Timestamp
-	tsToUse := clocksi.ClockSiTimestamp{}.NextTimestamp() //TODO: Maybe some care and use latest commited timestamp?
+	localClock.Lock()
+	tsToUse := localClock.Timestamp //TODO: Should we use here directly localClock or localClock.NextTimestamp()?
+	localClock.Unlock()
 
 	var currReadChan chan crdt.State = nil
 	var currRequest MaterializerRequest
@@ -332,7 +368,6 @@ func handleStaticTMUpdate(request TransactionManagerRequest) {
 
 	var maxTimestamp *clocksi.Timestamp = &clocksi.DummyTs
 	//Also 2nd step: wait for reply of each partition
-	//TODO: Update the current timestamp?
 	//TODO: Possibly paralelize? What if errors occour?
 	for _, channel := range replyChannels {
 		reply := <-channel
@@ -359,6 +394,9 @@ func handleStaticTMUpdate(request TransactionManagerRequest) {
 			SendRequestToChannel(commitReq, uint64(partId))
 		}
 	}
+	localClock.Lock()
+	localClock.Timestamp = localClock.Merge(*maxTimestamp)
+	localClock.Unlock()
 
 	//4th step: send ok to client
 	updateArgs.ReplyChan <- TMStaticUpdateReply{
@@ -513,7 +551,9 @@ func handleTMStartTxn(request TransactionManagerRequest) {
 	startTxnArgs := request.Args.(TMStartTxnArgs)
 
 	//TODO: Ensure that the new clock is higher than the one received from the client. Also, take in consideration txn properties?
-	newClock := clocksi.NewClockSiTimestamp().NextTimestamp()
+	localClock.Lock()
+	newClock := localClock.NextTimestamp()
+	localClock.Unlock()
 	var newTxnId TransactionId = TransactionId(rand.Uint64())
 	txnPartitions.Store(newTxnId, makePartSet())
 
@@ -539,7 +579,6 @@ func handleTMCommit(request TransactionManagerRequest) {
 	}
 
 	//Collect proposed timestamps and accept the maximum one
-	//TODO: Update the current timestamp?
 	var maxTimestamp *clocksi.Timestamp = &clocksi.DummyTs
 	//TODO: Possibly paralelize?
 	for _, channel := range replyChannels {
@@ -552,15 +591,20 @@ func handleTMCommit(request TransactionManagerRequest) {
 	//COMMIT
 	//Send commit to involved partitions
 	//TODO: Should I not assume that the 2nd phase of commit is fail-safe?
-	commitReq := MaterializerRequest{MatRequestArgs: MatCommitArgs{
-		TransactionId:   request.TransactionId,
-		CommitTimestamp: *maxTimestamp,
-	}}
+
 	for partId, _ := range involvedPartitions {
-		SendRequestToChannel(commitReq, uint64(partId))
+		currRequest = MaterializerRequest{MatRequestArgs: MatCommitArgs{
+			TransactionId:   request.TransactionId,
+			CommitTimestamp: *maxTimestamp,
+		}}
+		SendRequestToChannel(currRequest, uint64(partId))
 	}
 
 	txnPartitions.Delete(request.TransactionId)
+
+	localClock.Lock()
+	localClock.Timestamp = localClock.Merge(*maxTimestamp)
+	localClock.Unlock()
 
 	//Send ok to client
 	commitArgs.ReplyChan <- TMCommitReply{
@@ -575,6 +619,73 @@ func handleTMAbort(request TransactionManagerRequest) {
 		SendRequestToChannel(abortReq, uint64(partId))
 	}
 	txnPartitions.Delete(request.TransactionId)
+}
+
+func applyRemoteTxn(replicaID int64, upds []RemoteTxns) {
+	localClock.Lock()
+	for i, txn := range upds {
+		isLowerOrEqual := txn.Timestamp.IsLowerOrEqualExceptFor(localClock.Timestamp, replicaID)
+		if isLowerOrEqual {
+			downstreamRemoteTxn(replicaID, txn.Timestamp, txn.upds)
+		} else {
+			//Check if txn.upds is empty - if it is, then it's just a clock update, which can be applied right away
+			if len(*txn.upds) == 0 {
+				localClock.Timestamp = localClock.Timestamp.UpdatePos(replicaID, txn.Timestamp.GetPos(replicaID))
+			} else {
+				//Queue all others
+				downstreamQueue[replicaID] = append(downstreamQueue[replicaID], upds[i:]...)
+			}
+			break
+		}
+	}
+	checkPendingRemoteTxns()
+	localClock.Unlock()
+}
+
+//Pre-condition: localClock's mutex is hold
+func downstreamRemoteTxn(replicaID int64, txnClk clocksi.Timestamp, txnOps *map[int][]UpdateObjectParams) {
+	var currRequest MaterializerRequest
+	for partId, partOps := range *txnOps {
+		currRequest = MaterializerRequest{MatRequestArgs: MatRemoteTxnArgs{
+			ReplicaID: replicaID,
+			Timestamp: txnClk,
+			Upds:      partOps,
+		}}
+		SendRequestToChannel(currRequest, uint64(partId))
+	}
+	localClock.Timestamp = localClock.Timestamp.UpdatePos(replicaID, txnClk.GetPos(replicaID))
+}
+
+//Pre-condition: localClock's mutex is hold
+func checkPendingRemoteTxns() {
+	appliedAtLeastOne := true
+	for appliedAtLeastOne {
+		for replicaID, pendingTxns := range downstreamQueue {
+			if !appliedAtLeastOne {
+				break
+			}
+			appliedAtLeastOne = false
+			for _, txn := range pendingTxns {
+				isLowerOrEqual := txn.Timestamp.IsLowerOrEqualExceptFor(localClock.Timestamp, replicaID)
+				if isLowerOrEqual {
+					downstreamRemoteTxn(replicaID, txn.Timestamp, txn.upds)
+					appliedAtLeastOne = true
+					if len(pendingTxns) > 1 {
+						pendingTxns = pendingTxns[1:]
+					} else {
+						pendingTxns = nil
+					}
+				} else {
+					break
+				}
+			}
+			if pendingTxns == nil {
+				delete(downstreamQueue, replicaID)
+			} else {
+				downstreamQueue[replicaID] = pendingTxns
+			}
+		}
+	}
 }
 
 //TODO: Possibly cache the hashing results and return them? That would allow to include them in the requests and paralelize the read requests
@@ -624,113 +735,3 @@ func findCommonTimestamp(objsParams []KeyParams, clientTs clocksi.Timestamp) (ts
 func ignore(any interface{}) {
 
 }
-
-/***** OLD CODE FOR GOROUTINE WITHOUT TIMESTAMPS LOGIC VERSION *****/
-
-/*
-func HandleStaticReadObjects(objsParams []ReadObjectParams, lastClock clocksi.Timestamp) (states []crdt.State, ts clocksi.Timestamp) {
-		ts := request.Timestamp.NextTimestamp()
-
-		replyChan := make(chan []crdt.State)
-
-		matRequest := MaterializerRequest{
-			Args: MatReadArgs{
-				ObjsParams: readRequest.ObjsParams,
-				ReplyChan:  replyChan,
-			},
-			Timestamp: ts,
-		}
-		SendRequest(matRequest)
-		states := <-replyChan
-		close(replyChan)
-
-		readRequest.ReplyChan <- TMReadReply{
-			States:    states,
-			Timestamp: ts,
-		}
-	}
-*/
-
-/*
-func handleTMWrite(request TransactionManagerRequest) {
-		//ts := request.Timestamp.NextTimestamp()
-		writeRequest := request.Args.(TMUpdateArgs)
-		replyChan := make(chan bool)
-
-		for _, upd := range writeRequest.UpdateParams {
-			request := MaterializerRequest{
-				MatRequestArgs: MatUpdateArgs{
-					UpdateObjectParams: upd,
-					Timestamp:          request.Timestamp,
-					ReplyChan:          replyChan,
-				},
-			}
-			SendRequest(request)
-			<-replyChan
-		}
-		close(replyChan)
-
-		writeRequest.ReplyChan <- TMUpdateReply{
-			Timestamp: request.Timestamp,
-			Err:       nil,
-		}
-	}
-*/
-
-/***** OLD CODE FOR NO-GOROUTINE TM VERSION *****/
-
-/*
-type ReadObjectParams struct {
-	KeyParams //This grants access to any of the fields in KeyParams
-}
-
-type UpdateObjectParams struct {
-	KeyParams
-	UpdateArgs crdt.UpdateArguments
-}
-
-//For now ignore the client's timestamp
-//TODO: Actually take in consideration the client's timestamp
-func HandleStaticReadObjects(objsParams []ReadObjectParams, lastClock clocksi.Timestamp) (states []crdt.State, ts clocksi.Timestamp) {
-	ts = clocksi.NextTimestamp()
-	states = make([]crdt.State, len(objsParams))
-	//TODO: Couple this in a single request?
-	replyChan := make(chan crdt.State)
-
-	for i, obj := range objsParams {
-		request := MaterializerRequest{
-			KeyParams: obj.KeyParams,
-			Args: MatReadArgs{
-				ReplyChan: replyChan,
-			},
-			Timestamp: lastClock,
-		}
-		SendRequest(request)
-		states[i] = <-replyChan
-	}
-	return
-}
-
-//For now ignore the client's timestamp
-//TODO: Actually take in consideration the client's timestamp. Also, errors?
-func HandleStaticUpdateObjects(updates []UpdateObjectParams, lastClock clocksi.Timestamp) (ts clocksi.Timestamp, err error) {
-	ts = clocksi.NextTimestamp()
-	//TODO: Couple this in a single request?
-	replyChan := make(chan bool)
-	for _, upd := range updates {
-		request := MaterializerRequest{
-			KeyParams: upd.KeyParams,
-			Args: MatUpdateArgs{
-				UpdateArguments: upd.UpdateArgs,
-				ReplyChan:       replyChan,
-			},
-			Timestamp: lastClock,
-		}
-		SendRequest(request)
-		<-replyChan
-	}
-	err = nil
-	return
-}
-
-*/

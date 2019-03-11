@@ -33,6 +33,15 @@ type Timestamp interface {
 	IsEqual(otherTs Timestamp) (compResult bool)
 	//Returns true when Compare(otherTs) would return ConcurrentTs.
 	IsConcurrent(otherTs Timestamp) (compResult bool)
+	//Compares a position in both timestamps. This operation has no meaning if the Timestamp implementation isn't based on vector clocks or other position based system
+	//Returns concurrent if one of the clocks doesn't contain the reffered position
+	ComparePos(id int64, otherTs Timestamp) (compResult TsResult)
+	//Updates a position with the max between the current value and newValue
+	UpdatePos(id int64, newValue int64) (newTs Timestamp)
+	//Gets the timestamp value associated to the id
+	GetPos(id int64) (value int64)
+	//Does the same as IsLowerOrEqual except that it ignores the values associated to id
+	IsLowerOrEqualExceptFor(otherTs Timestamp, id int64) (compResult bool)
 	//Returns the timestamp resulting of merging this timestamp and the argument timestamp
 	//In a vector clock, it represents keeping the highest value of each position
 	Merge(otherTs Timestamp) (mergedTs Timestamp)
@@ -95,8 +104,11 @@ func (ts ClockSiTimestamp) NewTimestamp() (newTs Timestamp) {
 }
 
 func (ts ClockSiTimestamp) NextTimestamp() (newTs Timestamp) {
-	//TODO: Actually update the correct position
 	newVc := make(map[int64]int64)
+	for id, value := range ts.vectorClock {
+		newVc[id] = value
+	}
+	//TODO: Actually update the correct position
 	newVc[0] = time.Now().UTC().UnixNano()
 	return ClockSiTimestamp{vectorClock: newVc}
 
@@ -108,7 +120,6 @@ func (ts ClockSiTimestamp) Compare(otherTs Timestamp) (compResult TsResult) {
 		return
 	}
 
-	//TODO: Handle vectorClocks with different sizes...?
 	otherVc := otherTs.(ClockSiTimestamp).vectorClock
 	selfVc := ts.vectorClock
 	foundHigher := false
@@ -144,7 +155,6 @@ func (ts ClockSiTimestamp) IsHigherOrEqual(otherTs Timestamp) (compResult bool) 
 		return true
 	}
 
-	//TODO: Handle vectorClocks with different sizes...?
 	otherVc := otherTs.(ClockSiTimestamp).vectorClock
 	selfVc := ts.vectorClock
 
@@ -163,7 +173,6 @@ func (ts ClockSiTimestamp) IsHigher(otherTs Timestamp) (compResult bool) {
 		return true
 	}
 
-	//TODO: Handle vectorClocks with different sizes...?
 	otherVc := otherTs.(ClockSiTimestamp).vectorClock
 	selfVc := ts.vectorClock
 	foundLower := false
@@ -184,7 +193,6 @@ func (ts ClockSiTimestamp) IsLowerOrEqual(otherTs Timestamp) (compResult bool) {
 		return false
 	}
 
-	//TODO: Handle vectorClocks with different sizes...?
 	otherVc := otherTs.(ClockSiTimestamp).vectorClock
 	selfVc := ts.vectorClock
 
@@ -198,12 +206,30 @@ func (ts ClockSiTimestamp) IsLowerOrEqual(otherTs Timestamp) (compResult bool) {
 	return true
 }
 
+func (ts ClockSiTimestamp) IsLowerOrEqualExceptFor(otherTs Timestamp, id int64) (compResult bool) {
+	if otherTs == nil {
+		return false
+	}
+
+	otherVc := otherTs.(ClockSiTimestamp).vectorClock
+	selfVc := ts.vectorClock
+
+	for i, selfValue := range selfVc {
+		if i != id {
+			if selfValue > otherVc[i] {
+				return false
+			}
+		}
+	}
+
+	return true
+}
+
 func (ts ClockSiTimestamp) IsLower(otherTs Timestamp) (compResult bool) {
 	if otherTs == nil {
 		return false
 	}
 
-	//TODO: Handle vectorClocks with different sizes...?
 	otherVc := otherTs.(ClockSiTimestamp).vectorClock
 	selfVc := ts.vectorClock
 	foundHigher := false
@@ -239,6 +265,33 @@ func (ts ClockSiTimestamp) IsEqual(otherTs Timestamp) (compResult bool) {
 func (ts ClockSiTimestamp) IsConcurrent(otherTs Timestamp) (compResult bool) {
 	//I don't know of a more efficient way to check for concurrency than as it is implemented in Compare.
 	return ts.Compare(otherTs) == ConcurrentTs
+}
+
+func (ts ClockSiTimestamp) ComparePos(id int64, otherTs Timestamp) (compResult TsResult) {
+	tsValue, hasTs := ts.vectorClock[id]
+	otherTsValue, hasOtherTs := otherTs.(ClockSiTimestamp).vectorClock[id]
+	if !hasTs || !hasOtherTs {
+		return ConcurrentTs
+	}
+	if tsValue == otherTsValue {
+		return EqualTs
+	}
+	if tsValue < otherTsValue {
+		return LowerTs
+	}
+	return HigherTs
+}
+
+func (ts ClockSiTimestamp) UpdatePos(id int64, newValue int64) (newTs Timestamp) {
+	if ts.vectorClock[id] < newValue {
+		ts.vectorClock[id] = newValue
+	}
+	newTs = ts
+	return
+}
+
+func (ts ClockSiTimestamp) GetPos(id int64) (value int64) {
+	return ts.vectorClock[id]
 }
 
 func (ts ClockSiTimestamp) Merge(otherTs Timestamp) (mergedTs Timestamp) {

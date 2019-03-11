@@ -71,6 +71,17 @@ type MatPrepareArgs struct {
 	ReplyChan     chan clocksi.Timestamp
 }
 
+type MatRemoteTxnArgs struct {
+	ReplicaID int64
+	clocksi.Timestamp
+	Upds []UpdateObjectParams
+}
+
+//Used by the logging layer (to then pass to the replication layer) to know the most recent clock that is "safe", i.e., for which there will be no commit for sure.
+type MatSafeClkArgs struct {
+	ReplyChan chan clocksi.Timestamp
+}
+
 type PendingReads struct {
 	TransactionId
 	clocksi.Timestamp
@@ -92,7 +103,9 @@ type partitionData struct {
 	suggestedTimestamps map[TransactionId]clocksi.Timestamp    //map of transactionId -> timestamp suggested on first write request for transactionId
 	commitedWaitToApply map[TransactionId]clocksi.Timestamp    //set of transactionId -> commit timestamp of commited transactions that couldn't be applied due to pending versions
 	//TODO: Choose a better option to hold pending reads? Checking the whole map takes a long time...
-	pendingReads map[clocksi.TimestampKey]*PendingReads //pending reads that require a more recent version than stableVersion
+	pendingReads  map[clocksi.TimestampKey]*PendingReads //pending reads that require a more recent version than stableVersion
+	log           Logger                                 //logs the operations of txns that were commited in this partition
+	remoteWaiting map[int64][]PairClockUpdates           //remote transactions that are waiting for other remote transactions to be applied. Int: replicaID
 }
 
 type BoolErrorPair struct {
@@ -122,6 +135,8 @@ const (
 	commitMatRequest      MatRequestType = 4
 	abortMatRequest       MatRequestType = 5
 	prepareMatRequest     MatRequestType = 6
+	safeClkMatRequest     MatRequestType = 7
+	remoteTxnMatRequest   MatRequestType = 8
 	versionMatRequest     MatRequestType = 255
 
 	//TODO: Maybe each bucket should correspond to one goroutine...?
@@ -200,22 +215,42 @@ func (args MatPrepareArgs) getChannel() (channelId uint64) {
 	return 0 //When sending a prepare the TM already knows the channel to send the request
 }
 
+func (args MatSafeClkArgs) getRequestType() (requestType MatRequestType) {
+	return safeClkMatRequest
+}
+
+func (args MatSafeClkArgs) getChannel() (channelId uint64) {
+	return 0 //When sending a safeClk request the logger sends directly to the correct materializer
+}
+
+func (args MatRemoteTxnArgs) getRequestType() (requestType MatRequestType) {
+	return remoteTxnMatRequest
+}
+
+func (args MatRemoteTxnArgs) getChannel() (channelId uint64) {
+	return 0 //When sending a remoteTxn request the TM sends directly to the correct materializer
+}
+
 func (err UnknownCrdtTypeError) Error() (errString string) {
 	return fmt.Sprint("Unknown/unsupported CRDT type:", err.CRDTType)
 }
 
 /////*****************MATERIALIZER CODE***********************/////
 
-//Starts listening goroutines and channels
-func InitializeMaterializer() {
+//Starts listening goroutines and channels. Also starts each partition's logger and returns it
+func InitializeMaterializer() (loggers []Logger) {
 	keyRangeSize = math.MaxUint64 / nGoRoutines
+	loggers = make([]Logger, nGoRoutines)
 	var i uint64
 	for i = 0; i < nGoRoutines; i++ {
-		go listenForTransactionManagerRequests(i)
+		loggers[i] = &MemLogger{}
+		loggers[i].Initialize(i)
+		go listenForTransactionManagerRequests(i, loggers[i])
 	}
+	return loggers
 }
 
-func listenForTransactionManagerRequests(id uint64) {
+func listenForTransactionManagerRequests(id uint64, logger Logger) {
 	//Each goroutine is responsible for the range of keys [keyRangeSize * id, keyRangeSize * (id + 1)[
 	//Where keyRangeSize = math.MaxUint64 / number of goroutines
 
@@ -227,6 +262,8 @@ func listenForTransactionManagerRequests(id uint64) {
 		suggestedTimestamps: make(map[TransactionId]clocksi.Timestamp),
 		commitedWaitToApply: make(map[TransactionId]clocksi.Timestamp),
 		pendingReads:        make(map[clocksi.TimestampKey]*PendingReads),
+		log:                 logger,
+		remoteWaiting:       make(map[int64][]PairClockUpdates),
 	}
 	//Listens to the channel and processes requests
 	channel := make(chan MaterializerRequest)
@@ -255,6 +292,10 @@ func handleMatRequest(request MaterializerRequest, partitionData *partitionData)
 		handleMatPrepare(request, partitionData)
 	case versionMatRequest:
 		handleMatVersion(request, partitionData)
+	case safeClkMatRequest:
+		handleMatSafeClk(request, partitionData)
+	case remoteTxnMatRequest:
+		handleMatRemoteTxn(request, partitionData)
 	}
 }
 
@@ -263,7 +304,6 @@ func handleMatStaticRead(request MaterializerRequest, partitionData *partitionDa
 }
 
 func handleMatRead(request MaterializerRequest, partitionData *partitionData) {
-	//TODO: This read should reflect updates issued in this transaction which weren't yet applied
 	matReadArgs := request.MatRequestArgs.(MatReadArgs)
 	auxiliaryRead(matReadArgs.MatReadCommonArgs, matReadArgs.TransactionId, partitionData)
 }
@@ -442,15 +482,21 @@ func canCommit(commitArgs MatCommitArgs, partitionData *partitionData) (canCommi
 }
 
 func applyCommit(transactionId *TransactionId, commitTimestamp *clocksi.Timestamp, partitionData *partitionData) {
-	applyUpdates(partitionData.pendingOps[*transactionId], commitTimestamp, partitionData)
+	downstreamUpds := applyUpdates(partitionData.pendingOps[*transactionId], commitTimestamp, partitionData)
 
-	updatePartitionDataWithCommit(transactionId, commitTimestamp, partitionData)
+	updatePartitionDataWithCommit(transactionId, commitTimestamp, downstreamUpds, partitionData)
 }
 
-func updatePartitionDataWithCommit(transactionId *TransactionId, commitTimestamp *clocksi.Timestamp, partitionData *partitionData) {
+func updatePartitionDataWithCommit(transactionId *TransactionId, commitTimestamp *clocksi.Timestamp, downstreamUpds *[]UpdateObjectParams, partitionData *partitionData) {
 	deleteTransactionMetadata(transactionId, partitionData)
 	//Transactions are commited in order, so this commit timestamp is always more recent than the previous stableVersion
 	partitionData.stableVersion = *commitTimestamp
+	partitionData.log.SendLoggerRequest(LoggerRequest{
+		LogRequestArgs: LogCommitArgs{
+			TxnClk: commitTimestamp,
+			Upds:   downstreamUpds,
+		},
+	})
 	handlePendingCommits(partitionData)
 }
 
@@ -493,8 +539,11 @@ func handlePendingCommits(partitionData *partitionData) {
 	return
 }
 
-func applyUpdates(updates []UpdateObjectParams, commitTimestamp *clocksi.Timestamp, partitionData *partitionData) {
-	for _, upd := range updates {
+//downstreamUpds: key, CRDTType, bucket + downstream arguments of each update. This is what is sent to other replicas for them to apply the txn.
+func applyUpdates(updates []UpdateObjectParams, commitTimestamp *clocksi.Timestamp, partitionData *partitionData) (downstreamUpds *[]UpdateObjectParams) {
+	tmp := make([]UpdateObjectParams, len(updates))
+	downstreamUpds = &tmp
+	for i, upd := range updates {
 		hashKey := getHash(getCombinedKey(upd.KeyParams))
 
 		obj, hasKey := partitionData.db[hashKey]
@@ -502,9 +551,13 @@ func applyUpdates(updates []UpdateObjectParams, commitTimestamp *clocksi.Timesta
 			obj = initializeVersionManager(upd.CrdtType)
 			partitionData.db[hashKey] = obj
 		}
-		downstreamArgs := obj.Update(upd.UpdateArgs)
-		obj.Downstream(*commitTimestamp, downstreamArgs)
+		(*downstreamUpds)[i] = UpdateObjectParams{
+			KeyParams:  upd.KeyParams,
+			UpdateArgs: obj.Update(upd.UpdateArgs),
+		}
+		obj.Downstream(*commitTimestamp, (*downstreamUpds)[i].UpdateArgs)
 	}
+	return
 }
 
 func applyPendingReads(partitionData *partitionData) {
@@ -517,6 +570,36 @@ func applyPendingReads(partitionData *partitionData) {
 			delete(partitionData.pendingReads, tsKey)
 		}
 	}
+}
+
+func handleMatSafeClk(request MaterializerRequest, partitionData *partitionData) {
+	replyChan := request.MatRequestArgs.(MatSafeClkArgs).ReplyChan
+	if partitionData.twoSmallestPendingTxn[0] != nil {
+		replyChan <- partitionData.suggestedTimestamps[*partitionData.twoSmallestPendingTxn[0]]
+	} else {
+		replyChan <- partitionData.stableVersion.NextTimestamp()
+	}
+}
+
+func handleMatRemoteTxn(request MaterializerRequest, partitionData *partitionData) {
+	remoteTxnArgs := request.MatRequestArgs.(MatRemoteTxnArgs)
+	if remoteTxnArgs.Timestamp.IsLowerOrEqualExceptFor(partitionData.stableVersion, remoteTxnArgs.ReplicaID) {
+		for _, upd := range remoteTxnArgs.Upds {
+			hashKey := getHash(getCombinedKey(upd.KeyParams))
+
+			obj, hasKey := partitionData.db[hashKey]
+			if !hasKey {
+				obj = initializeVersionManager(upd.CrdtType)
+				partitionData.db[hashKey] = obj
+			}
+			obj.Downstream(remoteTxnArgs.Timestamp, upd)
+		}
+		partitionData.stableVersion = partitionData.stableVersion.UpdatePos(remoteTxnArgs.ReplicaID, remoteTxnArgs.Timestamp.GetPos(remoteTxnArgs.ReplicaID))
+	} else {
+		clkUpdsPair := PairClockUpdates{clk: &remoteTxnArgs.Timestamp, upds: &remoteTxnArgs.Upds}
+		partitionData.remoteWaiting[remoteTxnArgs.ReplicaID] = append(partitionData.remoteWaiting[remoteTxnArgs.ReplicaID], clkUpdsPair)
+	}
+	//if remoteTxnArgs..IsLowerOrEqualExceptFor()
 }
 
 //TODO: Think of some better way of doing this...? This probably shouldn't even be here, but putting it in crdt.go creates a circular dependency
