@@ -2,6 +2,7 @@ package antidote
 
 import (
 	"clocksi"
+	fmt "fmt"
 	"time"
 )
 
@@ -13,11 +14,13 @@ type Replicator struct {
 	lastSentClk     clocksi.Timestamp
 	receiveReplChan chan ReplicatorRequest
 	started         bool
+	replicaID       int64
 }
 
 type ReplicatorRequest struct {
 	senderID int64
 	txns     []RemoteTxns
+	stableTs int64
 }
 
 type RemoteTxns struct {
@@ -31,7 +34,7 @@ const (
 	toSendInitialSize               = 10
 )
 
-func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger) {
+func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, replicaID int64) {
 	if !repl.started {
 		repl.tm = tm
 		repl.started = true
@@ -45,21 +48,31 @@ func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger) {
 		}
 		repl.lastSentClk = clocksi.NewClockSiTimestamp()
 		repl.receiveReplChan = make(chan ReplicatorRequest)
+		repl.replicaID = replicaID
 		go repl.receiveRemoteTxns()
 		go repl.replicateCycle()
 	}
 }
 
+//TODO: TEMPORARY METHOD - find a decent way to add remote replicators. This has concurrency issues with replicateCycle()
+//All replicators must be added before any transaction is executed, otherwise new replicators will never receive old transactions
+func (repl *Replicator) tmpAddRemoteReplicator(remoteRepl chan ReplicatorRequest) {
+	repl.remoteReps = append(repl.remoteReps, remoteRepl)
+}
+
 func (repl *Replicator) replicateCycle() {
 	for {
+		fmt.Println("[Replicator", repl.replicaID, "]starting replicateCycle")
 		repl.getNewTxns()
-		toSend := repl.preparateDataToSend()
-		repl.sendTxns(toSend)
+		toSend, stableTs := repl.preparateDataToSend()
+		repl.sendTxns(toSend, stableTs)
+		fmt.Println("[Replicator", repl.replicaID, "]finishing replicateCycle")
 		time.Sleep(tsSendDelay * time.Millisecond)
 	}
 }
 
 func (repl *Replicator) getNewTxns() {
+	fmt.Println("[Replicator", repl.replicaID, "]starting getNewTxns()")
 	replyChans := make([]chan StableClkUpdatesPair, len(repl.localPartitions))
 
 	//Send request for txns
@@ -79,67 +92,88 @@ func (repl *Replicator) getNewTxns() {
 			},
 		})
 	}
+	fmt.Println("[Replicator", repl.replicaID, "]getNewTxns() second part")
 
 	//Receive replies and cache them
 	for id, replyChan := range replyChans {
 		reply := <-replyChan
 		cacheEntry := repl.txnCache[id]
-		//Remove last entry which is the previous, old, stable block
+		//Remove last entry which is the previous, old, stable clock
 		if len(cacheEntry) > 0 {
 			cacheEntry = cacheEntry[:len(cacheEntry)-1]
 		}
 		cacheEntry = append(cacheEntry, reply.upds...)
 		repl.txnCache[id] = append(cacheEntry, PairClockUpdates{clk: &reply.stableClock, upds: &[]UpdateObjectParams{}})
 	}
+	fmt.Println("[Replicator", repl.replicaID, "]getNewTxns() finish")
 }
 
-func (repl *Replicator) preparateDataToSend() (toSend []RemoteTxns) {
+func (repl *Replicator) preparateDataToSend() (toSend []RemoteTxns, stableTs int64) {
+	fmt.Println("[Replicator", repl.replicaID, "]starting prepareDataToSend")
 	toSend = make([]RemoteTxns, 0, toSendInitialSize)
-	foundEmpty := false
-	for !foundEmpty {
-		minClk := clocksi.DummyHighTs
-		var txnUpdates map[int][]UpdateObjectParams = nil
-		for id := 0; id < len(repl.localPartitions) && !foundEmpty; id++ {
+	foundStableClk := false
+	for !foundStableClk {
+		minClk := *repl.txnCache[0][0].clk //Using first entry of first replica as initial value
+		var txnUpdates map[int][]UpdateObjectParams = make(map[int][]UpdateObjectParams)
+		fmt.Println("[Replicator", repl.replicaID, "]nPartitions:", len(repl.localPartitions))
+		for id := 0; id < len(repl.localPartitions); id++ {
 			partCache := repl.txnCache[id]
-			//The clock of this partition is behind the remaining noes, so we can't send more txns.
-			if len(partCache) == 0 {
-				foundEmpty = true
-			} else {
-				firstEntry := partCache[0]
-				clkCompare := (*firstEntry.clk).Compare(minClk)
-				if clkCompare == clocksi.LowerTs {
-					minClk = *firstEntry.clk
-					txnUpdates = nil
-					txnUpdates = make(map[int][]UpdateObjectParams)
-					txnUpdates[id] = *firstEntry.upds
-				} else if clkCompare == clocksi.EqualTs {
-					txnUpdates[id] = *firstEntry.upds
+
+			fmt.Println("[Replicator", repl.replicaID, "]non empty cache entry:", *partCache[0].clk, *partCache[0].upds)
+			firstEntry := partCache[0]
+			clkCompare := (*firstEntry.clk).Compare(minClk)
+			if clkCompare == clocksi.LowerTs {
+				//Clock update, this partition has no further transactions. If no smaller clk is found, then this must be the last iteration
+				if len(*firstEntry.upds) == 0 {
+					foundStableClk = true
+				} else {
+					foundStableClk = false
 				}
+				minClk = *firstEntry.clk
+				txnUpdates = nil
+				txnUpdates = make(map[int][]UpdateObjectParams)
+				txnUpdates[id] = *firstEntry.upds
+			} else if clkCompare == clocksi.EqualTs {
+				txnUpdates[id] = *firstEntry.upds
 			}
 		}
-		//Safe to include the actual txn's clock in the list to send. We can remove entry from cache
-		if !foundEmpty {
+		if !foundStableClk {
+			//Safe to include the actual txn's clock in the list to send. We can remove entry from cache
+			fmt.Println("[Replicator", repl.replicaID, "]appending upds. Upds:", txnUpdates)
 			toSend = append(toSend, RemoteTxns{Timestamp: minClk, upds: &txnUpdates})
-			for id := range txnUpdates {
-				repl.txnCache[id] = repl.txnCache[id][1:]
-			}
+		} else {
+			fmt.Println("[Replicator", repl.replicaID, "]storing stableClk as at least one entry was empty. Clk:", minClk.GetPos(repl.replicaID))
+			stableTs = minClk.GetPos(repl.replicaID)
+		}
+		for id := range txnUpdates {
+			repl.txnCache[id] = repl.txnCache[id][1:]
 		}
 	}
+	fmt.Println("[Replicator", repl.replicaID, "]finished prepareDataToSend")
 	return
 }
 
-func (repl *Replicator) sendTxns(toSend []RemoteTxns) {
-	for _, remoteChan := range repl.remoteReps {
-		remoteChan <- ReplicatorRequest{senderID: ReplicaID, txns: toSend}
+func (repl *Replicator) sendTxns(toSend []RemoteTxns, stableTs int64) {
+	fmt.Print("[Replicator", repl.replicaID, "]starting sendTxns:[")
+	for _, txn := range toSend {
+		fmt.Print("{", txn.Timestamp, "|", *txn.upds, "},")
 	}
+	fmt.Println("]")
+	for _, remoteChan := range repl.remoteReps {
+		remoteChan <- ReplicatorRequest{senderID: repl.replicaID, txns: toSend, stableTs: stableTs}
+	}
+	fmt.Println("[Replicator", repl.replicaID, "]finished sendTxns")
 }
 
 func (repl *Replicator) receiveRemoteTxns() {
 	for {
+		fmt.Println("[Replicator", repl.replicaID, "]iterating receiveRemoteTxns")
 		remoteReq := <-repl.receiveReplChan
 		repl.tm.SendRemoteTxnRequest(TMRemoteTxn{
 			ReplicaID: remoteReq.senderID,
 			Upds:      remoteReq.txns,
+			StableTs:  remoteReq.stableTs,
 		})
+		fmt.Println("[Replicator", repl.replicaID, "]receiveRemoteTxns finished processing request")
 	}
 }

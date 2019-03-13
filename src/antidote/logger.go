@@ -29,6 +29,7 @@ type LogCommitArgs struct {
 	Upds   *[]UpdateObjectParams //Should be downstream arguments
 }
 
+/*
 type LogOldNextClkArgs struct {
 	PreviousClk clocksi.Timestamp
 	ReplyChan   chan BoolTimestampPair
@@ -38,6 +39,7 @@ type LogOldTxnArgs struct {
 	TxnClk    clocksi.Timestamp
 	ReplyChan chan *[]UpdateObjectParams
 }
+*/
 
 type LogTxnArgs struct {
 	lastClock clocksi.Timestamp
@@ -58,16 +60,17 @@ type BoolTimestampPair struct {
 
 const (
 	//Types of requests
-	CommitLogRequest     LogRequestType = 0
-	TxnLogRequest        LogRequestType = 1
-	NextClkOldLogRequest LogRequestType = 2
-	TxnOldLogRequest     LogRequestType = 3
+	CommitLogRequest LogRequestType = 0
+	TxnLogRequest    LogRequestType = 1
+	//NextClkOldLogRequest LogRequestType = 2
+	//TxnOldLogRequest     LogRequestType = 3
 )
 
 func (args LogCommitArgs) GetRequestType() (requestType LogRequestType) {
 	return CommitLogRequest
 }
 
+/*
 func (args LogOldNextClkArgs) GetRequestType() (requestType LogRequestType) {
 	return NextClkOldLogRequest
 }
@@ -75,6 +78,7 @@ func (args LogOldNextClkArgs) GetRequestType() (requestType LogRequestType) {
 func (args LogOldTxnArgs) GetRequestType() (requestType LogRequestType) {
 	return TxnOldLogRequest
 }
+*/
 
 func (args LogTxnArgs) GetRequestType() (requestType LogRequestType) {
 	return TxnLogRequest
@@ -125,10 +129,12 @@ func (logger *MemLogger) handleRequests() {
 			logger.handleCommitLogRequest(request.LogRequestArgs.(LogCommitArgs))
 		case TxnLogRequest:
 			logger.handleTxnLogRequest(request.LogRequestArgs.(LogTxnArgs))
-		case NextClkOldLogRequest:
-			logger.handleNextClkOldLogRequest(request.LogRequestArgs.(LogOldNextClkArgs))
-		case TxnOldLogRequest:
-			logger.handleTxnOldLogRequest(request.LogRequestArgs.(LogOldTxnArgs))
+			/*
+				case NextClkOldLogRequest:
+					logger.handleNextClkOldLogRequest(request.LogRequestArgs.(LogOldNextClkArgs))
+				case TxnOldLogRequest:
+					logger.handleTxnOldLogRequest(request.LogRequestArgs.(LogOldTxnArgs))
+			*/
 		}
 	}
 }
@@ -152,6 +158,7 @@ func (logger *MemLogger) handleTxnLogRequest(request LogTxnArgs) {
 
 }
 
+/*
 func (logger *MemLogger) handleNextClkOldLogRequest(request LogOldNextClkArgs) {
 	//Compare request clk with the previous clk that was sent
 	clkCompare := request.PreviousClk.ComparePos(ReplicaID, *logger.log[logger.currLogPos].clk)
@@ -170,3 +177,4 @@ func (logger *MemLogger) handleNextClkOldLogRequest(request LogOldNextClkArgs) {
 func (logger *MemLogger) handleTxnOldLogRequest(request LogOldTxnArgs) {
 	request.ReplyChan <- logger.log[logger.currLogPos].upds
 }
+*/

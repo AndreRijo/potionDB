@@ -78,6 +78,7 @@ type TMAbortArgs struct {
 type TMRemoteTxn struct {
 	ReplicaID int64
 	Upds      []RemoteTxns
+	StableTs  int64
 }
 
 type TMStaticReadReply struct {
@@ -134,8 +135,11 @@ type TransactionManager struct {
 	mat           *Materializer
 	remoteTxnChan chan TMRemoteTxn
 	//TODO: Currently downstreaming txns holds the lock until the whole process is done (i.e., all transactions are either downstreamed to Materialized or queued). This can be a problem if we need to wait for Materializer - use bounded chans?
-	localClock      ProtectedClock
-	downstreamQueue map[int64][]RemoteTxns
+	localClock         ProtectedClock
+	downstreamQueue    map[int64][]RemoteTxns
+	downstreamClkQueue map[int64]int64 //Stores clock updates of replicas that have txns in queue
+	replicator         *Replicator
+	replicaID          int64
 }
 
 /////*****************CONSTANTS AND VARIABLES***********************/////
@@ -149,8 +153,6 @@ const (
 	commitTMRequest       TMRequestType = 5
 	abortTMRequest        TMRequestType = 6
 	lostConnRequest       TMRequestType = 255
-	//TODO: This should be configurable or received somehow
-	ReplicaID int64 = 0
 )
 
 /////*****************TYPE METHODS***********************/////
@@ -203,8 +205,8 @@ func (txnPartitions *ongoingTxn) reset() {
 
 /////*****************TRANSACTION MANAGER CODE***********************/////
 
-func Initialize() (tm *TransactionManager) {
-	mat, loggers := InitializeMaterializer()
+func Initialize(replicaID int64) (tm *TransactionManager) {
+	mat, loggers := InitializeMaterializer(replicaID)
 	tm = &TransactionManager{
 		mat:           mat,
 		remoteTxnChan: make(chan TMRemoteTxn),
@@ -212,9 +214,12 @@ func Initialize() (tm *TransactionManager) {
 			Mutex:     sync.Mutex{},
 			Timestamp: clocksi.NewClockSiTimestamp(),
 		},
-		downstreamQueue: make(map[int64][]RemoteTxns),
+		downstreamQueue:    make(map[int64][]RemoteTxns),
+		downstreamClkQueue: make(map[int64]int64),
+		replicator:         &Replicator{},
+		replicaID:          replicaID,
 	}
-	(&Replicator{}).Initialize(tm, loggers) //For now, we don't need to store the replicator instance, as it is independent and works by itself
+	tm.replicator.Initialize(tm, loggers, replicaID)
 	go tm.handleRemoteTxnRequest()
 	return tm
 }
@@ -280,7 +285,7 @@ func (tm *TransactionManager) handleTMRequest(request TransactionManagerRequest,
 func (tm *TransactionManager) handleRemoteTxnRequest() {
 	for {
 		request := <-tm.remoteTxnChan
-		tm.applyRemoteTxn(request.ReplicaID, request.Upds)
+		tm.applyRemoteTxn(request.ReplicaID, request.Upds, request.StableTs)
 	}
 }
 
@@ -555,7 +560,7 @@ func (tm *TransactionManager) handleTMStartTxn(request TransactionManagerRequest
 
 	//TODO: Ensure that the new clock is higher than the one received from the client. Also, take in consideration txn properties?
 	tm.localClock.Lock()
-	newClock := tm.localClock.NextTimestamp()
+	newClock := tm.localClock.NextTimestamp(tm.replicaID)
 	tm.localClock.Unlock()
 	txnPartitions.TransactionId = TransactionId(rand.Uint64())
 	txnPartitions.partSet = makePartSet()
@@ -625,29 +630,36 @@ func (tm *TransactionManager) handleTMAbort(request TransactionManagerRequest, t
 	txnPartitions.reset()
 }
 
-func (tm *TransactionManager) applyRemoteTxn(replicaID int64, upds []RemoteTxns) {
+func (tm *TransactionManager) applyRemoteTxn(replicaID int64, upds []RemoteTxns, stableTs int64) {
+	fmt.Println("[TM", tm.replicaID, "]Started applying remote txn")
 	tm.localClock.Lock()
 	for i, txn := range upds {
-		isLowerOrEqual := txn.Timestamp.IsLowerOrEqualExceptFor(tm.localClock.Timestamp, replicaID)
+		fmt.Println("[TM", tm.replicaID, "]Detected a remote txn. Local clk:", tm.localClock.Timestamp, ". Remote clk:", txn.Timestamp)
+		isLowerOrEqual := txn.Timestamp.IsLowerOrEqualExceptFor(tm.localClock.Timestamp, tm.replicaID, replicaID)
 		if isLowerOrEqual {
 			tm.downstreamRemoteTxn(replicaID, txn.Timestamp, txn.upds)
 		} else {
-			//Check if txn.upds is empty - if it is, then it's just a clock update, which can be applied right away
-			if len(*txn.upds) == 0 {
-				tm.localClock.Timestamp = tm.localClock.Timestamp.UpdatePos(replicaID, txn.Timestamp.GetPos(replicaID))
-			} else {
-				//Queue all others
-				tm.downstreamQueue[replicaID] = append(tm.downstreamQueue[replicaID], upds[i:]...)
-			}
+			//Queue all others
+			fmt.Println("[TM", tm.replicaID, "]Queuing remote txn")
+			tm.downstreamQueue[replicaID] = append(tm.downstreamQueue[replicaID], upds[i:]...)
 			break
 		}
 	}
+	//All txns were applied, so it's safe to update the local clock of both TM and materializer.
+	if tm.downstreamQueue[replicaID] == nil {
+		tm.localClock.Timestamp = tm.localClock.Timestamp.UpdatePos(replicaID, stableTs)
+		tm.mat.SendRequestToAllChannels(MaterializerRequest{MatRequestArgs: MatClkPosUpdArgs{ReplicaID: replicaID, StableTs: stableTs}})
+	} else {
+		tm.downstreamClkQueue[replicaID] = stableTs
+	}
+	fmt.Println("[TM", tm.replicaID, "]Finished applying remote txn")
 	tm.checkPendingRemoteTxns()
 	tm.localClock.Unlock()
 }
 
 //Pre-condition: localClock's mutex is hold
 func (tm *TransactionManager) downstreamRemoteTxn(replicaID int64, txnClk clocksi.Timestamp, txnOps *map[int][]UpdateObjectParams) {
+	fmt.Println("[TM", tm.replicaID, "]Started downstream remote txn")
 	var currRequest MaterializerRequest
 	for partId, partOps := range *txnOps {
 		currRequest = MaterializerRequest{MatRequestArgs: MatRemoteTxnArgs{
@@ -655,14 +667,27 @@ func (tm *TransactionManager) downstreamRemoteTxn(replicaID int64, txnClk clocks
 			Timestamp: txnClk,
 			Upds:      partOps,
 		}}
+		fmt.Println("[TM", tm.replicaID, "]Sending remoteTxn request to Materializer")
+		if len(partOps) > 0 {
+			fmt.Println("[TM", tm.replicaID, "]Partition", partId, "has operations:", partOps)
+		} else {
+			fmt.Println("[TM", tm.replicaID, "]Partition", partId, "has NO operations:", partOps)
+		}
 		tm.mat.SendRequestToChannel(currRequest, uint64(partId))
 	}
 	tm.localClock.Timestamp = tm.localClock.Timestamp.UpdatePos(replicaID, txnClk.GetPos(replicaID))
+	fmt.Println("[TM", tm.replicaID, "]Finished downstream remote txn")
 }
 
 //Pre-condition: localClock's mutex is hold
 func (tm *TransactionManager) checkPendingRemoteTxns() {
+	fmt.Println("[TM", tm.replicaID, "]Started checking for pending remote txns")
 	appliedAtLeastOne := true
+	//No txns pending, can return right away
+	if len(tm.downstreamQueue) == 0 {
+		fmt.Println("[TM", tm.replicaID, "]Finished checking for pending remote txns")
+		return
+	}
 	for appliedAtLeastOne {
 		for replicaID, pendingTxns := range tm.downstreamQueue {
 			if !appliedAtLeastOne {
@@ -670,7 +695,7 @@ func (tm *TransactionManager) checkPendingRemoteTxns() {
 			}
 			appliedAtLeastOne = false
 			for _, txn := range pendingTxns {
-				isLowerOrEqual := txn.Timestamp.IsLowerOrEqualExceptFor(tm.localClock.Timestamp, replicaID)
+				isLowerOrEqual := txn.Timestamp.IsLowerOrEqualExceptFor(tm.localClock.Timestamp, tm.replicaID, replicaID)
 				if isLowerOrEqual {
 					tm.downstreamRemoteTxn(replicaID, txn.Timestamp, txn.upds)
 					appliedAtLeastOne = true
@@ -684,12 +709,20 @@ func (tm *TransactionManager) checkPendingRemoteTxns() {
 				}
 			}
 			if pendingTxns == nil {
+				//Update clock with the previously received stable clock and delte the entries in the queues relative to replicaID.
+				replicaClkValue := tm.downstreamClkQueue[replicaID]
+				tm.localClock.Timestamp = tm.localClock.Timestamp.UpdatePos(replicaID, replicaClkValue)
+				tm.mat.SendRequestToAllChannels(MaterializerRequest{MatRequestArgs: MatClkPosUpdArgs{ReplicaID: replicaID, StableTs: replicaClkValue}})
+				tm.localClock.UpdatePos(replicaID, replicaClkValue)
+
 				delete(tm.downstreamQueue, replicaID)
+				delete(tm.downstreamClkQueue, replicaID)
 			} else {
 				tm.downstreamQueue[replicaID] = pendingTxns
 			}
 		}
 	}
+	fmt.Println("[TM", tm.replicaID, "]Finished checking for pending remote txns")
 }
 
 //TODO: Possibly cache the hashing results and return them? That would allow to include them in the requests and paralelize the read requests

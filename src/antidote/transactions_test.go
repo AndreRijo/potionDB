@@ -37,7 +37,7 @@ the 1st write.
 Success: if both operations commit and a read returns the values written.
 */
 func TestWrites1(t *testing.T) {
-	tm := Initialize()
+	tm := Initialize(0)
 
 	//Sleep for a bit to ensure all gothreads initialize
 	time.Sleep(initializeTime * time.Millisecond)
@@ -94,7 +94,7 @@ Goal: do 3 writes in two partitions. 1st write: initial clock, 1st partition. 2n
 Success: if all operations commit and a read returns the values written.
 */
 func TestWrites2(t *testing.T) {
-	tm := Initialize()
+	tm := Initialize(0)
 
 	//Sleep for a bit to ensure all gothreads initialize
 	time.Sleep(initializeTime * time.Millisecond)
@@ -169,7 +169,7 @@ Goal: do 3 writes in the same partition, with the last write using an early cloc
 Success: if all operations commit and a read returns the values written.
 */
 func TestWrites3(t *testing.T) {
-	tm := Initialize()
+	tm := Initialize(0)
 
 	//Sleep for a bit to ensure all gothreads initialize
 	time.Sleep(initializeTime * time.Millisecond)
@@ -241,7 +241,7 @@ Success: if every operation commits and final read returns all values written.
 
 */
 func TestWritesAndReads(t *testing.T) {
-	tm := Initialize()
+	tm := Initialize(0)
 
 	//Sleep for a bit to ensure all gothreads initialize
 	time.Sleep(initializeTime * time.Millisecond)
@@ -258,7 +258,7 @@ func TestWritesAndReads(t *testing.T) {
 	}
 
 	secondWriteParams := createRandomSetAdd(firstKey)
-	secondWriteReq, secondWriteChan := createStaticWrite(firstWriteReply.TransactionId, firstWriteReply.Timestamp.NextTimestamp(), secondWriteParams)
+	secondWriteReq, secondWriteChan := createStaticWrite(firstWriteReply.TransactionId, firstWriteReply.Timestamp.NextTimestamp(0), secondWriteParams)
 
 	go tm.handleStaticTMUpdate(secondWriteReq)
 	secondWriteReply := <-secondWriteChan
@@ -279,9 +279,9 @@ func TestWritesAndReads(t *testing.T) {
 
 	var futureTs clocksi.Timestamp
 	if thirdWriteReply.Timestamp.IsHigherOrEqual(thirdWriteReply.Timestamp) {
-		futureTs = thirdWriteReply.Timestamp.NextTimestamp()
+		futureTs = thirdWriteReply.Timestamp.NextTimestamp(0)
 	} else {
-		futureTs = thirdWriteReply.Timestamp.NextTimestamp()
+		futureTs = thirdWriteReply.Timestamp.NextTimestamp(0)
 	}
 	readParams := []ReadObjectParams{createReadObjParams(firstKey)}
 	firstReadReq, firstReadChan := createStaticRead(TransactionId(0), futureTs, readParams)
@@ -333,7 +333,7 @@ func TestWritesAndReads(t *testing.T) {
 
 //Tests the following sequence of operations: startTxn -> write -> read -> write -> commit
 func TestNonStaticTransaction1(t *testing.T) {
-	tm := Initialize()
+	tm := Initialize(0)
 	txnPartitions := &ongoingTxn{}
 	//Sleep for a bit to ensure all gothreads initialize
 	time.Sleep(initializeTime * time.Millisecond)
@@ -365,7 +365,7 @@ func TestNonStaticTransaction1(t *testing.T) {
 //After the 2nd txn (with higher startTxn timestamp) commits, we check that a read on the 1st txn doesn't reflect any updates on the 2nd txn.
 //We also check that a 3rd txn started after the 1st txn commits succesfully reads the 2nd txn's updates
 func TestNonStaticTransaction2(t *testing.T) {
-	tm := Initialize()
+	tm := Initialize(0)
 	txnPartitions := &ongoingTxn{}
 	//Sleep for a bit to ensure all gothreads initialize
 	time.Sleep(initializeTime * time.Millisecond)
@@ -419,6 +419,38 @@ func TestNonStaticTransaction2(t *testing.T) {
 	checkCommitError(2, secondCommitRep, t)
 	thidCommitRep := createAndProcessCommit(tm, txnPartitions, thirdTxnRep.TransactionId, thirdTxnRep.Timestamp)
 	checkCommitError(3, thidCommitRep, t)
+}
+
+func TestReplicator1(t *testing.T) {
+	tm1 := Initialize(0)
+	time.Sleep(time.Duration(200) * time.Millisecond)
+	tm2 := Initialize(1)
+	tm1.replicator.tmpAddRemoteReplicator(tm2.replicator.receiveReplChan)
+	tm2.replicator.tmpAddRemoteReplicator(tm1.replicator.receiveReplChan)
+	//tm1.replicator.tmpAddRemoteReplicator(make(chan ReplicatorRequest))
+
+	//Sleep for a bit to ensure all gothreads initialize
+	time.Sleep(initializeTime * time.Millisecond)
+
+	key := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), CRDTType_ORSET, "bkt")
+	writeReq, writeReply := createAndProcessWrite(tm1, nil, static, key, createRandomSetAdd, TransactionId(rand.Uint64()), clocksi.NewClockSiTimestamp())
+	checkStaticUpdateError(1, writeReply.staticUpdateReply, t)
+	ignore(writeReq)
+	//ignore(tm2)
+
+	//Wait for replication
+	time.Sleep(tsSendDelay * 2 * time.Millisecond)
+
+	readParams := []ReadObjectParams{createReadObjParams(key)}
+	fmt.Println("[TM_TEST]Requesting read...")
+	firstTxnReadReply := createAndProccessRead(tm2, static, readParams, writeReply.staticUpdateReply.TransactionId, writeReply.staticUpdateReply.Timestamp)
+	fmt.Println("[TM_TEST]Received read reply")
+	if !checkWriteReadSetMatch(firstTxnReadReply.staticReadReply.States[0].(crdt.SetAWValueState), writeReq) {
+		t.Error("Read of key doesn't match")
+		t.Error("Received: ", firstTxnReadReply.staticReadReply.States[0].(crdt.SetAWValueState).Elems)
+		t.Error("Expected: ", writeReq)
+	}
+
 }
 
 /*****METHODS FOR CREATING REQUESTS*****/

@@ -82,6 +82,11 @@ type MatSafeClkArgs struct {
 	ReplyChan chan clocksi.Timestamp
 }
 
+type MatClkPosUpdArgs struct {
+	ReplicaID int64
+	StableTs  int64
+}
+
 type PendingReads struct {
 	TransactionId
 	clocksi.Timestamp
@@ -106,6 +111,7 @@ type partitionData struct {
 	pendingReads  map[clocksi.TimestampKey]*PendingReads //pending reads that require a more recent version than stableVersion
 	log           Logger                                 //logs the operations of txns that were commited in this partition
 	remoteWaiting map[int64][]PairClockUpdates           //remote transactions that are waiting for other remote transactions to be applied. Int: replicaID
+	replicaID     int64
 }
 
 type BoolErrorPair struct {
@@ -119,8 +125,6 @@ type TimestampErrorPair struct {
 }
 
 type Materializer struct {
-	//uint64: result returned by the hash function
-	keyRangeSize uint64 //Number of keys that each goroutine is responsible, except for the last one which might have a bit more.
 	//Each goroutine is responsible for a certain range of keys (with no intersection between ranges)
 	//More precisely, a goroutine is responsible from its id * keyRangeSize (inclusive) to (id + 1) * keyRangeSize (exclusive)
 	channels []chan MaterializerRequest
@@ -145,6 +149,7 @@ const (
 	prepareMatRequest     MatRequestType = 6
 	safeClkMatRequest     MatRequestType = 7
 	remoteTxnMatRequest   MatRequestType = 8
+	clkPosUpdMatRequest   MatRequestType = 9
 	versionMatRequest     MatRequestType = 255
 
 	//TODO: Maybe each bucket should correspond to one goroutine...?
@@ -236,6 +241,14 @@ func (args MatRemoteTxnArgs) getChannel() (channelId uint64) {
 	return 0 //When sending a remoteTxn request the TM sends directly to the correct materializer
 }
 
+func (args MatClkPosUpdArgs) getRequestType() (requestType MatRequestType) {
+	return clkPosUpdMatRequest
+}
+
+func (args MatClkPosUpdArgs) getChannel() (channelId uint64) {
+	return 0 //matClkPosUpdRequest is always sent to all partitions
+}
+
 func (err UnknownCrdtTypeError) Error() (errString string) {
 	return fmt.Sprint("Unknown/unsupported CRDT type:", err.CRDTType)
 }
@@ -243,7 +256,7 @@ func (err UnknownCrdtTypeError) Error() (errString string) {
 /////*****************MATERIALIZER CODE***********************/////
 
 //Starts listening goroutines and channels. Also starts each partition's logger and returns it
-func InitializeMaterializer() (mat *Materializer, loggers []Logger) {
+func InitializeMaterializer(replicaID int64) (mat *Materializer, loggers []Logger) {
 	mat = &Materializer{
 		channels: make([]chan MaterializerRequest, nGoRoutines),
 	}
@@ -252,12 +265,12 @@ func InitializeMaterializer() (mat *Materializer, loggers []Logger) {
 	for i = 0; i < nGoRoutines; i++ {
 		loggers[i] = &MemLogger{}
 		loggers[i].Initialize(mat, i)
-		go listenForTransactionManagerRequests(i, loggers[i], mat)
+		go listenForTransactionManagerRequests(i, loggers[i], replicaID, mat)
 	}
 	return
 }
 
-func listenForTransactionManagerRequests(id uint64, logger Logger, materializer *Materializer) {
+func listenForTransactionManagerRequests(id uint64, logger Logger, replicaID int64, materializer *Materializer) {
 	//Each goroutine is responsible for the range of keys [keyRangeSize * id, keyRangeSize * (id + 1)[
 	//Where keyRangeSize = math.MaxUint64 / number of goroutines
 
@@ -271,6 +284,7 @@ func listenForTransactionManagerRequests(id uint64, logger Logger, materializer 
 		pendingReads:        make(map[clocksi.TimestampKey]*PendingReads),
 		log:                 logger,
 		remoteWaiting:       make(map[int64][]PairClockUpdates),
+		replicaID:           replicaID,
 	}
 	//Listens to the channel and processes requests
 	channel := make(chan MaterializerRequest)
@@ -303,6 +317,8 @@ func handleMatRequest(request MaterializerRequest, partitionData *partitionData)
 		handleMatSafeClk(request, partitionData)
 	case remoteTxnMatRequest:
 		handleMatRemoteTxn(request, partitionData)
+	case clkPosUpdMatRequest:
+		handleMatClkPosUpd(request, partitionData)
 	}
 }
 
@@ -316,10 +332,12 @@ func handleMatRead(request MaterializerRequest, partitionData *partitionData) {
 }
 
 func auxiliaryRead(readArgs MatReadCommonArgs, txnId TransactionId, partitionData *partitionData) {
+	fmt.Println("[Mat", partitionData.replicaID, "] auxiliaryRead. ReadTS:", readArgs.Timestamp, "Stable timestamp:", partitionData.stableVersion)
 	if canRead, readLatest := canRead(readArgs.Timestamp, partitionData); canRead {
 		applyReadAndReply(&readArgs, readLatest, readArgs.Timestamp, txnId, partitionData)
 	} else {
 		//Queue the request.
+		fmt.Println("[Materializer]Warning - Queuing read")
 		queue, exists := partitionData.pendingReads[readArgs.Timestamp.GetMapKey()]
 		if !exists {
 			queue = &PendingReads{
@@ -335,6 +353,7 @@ func auxiliaryRead(readArgs MatReadCommonArgs, txnId TransactionId, partitionDat
 
 func canRead(readTs clocksi.Timestamp, partitionData *partitionData) (canRead bool, readLatest bool) {
 	compResult := readTs.Compare(partitionData.stableVersion)
+	fmt.Println("[Mat", partitionData.replicaID, "] canRead. Compare result:", compResult)
 	if compResult == clocksi.EqualTs {
 		canRead, readLatest = true, true
 	} else if compResult == clocksi.LowerTs {
@@ -344,7 +363,7 @@ func canRead(readTs clocksi.Timestamp, partitionData *partitionData) (canRead bo
 		//There's a commit prepared with a timestamp lower than read's
 		canRead, readLatest = false, false
 	} else {
-		localTs := clocksi.NewClockSiTimestamp().NextTimestamp()
+		localTs := partitionData.stableVersion.NextTimestamp(partitionData.replicaID)
 		if localTs.IsHigherOrEqual(readTs) {
 			canRead, readLatest = true, true
 		}
@@ -367,8 +386,10 @@ func applyReadAndReply(readArgs *MatReadCommonArgs, readLatest bool, readTs cloc
 	}
 	if readLatest {
 		state = obj.ReadLatest(readArgs.ReadArgs, pendingObjOps)
+		fmt.Println("[Mat", partitionData.replicaID, "]Reading latest for", hashKey, "state:", state)
 	} else {
 		state = obj.ReadOld(readArgs.ReadArgs, readTs, pendingObjOps)
+		fmt.Println("[Mat", partitionData.replicaID, "]Reading old for", hashKey, "state", state)
 	}
 
 	readArgs.ReplyChan <- state
@@ -388,9 +409,9 @@ func getObjectPendingOps(keyParams KeyParams, allPending []UpdateObjectParams) (
 func auxiliaryStartTransaction(transactionId TransactionId, partitionData *partitionData) {
 	var newTimestamp clocksi.Timestamp
 	if partitionData.highestPendingTs == nil {
-		newTimestamp = partitionData.stableVersion.NextTimestamp()
+		newTimestamp = partitionData.stableVersion.NextTimestamp(partitionData.replicaID)
 	} else {
-		newTimestamp = partitionData.highestPendingTs.NextTimestamp()
+		newTimestamp = partitionData.highestPendingTs.NextTimestamp(partitionData.replicaID)
 	}
 	partitionData.highestPendingTs = newTimestamp
 	partitionData.suggestedTimestamps[transactionId] = newTimestamp
@@ -584,14 +605,17 @@ func handleMatSafeClk(request MaterializerRequest, partitionData *partitionData)
 	if partitionData.twoSmallestPendingTxn[0] != nil {
 		replyChan <- partitionData.suggestedTimestamps[*partitionData.twoSmallestPendingTxn[0]]
 	} else {
-		replyChan <- partitionData.stableVersion.NextTimestamp()
+		replyChan <- partitionData.stableVersion.NextTimestamp(partitionData.replicaID)
 	}
 }
 
 func handleMatRemoteTxn(request MaterializerRequest, partitionData *partitionData) {
+	fmt.Println("[Mat", partitionData.replicaID, "]Starting to handle remoteTxn")
 	remoteTxnArgs := request.MatRequestArgs.(MatRemoteTxnArgs)
-	if remoteTxnArgs.Timestamp.IsLowerOrEqualExceptFor(partitionData.stableVersion, remoteTxnArgs.ReplicaID) {
+	if remoteTxnArgs.Timestamp.IsLowerOrEqualExceptFor(partitionData.stableVersion, partitionData.replicaID, remoteTxnArgs.ReplicaID) {
+		fmt.Println("[Mat", partitionData.replicaID, "]Remote txn clock is lower or equal. Upds:", remoteTxnArgs.Upds)
 		for _, upd := range remoteTxnArgs.Upds {
+			fmt.Println("[Mat", partitionData.replicaID, "]Downstreaming remote op", upd)
 			hashKey := getHash(getCombinedKey(upd.KeyParams))
 
 			obj, hasKey := partitionData.db[hashKey]
@@ -599,14 +623,25 @@ func handleMatRemoteTxn(request MaterializerRequest, partitionData *partitionDat
 				obj = initializeVersionManager(upd.CrdtType)
 				partitionData.db[hashKey] = obj
 			}
-			obj.Downstream(remoteTxnArgs.Timestamp, upd)
+			obj.Downstream(remoteTxnArgs.Timestamp, upd.UpdateArgs)
+			fmt.Println("[Mat", partitionData.replicaID, "]Object after downstream:", obj, "hashkey:", hashKey)
 		}
+		fmt.Println("[Mat", partitionData.replicaID, "]Stable clk before:", partitionData.stableVersion)
 		partitionData.stableVersion = partitionData.stableVersion.UpdatePos(remoteTxnArgs.ReplicaID, remoteTxnArgs.Timestamp.GetPos(remoteTxnArgs.ReplicaID))
+		fmt.Println("[Mat", partitionData.replicaID, "]Stable clk after:", partitionData.stableVersion)
 	} else {
+		fmt.Println("[Mat", partitionData.replicaID, "]Remote txn clock is NOT lower or equal")
 		clkUpdsPair := PairClockUpdates{clk: &remoteTxnArgs.Timestamp, upds: &remoteTxnArgs.Upds}
 		partitionData.remoteWaiting[remoteTxnArgs.ReplicaID] = append(partitionData.remoteWaiting[remoteTxnArgs.ReplicaID], clkUpdsPair)
 	}
+	fmt.Println("[Mat", partitionData.replicaID, "]Finished handling remoteTxn")
 	//if remoteTxnArgs..IsLowerOrEqualExceptFor()
+}
+
+func handleMatClkPosUpd(request MaterializerRequest, partitionData *partitionData) {
+	clkArgs := request.MatRequestArgs.(MatClkPosUpdArgs)
+	//Note that updatePos keeps the maximum of the actual value and the one in the argument
+	partitionData.stableVersion.UpdatePos(clkArgs.ReplicaID, clkArgs.StableTs)
 }
 
 //TODO: Think of some better way of doing this...? This probably shouldn't even be here, but putting it in crdt.go creates a circular dependency
