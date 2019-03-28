@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"clocksi"
+	"fmt"
 	rand "math/rand"
 	"time"
 )
@@ -11,7 +12,7 @@ type Element string
 //Note: Implements both CRDT and InversibleCRDT
 type SetAWCrdt struct {
 	*genericInversibleCRDT
-	elems map[Element]uniqueSet
+	elems map[Element]UniqueSet
 	//elems map[Element]uniqueSet
 	//Used to generate unique identifiers. This should not be included in a serialization to transfer the state.
 	random rand.Source
@@ -26,7 +27,7 @@ type SetAWLookupState struct {
 }
 
 type LookupReadArguments struct {
-	elem Element
+	Elem Element
 }
 
 //Operations
@@ -50,38 +51,38 @@ type RemoveAll struct {
 //Downstream operations
 
 type DownstreamAddAll struct {
-	elems map[Element]unique
+	Elems map[Element]Unique
 }
 
 type DownstreamRemoveAll struct {
-	elems map[Element]uniqueSet
+	Elems map[Element]UniqueSet
 }
 
 //Operation effects for inversibleCRDT (the first two are probably not needed)
 
 type AddEffect struct {
 	Elem   Element
-	Unique unique
+	Unique Unique
 }
 
 type RemoveEffect struct {
 	Elem    Element
-	Uniques uniqueSet
+	Uniques UniqueSet
 }
 
 type AddAllEffect struct {
-	AddedMap map[Element]unique
+	AddedMap map[Element]Unique
 }
 
 type RemoveAllEffect struct {
-	RemovedMap map[Element]uniqueSet
+	RemovedMap map[Element]UniqueSet
 }
 
 //Note: crdt can (and most often will be) nil
 func (crdt *SetAWCrdt) Initialize() (newCrdt CRDT) {
 	crdt = &SetAWCrdt{
 		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(),
-		elems:                 make(map[Element]uniqueSet),
+		elems:                 make(map[Element]UniqueSet),
 		random:                rand.NewSource(time.Now().Unix())} //TODO: Assign to crdt is potencially unecessary (idea: Updates self in the map (reset operation?))
 	newCrdt = crdt
 	return
@@ -92,7 +93,7 @@ func (crdt *SetAWCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArgume
 	case StateReadArguments:
 		return crdt.getState(updsNotYetApplied)
 	case LookupReadArguments:
-		return crdt.lookup(typedArg.elem, updsNotYetApplied)
+		return crdt.lookup(typedArg.Elem, updsNotYetApplied)
 	}
 	return nil
 }
@@ -217,21 +218,21 @@ func (crdt *SetAWCrdt) Update(args UpdateArguments) (downstreamArgs UpdateArgume
 }
 
 func (crdt *SetAWCrdt) getAddAllDownstreamArgs(elems []Element) (downstreamArgs UpdateArguments) {
-	uniqueMap := make(map[Element]unique)
+	uniqueMap := make(map[Element]Unique)
 	for _, key := range elems {
-		uniqueMap[key] = unique(crdt.random.Int63())
+		uniqueMap[key] = Unique(crdt.random.Int63())
 	}
-	downstreamArgs = DownstreamAddAll{elems: uniqueMap}
+	downstreamArgs = DownstreamAddAll{Elems: uniqueMap}
 	return
 }
 
 func (crdt *SetAWCrdt) getRemoveAllDownstreamArgs(elems []Element) (downstreamArgs UpdateArguments) {
-	uniqueMap := make(map[Element]uniqueSet)
+	uniqueMap := make(map[Element]UniqueSet)
 	for _, key := range elems {
 		//In go, the "=" symbol does a deep copy. This is true for any object, unless you use references
 		uniqueMap[key] = crdt.elems[key]
 	}
-	downstreamArgs = DownstreamRemoveAll{elems: uniqueMap}
+	downstreamArgs = DownstreamRemoveAll{Elems: uniqueMap}
 	return
 }
 
@@ -244,14 +245,19 @@ func (crdt *SetAWCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs Update
 func (crdt *SetAWCrdt) applyDownstream(downstreamArgs UpdateArguments) (effect *Effect) {
 	switch opType := downstreamArgs.(type) {
 	case DownstreamAddAll:
-		effect = crdt.applyAddAll(opType.elems)
+		effect = crdt.applyAddAll(opType.Elems)
+	case *DownstreamAddAll:
+		effect = crdt.applyAddAll(opType.Elems)
 	case DownstreamRemoveAll:
-		effect = crdt.applyRemoveAll(opType.elems)
+		effect = crdt.applyRemoveAll(opType.Elems)
+	case *DownstreamRemoveAll:
+		effect = crdt.applyRemoveAll(opType.Elems)
 	}
+	fmt.Println("[SETAWCRDT]State after downstream: ", crdt.getState(nil))
 	return
 }
 
-func (crdt *SetAWCrdt) applyAddAll(toAdd map[Element]unique) (effect *Effect) {
+func (crdt *SetAWCrdt) applyAddAll(toAdd map[Element]Unique) (effect *Effect) {
 	for key, newUnique := range toAdd {
 		//Checks if the key is already in the map. If it is, adds a unique
 		if existingUniques, ok := crdt.elems[key]; ok {
@@ -266,8 +272,8 @@ func (crdt *SetAWCrdt) applyAddAll(toAdd map[Element]unique) (effect *Effect) {
 	return &effectValue
 }
 
-func (crdt *SetAWCrdt) applyRemoveAll(toRem map[Element]uniqueSet) (effect *Effect) {
-	removedMap := make(map[Element]uniqueSet)
+func (crdt *SetAWCrdt) applyRemoveAll(toRem map[Element]UniqueSet) (effect *Effect) {
+	removedMap := make(map[Element]UniqueSet)
 	var effectValue Effect = RemoveAllEffect{RemovedMap: removedMap}
 
 	for key, uniquesToRem := range toRem {
@@ -293,7 +299,7 @@ func (crdt *SetAWCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err 
 func (crdt *SetAWCrdt) Copy() (copyCRDT InversibleCRDT) {
 	newCrdt := SetAWCrdt{
 		genericInversibleCRDT: crdt.genericInversibleCRDT.copy(),
-		elems:                 make(map[Element]uniqueSet),
+		elems:                 make(map[Element]UniqueSet),
 		random:                rand.NewSource(time.Now().Unix()),
 	}
 	for element, uniques := range crdt.elems {
@@ -341,4 +347,8 @@ func (crdt *SetAWCrdt) undoRemoveAllEffect(effect *RemoveAllEffect) {
 			crdt.elems[key] = newSet
 		}
 	}
+}
+
+func (crdt *SetAWCrdt) GetPossibleDownstreamTypes() (possibleTypes []UpdateArguments) {
+	return []UpdateArguments{&DownstreamAddAll{}, &DownstreamRemoveAll{}}
 }

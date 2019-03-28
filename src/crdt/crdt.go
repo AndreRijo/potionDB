@@ -14,7 +14,17 @@ type CRDT interface {
 	GetVersion() (ts clocksi.Timestamp) //TODO: This is probably not needed at all
 
 	IsOperationWellTyped(args UpdateArguments) (ok bool, err error)
+
+	//Returns an instance of each possible downstream argument that this CRDT might generate
+	//This is needed for serialization, as it needs to know which types will be used per interface.
+	//The internal values of each returned type is irrelevant, as long as all types of downstream arguments are covered
+	GetPossibleDownstreamTypes() (possibleTypes []UpdateArguments)
 }
+
+//TODO: Whenever a new CRDT is added, add a dummy instance here. This is needed for remoteConnection.go
+var (
+	DummyCRDTs = []CRDT{&SetAWCrdt{}, &CounterCrdt{}}
+)
 
 //The idea is to include here the methods/data common to every CRDT. For now, that's only the vectorClock and GetVersion()
 type genericCRDT struct {

@@ -5,6 +5,7 @@ import (
 	"crdt"
 	fmt "fmt"
 	math "math"
+	"tools"
 
 	hashFunc "github.com/twmb/murmur3"
 )
@@ -332,12 +333,12 @@ func handleMatRead(request MaterializerRequest, partitionData *partitionData) {
 }
 
 func auxiliaryRead(readArgs MatReadCommonArgs, txnId TransactionId, partitionData *partitionData) {
-	fmt.Println("[Mat", partitionData.replicaID, "] auxiliaryRead. ReadTS:", readArgs.Timestamp, "Stable timestamp:", partitionData.stableVersion)
+	tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "auxiliaryRead. ReadTS:", readArgs.Timestamp, "Stable timestamp:", partitionData.stableVersion)
 	if canRead, readLatest := canRead(readArgs.Timestamp, partitionData); canRead {
 		applyReadAndReply(&readArgs, readLatest, readArgs.Timestamp, txnId, partitionData)
 	} else {
 		//Queue the request.
-		fmt.Println("[Materializer]Warning - Queuing read")
+		tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Warning - Queuing read")
 		queue, exists := partitionData.pendingReads[readArgs.Timestamp.GetMapKey()]
 		if !exists {
 			queue = &PendingReads{
@@ -353,7 +354,7 @@ func auxiliaryRead(readArgs MatReadCommonArgs, txnId TransactionId, partitionDat
 
 func canRead(readTs clocksi.Timestamp, partitionData *partitionData) (canRead bool, readLatest bool) {
 	compResult := readTs.Compare(partitionData.stableVersion)
-	fmt.Println("[Mat", partitionData.replicaID, "] canRead. Compare result:", compResult)
+	tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "canRead. Compare result:", compResult)
 	if compResult == clocksi.EqualTs {
 		canRead, readLatest = true, true
 	} else if compResult == clocksi.LowerTs {
@@ -386,10 +387,10 @@ func applyReadAndReply(readArgs *MatReadCommonArgs, readLatest bool, readTs cloc
 	}
 	if readLatest {
 		state = obj.ReadLatest(readArgs.ReadArgs, pendingObjOps)
-		fmt.Println("[Mat", partitionData.replicaID, "]Reading latest for", hashKey, "state:", state)
+		tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Reading latest for", hashKey, "state:", state)
 	} else {
 		state = obj.ReadOld(readArgs.ReadArgs, readTs, pendingObjOps)
-		fmt.Println("[Mat", partitionData.replicaID, "]Reading old for", hashKey, "state", state)
+		tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Reading old for", hashKey, "state", state)
 	}
 
 	readArgs.ReplyChan <- state
@@ -495,7 +496,7 @@ func handleMatCommit(request MaterializerRequest, partitionData *partitionData) 
 	} else {
 		//A transaction with smaller version is pending, so we need to queue this commit.
 		partitionData.commitedWaitToApply[commitArgs.TransactionId] = commitArgs.CommitTimestamp
-		fmt.Println("[Materializer]Warning - Queuing commit")
+		tools.FancyWarnPrint(tools.MAT_PRINT, partitionData.replicaID, "Warning - Queuing commit")
 	}
 }
 
@@ -583,6 +584,7 @@ func applyUpdates(updates []UpdateObjectParams, commitTimestamp *clocksi.Timesta
 			KeyParams:  upd.KeyParams,
 			UpdateArgs: obj.Update(upd.UpdateArgs),
 		}
+		tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Downstream args:", (*downstreamUpds)[i].UpdateArgs)
 		obj.Downstream(*commitTimestamp, (*downstreamUpds)[i].UpdateArgs)
 	}
 	return
@@ -610,12 +612,12 @@ func handleMatSafeClk(request MaterializerRequest, partitionData *partitionData)
 }
 
 func handleMatRemoteTxn(request MaterializerRequest, partitionData *partitionData) {
-	fmt.Println("[Mat", partitionData.replicaID, "]Starting to handle remoteTxn")
+	tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Starting to handle remoteTxn")
 	remoteTxnArgs := request.MatRequestArgs.(MatRemoteTxnArgs)
 	if remoteTxnArgs.Timestamp.IsLowerOrEqualExceptFor(partitionData.stableVersion, partitionData.replicaID, remoteTxnArgs.ReplicaID) {
-		fmt.Println("[Mat", partitionData.replicaID, "]Remote txn clock is lower or equal. Upds:", remoteTxnArgs.Upds)
+		tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Remote txn clock is lower or equal. Upds:", remoteTxnArgs.Upds)
 		for _, upd := range remoteTxnArgs.Upds {
-			fmt.Println("[Mat", partitionData.replicaID, "]Downstreaming remote op", upd)
+			tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Downstreaming remote op", upd, "Args:", upd.UpdateArgs)
 			hashKey := getHash(getCombinedKey(upd.KeyParams))
 
 			obj, hasKey := partitionData.db[hashKey]
@@ -624,18 +626,19 @@ func handleMatRemoteTxn(request MaterializerRequest, partitionData *partitionDat
 				partitionData.db[hashKey] = obj
 			}
 			obj.Downstream(remoteTxnArgs.Timestamp, upd.UpdateArgs)
-			fmt.Println("[Mat", partitionData.replicaID, "]Object after downstream:", obj, "hashkey:", hashKey)
+			tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Object after downstream:", obj, "hashkey:", hashKey)
 		}
-		fmt.Println("[Mat", partitionData.replicaID, "]Stable clk before:", partitionData.stableVersion)
+		tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Stable clk before:", partitionData.stableVersion)
 		partitionData.stableVersion = partitionData.stableVersion.UpdatePos(remoteTxnArgs.ReplicaID, remoteTxnArgs.Timestamp.GetPos(remoteTxnArgs.ReplicaID))
-		fmt.Println("[Mat", partitionData.replicaID, "]Stable clk after:", partitionData.stableVersion)
+		tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Stable clk after:", partitionData.stableVersion)
 	} else {
-		fmt.Println("[Mat", partitionData.replicaID, "]Remote txn clock is NOT lower or equal")
+		tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Remote txn clock is NOT lower or equal")
 		clkUpdsPair := PairClockUpdates{clk: &remoteTxnArgs.Timestamp, upds: &remoteTxnArgs.Upds}
 		partitionData.remoteWaiting[remoteTxnArgs.ReplicaID] = append(partitionData.remoteWaiting[remoteTxnArgs.ReplicaID], clkUpdsPair)
 	}
-	fmt.Println("[Mat", partitionData.replicaID, "]Finished handling remoteTxn")
+	tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Finished handling remoteTxn")
 	//if remoteTxnArgs..IsLowerOrEqualExceptFor()
+	//Downstream args: {map[15352856648520921629:5777393098617126394]}
 }
 
 func handleMatClkPosUpd(request MaterializerRequest, partitionData *partitionData) {

@@ -12,24 +12,24 @@ type Timestamp interface {
 	//Creates a new timestamp representing the initial value.
 	NewTimestamp() (newTs Timestamp)
 	//Gets a timestamp that is more recent than the actual one
-	NextTimestamp() (newTs Timestamp)
+	NextTimestamp(id int64) (newTs Timestamp)
 	//Compares two timestamps. Returns HigherTs if the current timestamp is higher than otherTs. Others should be self explanatory.
 	//Possible results: HigherTs/LowerTs/EqualTs/ConcurrentTs
 	Compare(otherTs Timestamp) (compResult TsResult)
 	//Returns true when Compare(otherTs) would return HigherTs or EqualTs.
-	//In some implementations (e.g., vectorClocks) and in some situations, this may be more efficient than Compare.
+	//In some implementations (e.g., VectorClocks) and in some situations, this may be more efficient than Compare.
 	IsHigherOrEqual(otherTs Timestamp) (compResult bool)
 	//Returns true when Compare(otherTs) would return LowerTs or EqualTs.
-	//In some implementations (e.g., vectorClocks) and in some situations, this may be more efficient than Compare.
+	//In some implementations (e.g., VectorClocks) and in some situations, this may be more efficient than Compare.
 	IsLowerOrEqual(otherTs Timestamp) (compResult bool)
 	//Returns true when Compare(otherTs) would return LowerTs.
-	//In some implementations (e.g., vectorClocks) and in some situations, this may be more efficient than Compare.
+	//In some implementations (e.g., VectorClocks) and in some situations, this may be more efficient than Compare.
 	IsLower(otherTs Timestamp) (compResult bool)
 	//Returns true when Compare(otherTs) would return HigherTs.
-	//In some implementations (e.g., vectorClocks) and in some situations, this may be more efficient than Compare.
+	//In some implementations (e.g., VectorClocks) and in some situations, this may be more efficient than Compare.
 	IsHigher(otherTs Timestamp) (compResult bool)
 	//Returns true when Compare(otherTs) would return EqualTs.
-	//In some implementations (e.g., vectorClocks) and in some situations, this may be more efficient than Compare.
+	//In some implementations (e.g., VectorClocks) and in some situations, this may be more efficient than Compare.
 	IsEqual(otherTs Timestamp) (compResult bool)
 	//Returns true when Compare(otherTs) would return ConcurrentTs.
 	IsConcurrent(otherTs Timestamp) (compResult bool)
@@ -40,8 +40,8 @@ type Timestamp interface {
 	UpdatePos(id int64, newValue int64) (newTs Timestamp)
 	//Gets the timestamp value associated to the id
 	GetPos(id int64) (value int64)
-	//Does the same as IsLowerOrEqual except that it ignores the values associated to id
-	IsLowerOrEqualExceptFor(otherTs Timestamp, id int64) (compResult bool)
+	//Does the same as IsLowerOrEqual except that it ignores the values associated to self and id positions
+	IsLowerOrEqualExceptFor(otherTs Timestamp, self int64, id int64) (compResult bool)
 	//Returns the timestamp resulting of merging this timestamp and the argument timestamp
 	//In a vector clock, it represents keeping the highest value of each position
 	Merge(otherTs Timestamp) (mergedTs Timestamp)
@@ -57,8 +57,8 @@ type Timestamp interface {
 }
 
 type ClockSiTimestamp struct {
-	//vectorClock *[]int64
-	vectorClock map[int64]int64 //replicaID to clock value
+	//VectorClock *[]int64
+	VectorClock map[int64]int64 //replicaID to clock value
 }
 
 type TsResult int
@@ -85,8 +85,8 @@ var (
 
 func prepareDummyHighTs() (ts Timestamp) {
 	vc := make(map[int64]int64)
-	clockSiTs := ClockSiTimestamp{vectorClock: vc}
-	clockSiTs.vectorClock[0] = math.MaxInt64
+	clockSiTs := ClockSiTimestamp{VectorClock: vc}
+	clockSiTs.VectorClock[0] = math.MaxInt64
 	return clockSiTs
 }
 
@@ -99,18 +99,17 @@ func NewClockSiTimestamp() (ts Timestamp) {
 func (ts ClockSiTimestamp) NewTimestamp() (newTs Timestamp) {
 	vc := make(map[int64]int64)
 	vc[0] = 0
-	ts = ClockSiTimestamp{vectorClock: vc}
+	ts = ClockSiTimestamp{VectorClock: vc}
 	return ts
 }
 
-func (ts ClockSiTimestamp) NextTimestamp() (newTs Timestamp) {
+func (ts ClockSiTimestamp) NextTimestamp(id int64) (newTs Timestamp) {
 	newVc := make(map[int64]int64)
-	for id, value := range ts.vectorClock {
-		newVc[id] = value
+	for i, value := range ts.VectorClock {
+		newVc[i] = value
 	}
-	//TODO: Actually update the correct position
-	newVc[0] = time.Now().UTC().UnixNano()
-	return ClockSiTimestamp{vectorClock: newVc}
+	newVc[id] = time.Now().UTC().UnixNano()
+	return ClockSiTimestamp{VectorClock: newVc}
 
 }
 
@@ -120,8 +119,8 @@ func (ts ClockSiTimestamp) Compare(otherTs Timestamp) (compResult TsResult) {
 		return
 	}
 
-	otherVc := otherTs.(ClockSiTimestamp).vectorClock
-	selfVc := ts.vectorClock
+	otherVc := otherTs.(ClockSiTimestamp).VectorClock
+	selfVc := ts.VectorClock
 	foundHigher := false
 	foundLower := false
 
@@ -155,8 +154,8 @@ func (ts ClockSiTimestamp) IsHigherOrEqual(otherTs Timestamp) (compResult bool) 
 		return true
 	}
 
-	otherVc := otherTs.(ClockSiTimestamp).vectorClock
-	selfVc := ts.vectorClock
+	otherVc := otherTs.(ClockSiTimestamp).VectorClock
+	selfVc := ts.VectorClock
 
 	for i, selfValue := range selfVc {
 		if selfValue < otherVc[i] {
@@ -173,8 +172,8 @@ func (ts ClockSiTimestamp) IsHigher(otherTs Timestamp) (compResult bool) {
 		return true
 	}
 
-	otherVc := otherTs.(ClockSiTimestamp).vectorClock
-	selfVc := ts.vectorClock
+	otherVc := otherTs.(ClockSiTimestamp).VectorClock
+	selfVc := ts.VectorClock
 	foundLower := false
 
 	for i, selfValue := range selfVc {
@@ -193,8 +192,8 @@ func (ts ClockSiTimestamp) IsLowerOrEqual(otherTs Timestamp) (compResult bool) {
 		return false
 	}
 
-	otherVc := otherTs.(ClockSiTimestamp).vectorClock
-	selfVc := ts.vectorClock
+	otherVc := otherTs.(ClockSiTimestamp).VectorClock
+	selfVc := ts.VectorClock
 
 	for i, selfValue := range selfVc {
 		if selfValue > otherVc[i] {
@@ -206,16 +205,16 @@ func (ts ClockSiTimestamp) IsLowerOrEqual(otherTs Timestamp) (compResult bool) {
 	return true
 }
 
-func (ts ClockSiTimestamp) IsLowerOrEqualExceptFor(otherTs Timestamp, id int64) (compResult bool) {
+func (ts ClockSiTimestamp) IsLowerOrEqualExceptFor(otherTs Timestamp, self int64, id int64) (compResult bool) {
 	if otherTs == nil {
 		return false
 	}
 
-	otherVc := otherTs.(ClockSiTimestamp).vectorClock
-	selfVc := ts.vectorClock
+	otherVc := otherTs.(ClockSiTimestamp).VectorClock
+	selfVc := ts.VectorClock
 
 	for i, selfValue := range selfVc {
-		if i != id {
+		if i != id && i != self {
 			if selfValue > otherVc[i] {
 				return false
 			}
@@ -230,8 +229,8 @@ func (ts ClockSiTimestamp) IsLower(otherTs Timestamp) (compResult bool) {
 		return false
 	}
 
-	otherVc := otherTs.(ClockSiTimestamp).vectorClock
-	selfVc := ts.vectorClock
+	otherVc := otherTs.(ClockSiTimestamp).VectorClock
+	selfVc := ts.VectorClock
 	foundHigher := false
 
 	for i, selfValue := range selfVc {
@@ -250,8 +249,8 @@ func (ts ClockSiTimestamp) IsEqual(otherTs Timestamp) (compResult bool) {
 		return false
 	}
 
-	otherVc := otherTs.(ClockSiTimestamp).vectorClock
-	selfVc := ts.vectorClock
+	otherVc := otherTs.(ClockSiTimestamp).VectorClock
+	selfVc := ts.VectorClock
 
 	for i, selfValue := range selfVc {
 		if selfValue != otherVc[i] {
@@ -268,8 +267,8 @@ func (ts ClockSiTimestamp) IsConcurrent(otherTs Timestamp) (compResult bool) {
 }
 
 func (ts ClockSiTimestamp) ComparePos(id int64, otherTs Timestamp) (compResult TsResult) {
-	tsValue, hasTs := ts.vectorClock[id]
-	otherTsValue, hasOtherTs := otherTs.(ClockSiTimestamp).vectorClock[id]
+	tsValue, hasTs := ts.VectorClock[id]
+	otherTsValue, hasOtherTs := otherTs.(ClockSiTimestamp).VectorClock[id]
 	if !hasTs || !hasOtherTs {
 		return ConcurrentTs
 	}
@@ -283,22 +282,22 @@ func (ts ClockSiTimestamp) ComparePos(id int64, otherTs Timestamp) (compResult T
 }
 
 func (ts ClockSiTimestamp) UpdatePos(id int64, newValue int64) (newTs Timestamp) {
-	if ts.vectorClock[id] < newValue {
-		ts.vectorClock[id] = newValue
+	if ts.VectorClock[id] < newValue {
+		ts.VectorClock[id] = newValue
 	}
 	newTs = ts
 	return
 }
 
 func (ts ClockSiTimestamp) GetPos(id int64) (value int64) {
-	return ts.vectorClock[id]
+	return ts.VectorClock[id]
 }
 
 func (ts ClockSiTimestamp) Merge(otherTs Timestamp) (mergedTs Timestamp) {
 	vc := make(map[int64]int64)
-	otherTsVc := otherTs.(ClockSiTimestamp).vectorClock
+	otherTsVc := otherTs.(ClockSiTimestamp).VectorClock
 
-	for i, value := range ts.vectorClock {
+	for i, value := range ts.VectorClock {
 		//Keep the max of each position
 		if value > otherTsVc[i] {
 			vc[i] = value
@@ -307,19 +306,19 @@ func (ts ClockSiTimestamp) Merge(otherTs Timestamp) (mergedTs Timestamp) {
 		}
 	}
 
-	return ClockSiTimestamp{vectorClock: vc}
+	return ClockSiTimestamp{VectorClock: vc}
 }
 
 func (ts ClockSiTimestamp) ToBytes() (bytes []byte) {
 	/*
-		bytes = make([]byte, len(*ts.vectorClock)*entrySize)
-		for i, vcEntry := range *ts.vectorClock {
+		bytes = make([]byte, len(*ts.VectorClock)*entrySize)
+		for i, vcEntry := range *ts.VectorClock {
 			binary.LittleEndian.PutUint64(bytes[i*entrySize:(i+1)*entrySize], uint64(vcEntry))
 		}
 		return
 	*/
-	bytes = make([]byte, len(ts.vectorClock)*2*entrySize)
-	for i, vcEntry := range ts.vectorClock {
+	bytes = make([]byte, len(ts.VectorClock)*2*entrySize)
+	for i, vcEntry := range ts.VectorClock {
 		binary.LittleEndian.PutUint64(bytes[i*2*entrySize:i*2*entrySize+entrySize], uint64(i))
 		binary.LittleEndian.PutUint64(bytes[i*2*entrySize+entrySize:(i+1)*2*entrySize], uint64(vcEntry))
 	}
@@ -331,13 +330,13 @@ func (ts ClockSiTimestamp) FromBytes(bytes []byte) (newTs Timestamp) {
 	/*
 		if bytes == nil || len(bytes) == 0 {
 			newVC := make([]int64, 1)
-			newClockSi := &ClockSiTimestamp{vectorClock: &newVC}
+			newClockSi := &ClockSiTimestamp{VectorClock: &newVC}
 			//Should be unecessary.
-			(*newClockSi.vectorClock)[0] = 0
+			(*newClockSi.VectorClock)[0] = 0
 			newTs = *newClockSi
 		} else {
 			newVC := make([]int64, len(bytes)/8)
-			newClockSi := &ClockSiTimestamp{vectorClock: &newVC}
+			newClockSi := &ClockSiTimestamp{VectorClock: &newVC}
 			for i := 0; i < len(newVC); i++ {
 				newVC[i] = int64(binary.LittleEndian.Uint64(bytes[i*entrySize : (i+1)*entrySize]))
 			}
@@ -356,13 +355,13 @@ func (ts ClockSiTimestamp) FromBytes(bytes []byte) (newTs Timestamp) {
 			newVC[replicaID] = value
 		}
 	}
-	return ClockSiTimestamp{vectorClock: newVC}
+	return ClockSiTimestamp{VectorClock: newVC}
 }
 
 func (ts ClockSiTimestamp) ToString() (tsString string) {
 	var builder strings.Builder
 	builder.WriteString("{[")
-	for id, value := range ts.vectorClock {
+	for id, value := range ts.VectorClock {
 		builder.WriteString(fmt.Sprint(id))
 		builder.WriteString(":")
 		builder.WriteString(fmt.Sprint(value))
@@ -375,7 +374,7 @@ func (ts ClockSiTimestamp) ToString() (tsString string) {
 //TODO: If we one day support adding/removing replicas on the fly this will probably no longer work, as it ignores the replica's ID (map key)
 func (ts ClockSiTimestamp) GetMapKey() (key TimestampKey) {
 	var builder strings.Builder
-	for _, value := range ts.vectorClock {
+	for _, value := range ts.VectorClock {
 		builder.WriteString(fmt.Sprint(value, ","))
 	}
 	return builder.String()

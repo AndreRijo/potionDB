@@ -425,9 +425,9 @@ func TestReplicator1(t *testing.T) {
 	tm1 := Initialize(0)
 	time.Sleep(time.Duration(200) * time.Millisecond)
 	tm2 := Initialize(1)
-	tm1.replicator.tmpAddRemoteReplicator(tm2.replicator.receiveReplChan)
-	tm2.replicator.tmpAddRemoteReplicator(tm1.replicator.receiveReplChan)
-	//tm1.replicator.tmpAddRemoteReplicator(make(chan ReplicatorRequest))
+	tm1.replicator.AddRemoteReplicator(tm2.replicator.replicaID)
+	tm2.replicator.AddRemoteReplicator(tm1.replicator.replicaID)
+	//tm1.replicator.AddRemoteReplicator(make(chan ReplicatorRequest))
 
 	//Sleep for a bit to ensure all gothreads initialize
 	time.Sleep(initializeTime * time.Millisecond)

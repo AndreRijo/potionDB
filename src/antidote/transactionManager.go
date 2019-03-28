@@ -9,6 +9,7 @@ import (
 	fmt "fmt"
 	"math/rand"
 	"sync"
+	"tools"
 )
 
 /////*****************TYPE DEFINITIONS***********************/////
@@ -631,16 +632,16 @@ func (tm *TransactionManager) handleTMAbort(request TransactionManagerRequest, t
 }
 
 func (tm *TransactionManager) applyRemoteTxn(replicaID int64, upds []RemoteTxns, stableTs int64) {
-	fmt.Println("[TM", tm.replicaID, "]Started applying remote txn")
+	tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Started applying remote txn")
 	tm.localClock.Lock()
 	for i, txn := range upds {
-		fmt.Println("[TM", tm.replicaID, "]Detected a remote txn. Local clk:", tm.localClock.Timestamp, ". Remote clk:", txn.Timestamp)
+		tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Detected a remote txn. Local clk:", tm.localClock.Timestamp, ". Remote clk:", txn.Timestamp)
 		isLowerOrEqual := txn.Timestamp.IsLowerOrEqualExceptFor(tm.localClock.Timestamp, tm.replicaID, replicaID)
 		if isLowerOrEqual {
-			tm.downstreamRemoteTxn(replicaID, txn.Timestamp, txn.upds)
+			tm.downstreamRemoteTxn(replicaID, txn.Timestamp, txn.Upds)
 		} else {
 			//Queue all others
-			fmt.Println("[TM", tm.replicaID, "]Queuing remote txn")
+			tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Queuing remote txn")
 			tm.downstreamQueue[replicaID] = append(tm.downstreamQueue[replicaID], upds[i:]...)
 			break
 		}
@@ -652,14 +653,14 @@ func (tm *TransactionManager) applyRemoteTxn(replicaID int64, upds []RemoteTxns,
 	} else {
 		tm.downstreamClkQueue[replicaID] = stableTs
 	}
-	fmt.Println("[TM", tm.replicaID, "]Finished applying remote txn")
+	tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Finished applying remote txn")
 	tm.checkPendingRemoteTxns()
 	tm.localClock.Unlock()
 }
 
 //Pre-condition: localClock's mutex is hold
 func (tm *TransactionManager) downstreamRemoteTxn(replicaID int64, txnClk clocksi.Timestamp, txnOps *map[int][]UpdateObjectParams) {
-	fmt.Println("[TM", tm.replicaID, "]Started downstream remote txn")
+	tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Started downstream remote txn")
 	var currRequest MaterializerRequest
 	for partId, partOps := range *txnOps {
 		currRequest = MaterializerRequest{MatRequestArgs: MatRemoteTxnArgs{
@@ -667,25 +668,25 @@ func (tm *TransactionManager) downstreamRemoteTxn(replicaID int64, txnClk clocks
 			Timestamp: txnClk,
 			Upds:      partOps,
 		}}
-		fmt.Println("[TM", tm.replicaID, "]Sending remoteTxn request to Materializer")
+		tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Sending remoteTxn request to Materializer")
 		if len(partOps) > 0 {
-			fmt.Println("[TM", tm.replicaID, "]Partition", partId, "has operations:", partOps)
+			tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Partition", partId, "has operations:", partOps)
 		} else {
-			fmt.Println("[TM", tm.replicaID, "]Partition", partId, "has NO operations:", partOps)
+			tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Partition", partId, "has NO operations:", partOps)
 		}
 		tm.mat.SendRequestToChannel(currRequest, uint64(partId))
 	}
 	tm.localClock.Timestamp = tm.localClock.Timestamp.UpdatePos(replicaID, txnClk.GetPos(replicaID))
-	fmt.Println("[TM", tm.replicaID, "]Finished downstream remote txn")
+	tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Finished downstream remote txn")
 }
 
 //Pre-condition: localClock's mutex is hold
 func (tm *TransactionManager) checkPendingRemoteTxns() {
-	fmt.Println("[TM", tm.replicaID, "]Started checking for pending remote txns")
+	tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Started checking for pending remote txns")
 	appliedAtLeastOne := true
 	//No txns pending, can return right away
 	if len(tm.downstreamQueue) == 0 {
-		fmt.Println("[TM", tm.replicaID, "]Finished checking for pending remote txns")
+		tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Finished checking for pending remote txns")
 		return
 	}
 	for appliedAtLeastOne {
@@ -697,7 +698,7 @@ func (tm *TransactionManager) checkPendingRemoteTxns() {
 			for _, txn := range pendingTxns {
 				isLowerOrEqual := txn.Timestamp.IsLowerOrEqualExceptFor(tm.localClock.Timestamp, tm.replicaID, replicaID)
 				if isLowerOrEqual {
-					tm.downstreamRemoteTxn(replicaID, txn.Timestamp, txn.upds)
+					tm.downstreamRemoteTxn(replicaID, txn.Timestamp, txn.Upds)
 					appliedAtLeastOne = true
 					if len(pendingTxns) > 1 {
 						pendingTxns = pendingTxns[1:]
@@ -722,7 +723,7 @@ func (tm *TransactionManager) checkPendingRemoteTxns() {
 			}
 		}
 	}
-	fmt.Println("[TM", tm.replicaID, "]Finished checking for pending remote txns")
+	tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Finished checking for pending remote txns")
 }
 
 //TODO: Possibly cache the hashing results and return them? That would allow to include them in the requests and paralelize the read requests

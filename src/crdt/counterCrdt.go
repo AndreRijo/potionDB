@@ -75,10 +75,16 @@ func (crdt *CounterCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs Upda
 func (crdt *CounterCrdt) applyDownstream(downstreamArgs UpdateArguments) (effect *Effect) {
 	var effectValue Effect
 	switch incOrDec := downstreamArgs.(type) {
+	case *Increment:
+		crdt.value += incOrDec.Change
+		effectValue = IncrementEffect{Change: incOrDec.Change}
 	case Increment:
 		crdt.value += incOrDec.Change
 		effectValue = IncrementEffect{Change: incOrDec.Change}
 	case Decrement:
+		crdt.value -= incOrDec.Change
+		effectValue = DecrementEffect{Change: incOrDec.Change}
+	case *Decrement:
 		crdt.value -= incOrDec.Change
 		effectValue = DecrementEffect{Change: incOrDec.Change}
 	}
@@ -114,4 +120,8 @@ func (crdt *CounterCrdt) undoEffect(effect *Effect) {
 	case DecrementEffect:
 		crdt.value += typedEffect.Change
 	}
+}
+
+func (crdt *CounterCrdt) GetPossibleDownstreamTypes() (possibleTypes []UpdateArguments) {
+	return []UpdateArguments{&Increment{}, &Decrement{}}
 }

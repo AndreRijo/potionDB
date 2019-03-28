@@ -1,35 +1,35 @@
 package crdt
 
-type unique uint64
+type Unique uint64
 
 //Standard map operations also work on this datatype
-type uniqueSet map[unique]struct{}
+type UniqueSet map[Unique]struct{}
 
-func makeUniqueSet() (set uniqueSet) {
-	set = uniqueSet(make(map[unique]struct{}))
+func makeUniqueSet() (set UniqueSet) {
+	set = UniqueSet(make(map[Unique]struct{}))
 	return
 }
 
 //Adds an element to the set. This hides the internal representation of the set
-func (set uniqueSet) add(uniqueId unique) {
+func (set UniqueSet) add(uniqueId Unique) {
 	set[uniqueId] = struct{}{}
 }
 
-func (set uniqueSet) addAll(otherSet uniqueSet) {
+func (set UniqueSet) addAll(otherSet UniqueSet) {
 	for key := range otherSet {
 		set[key] = struct{}{}
 	}
 }
 
 //Removes all elements in the intersection of both sets.
-func (set uniqueSet) removeAllIn(sourceSet uniqueSet) {
+func (set UniqueSet) removeAllIn(sourceSet UniqueSet) {
 	for key := range sourceSet {
 		delete(set, key)
 	}
 }
 
 //Same as removeAllIn, but also returns the set of intersected uniques
-func (set uniqueSet) getAndRemoveIntersection(sourceSet uniqueSet) (intersectionSet uniqueSet) {
+func (set UniqueSet) getAndRemoveIntersection(sourceSet UniqueSet) (intersectionSet UniqueSet) {
 	intersectionSet = makeUniqueSet()
 	hasKey := false
 	for key := range sourceSet {
@@ -42,7 +42,7 @@ func (set uniqueSet) getAndRemoveIntersection(sourceSet uniqueSet) (intersection
 	return
 }
 
-func (set uniqueSet) copy() (copySet uniqueSet) {
+func (set UniqueSet) copy() (copySet UniqueSet) {
 	copySet = makeUniqueSet()
 	for unique := range set {
 		copySet[unique] = struct{}{}
