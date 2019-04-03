@@ -15,10 +15,9 @@ import (
 type RemoteConn struct {
 	conn         *amqp.Connection
 	sendCh       *amqp.Channel
-	recQueue     amqp.Queue
 	recCh        <-chan amqp.Delivery
-	listenerChan chan *NewReplicatorRequest
-	replicaID    int64 //TODO: Remove, as this is not necessary. It's just here for debugging purposes
+	listenerChan chan ReplicatorMsg
+	replicaID    int64
 }
 
 const (
@@ -26,12 +25,17 @@ const (
 	ip                  = "guest:guest@localhost:"
 	port                = "5672/"
 	exchangeName        = "objRepl"
-	exchangeType        = "direct"
+	exchangeType        = "topic"
 	defaultListenerSize = 100
+	clockTopic          = "clk"
 )
 
+//Topics (i.e., queue filters): partitionID.bucket
+//There's one queue per replica. Each replica's queue will receive messages from ALL other replicas, as long as the topics match the ones
+//that were binded to the replica's queue.
+
 //TODO: Remove replicaID, it's just here for debugging purposes
-func CreateRemoteConnStruct(replicaID int64) (remote *RemoteConn, err error) {
+func CreateRemoteConnStruct(partitionsToListen []uint64, replicaID int64) (remote *RemoteConn, err error) {
 	conn, err := amqp.Dial(protocol + ip + port)
 	if err != nil {
 		tools.FancyWarnPrint(tools.REMOTE_PRINT, replicaID, "failed to open connection to rabbitMQ:", err)
@@ -55,8 +59,13 @@ func CreateRemoteConnStruct(replicaID int64) (remote *RemoteConn, err error) {
 		tools.FancyWarnPrint(tools.REMOTE_PRINT, replicaID, "failed to declare queue with rabbitMQ:", err)
 		return nil, err
 	}
-	//As soon as we know the other replicas, we need to bind the queue to their IDs, in order to receive their msgs.
-	//Which is done by calling "listenToReplica(id)"
+	//The previously declared queue will receive messages from any replica that publishes for the partitions in partitionsToListen
+	for _, partId := range partitionsToListen {
+		sendCh.QueueBind(queue.Name, strconv.FormatUint(partId, 10)+".*", exchangeName, false, nil)
+	}
+	//We also need to listen to stable clocks.
+	//TODO: Some kind of filtering for this
+	sendCh.QueueBind(queue.Name, clockTopic, exchangeName, false, nil)
 
 	//This channel is used to read from the queue
 	//Note: the true corresponds to auto ack. We should *probably* do manual ack later on
@@ -79,7 +88,6 @@ func CreateRemoteConnStruct(replicaID int64) (remote *RemoteConn, err error) {
 	remote = &RemoteConn{
 		sendCh:       sendCh,
 		conn:         conn,
-		recQueue:     queue,
 		recCh:        recCh,
 		listenerChan: make(chan *NewReplicatorRequest, defaultListenerSize),
 		replicaID:    replicaID,
@@ -88,25 +96,87 @@ func CreateRemoteConnStruct(replicaID int64) (remote *RemoteConn, err error) {
 	return
 }
 
-func (remote *RemoteConn) listenToPartition(partitionID int64) {
-	tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Listening to msgs for partition:", partitionID)
-	remote.sendCh.QueueBind(remote.recQueue.Name, strconv.FormatInt(partitionID, 10), exchangeName, false, nil)
+func (remote *RemoteConn) SendPartTxn(request *NewReplicatorRequest) {
+	tools.FancyDebugPrint(tools.REMOTE_PRINT, remote.replicaID, "Sending remote request:", *request)
+	if len(request.Txns) > 0 {
+		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Actually sending txns to other replicas.")
+	}
+	protobuf := createProtoRemotePartTxn(request)
+	data, err := proto.Marshal(protobuf)
+	if err != nil {
+		tools.FancyErrPrint(tools.REMOTE_PRINT, remote.replicaID, "Failed to generate bytes of partTxn request to send. Error:", err)
+	}
+	//TODO: Actually I need to separate this further into buckets (i.e., a msg per bucket). Sigh.
+	remote.sendCh.Publish(exchangeName, strconv.FormatInt(request.PartitionID, 10)+".*", false, false, amqp.Publishing{Body: data})
 }
 
+func (remote *RemoteConn) SendStableClk(ts int64) {
+	tools.FancyDebugPrint(tools.REMOTE_PRINT, remote.replicaID, "Sending stable clk:", ts)
+	protobuf := createProtoStableClock(remote.replicaID, ts)
+	data, err := proto.Marshal(protobuf)
+	if err != nil {
+		tools.FancyErrPrint(tools.REMOTE_PRINT, remote.replicaID, "Failed to generate bytes of stableClk request to send. Error:", err)
+	}
+	remote.sendCh.Publish(exchangeName, clockTopic, false, false, amqp.Publishing{Body: data})
+}
+
+/*
 func (remote *RemoteConn) SendReplicatorRequest(request *NewReplicatorRequest) {
 	tools.FancyDebugPrint(tools.REMOTE_PRINT, remote.replicaID, "Sending remote request:", *request)
 	if len(request.Txns) > 0 {
 		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Actually sending txns to other replicas.")
 	}
-	protobuf := remote.createProtoReplicatePart(request)
+	protobuf := createProtoReplicatePart(request)
 	data, err := proto.Marshal(protobuf)
 	if err != nil {
 		tools.FancyErrPrint(tools.REMOTE_PRINT, remote.replicaID, "Failed to generate bytes of request to send. Error:", err)
 	}
 	remote.sendCh.Publish(exchangeName, strconv.FormatInt(request.PartitionID, 10), false, false, amqp.Publishing{Body: data})
 }
+*/
 
 //This should not be called externally.
+func (remote *RemoteConn) startReceiver() {
+	for data := range remote.recCh {
+		//This code duplication can be avoided once I remove these messages
+		if data.RoutingKey == clockTopic {
+			protobuf := &ProtoStableClock{}
+			err := proto.Unmarshal(data.Body, protobuf)
+			if err != nil {
+				tools.FancyErrPrint(tools.REMOTE_PRINT, remote.replicaID, "Failed to decode bytes of received stableClock. Error:", err)
+			}
+			request := protoToStableClock(protobuf)
+			//remote.decBuf.Reset()
+			tools.FancyDebugPrint(tools.REMOTE_PRINT, remote.replicaID, "Received remote stableClock:", *request)
+			//TODO: Avoid receiving own messages?
+			if request.SenderID == remote.replicaID {
+				tools.FancyDebugPrint(tools.REMOTE_PRINT, remote.replicaID, "Ignored received stableClock as it was sent by myself.")
+			} else {
+				remote.listenerChan <- request
+			}
+		} else {
+			protobuf := &ProtoReplicatePart{}
+			err := proto.Unmarshal(data.Body, protobuf)
+			if err != nil {
+				tools.FancyErrPrint(tools.REMOTE_PRINT, remote.replicaID, "Failed to decode bytes of received request. Error:", err)
+			}
+			request := protoToReplicatorRequest(protobuf)
+			//remote.decBuf.Reset()
+			tools.FancyDebugPrint(tools.REMOTE_PRINT, remote.replicaID, "Received remote request:", *request)
+			if len(request.Txns) > 0 {
+				tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Actually received txns from other replicas.")
+			}
+			if request.SenderID == remote.replicaID {
+				tools.FancyErrPrint(tools.REMOTE_PRINT, remote.replicaID, "Received remote request from myself!")
+			}
+			//tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "My replicaID:", remote.replicaID, "senderID:", request.SenderID)
+			remote.listenerChan <- request
+		}
+	}
+}
+
+//This should not be called externally.
+/*
 func (remote *RemoteConn) startReceiver() {
 	for data := range remote.recCh {
 		protobuf := &ProtoReplicatePart{}
@@ -114,7 +184,7 @@ func (remote *RemoteConn) startReceiver() {
 		if err != nil {
 			tools.FancyErrPrint(tools.REMOTE_PRINT, remote.replicaID, "Failed to decode bytes of received request. Error:", err)
 		}
-		request := remote.protoToReplicatorRequest(protobuf)
+		request := protoToReplicatorRequest(protobuf)
 		//remote.decBuf.Reset()
 		tools.FancyDebugPrint(tools.REMOTE_PRINT, remote.replicaID, "Received remote request:", *request)
 		if len(request.Txns) > 0 {
@@ -127,150 +197,26 @@ func (remote *RemoteConn) startReceiver() {
 		remote.listenerChan <- request
 	}
 }
+*/
 
-func (remote *RemoteConn) protoToReplicatorRequest(protobuf *ProtoReplicatePart) (request *NewReplicatorRequest) {
-	return &NewReplicatorRequest{
-		PartitionID: protobuf.GetPartitionID(),
-		SenderID:    protobuf.GetSenderID(),
-		StableTs:    protobuf.GetPartStableTs(),
-		Txns:        remote.protoToRemoteTxns(protobuf.Txns),
-	}
-}
-
-func (remote *RemoteConn) protoToRemoteTxns(protobufs []*ProtoRemoteTxns) (remoteTxns []NewRemoteTxns) {
-	remoteTxns = make([]NewRemoteTxns, len(protobufs))
-	for i, proto := range protobufs {
-		remoteTxns[i] = NewRemoteTxns{
-			Timestamp: clocksi.ClockSiTimestamp{}.FromBytes(proto.Timestamp),
-			Upds:      remote.protoToDownstreamUpds(proto.Upds),
-		}
-	}
-	return
-}
-
-func (remote *RemoteConn) protoToDownstreamUpds(protobufs []*ProtoDownstreamUpd) (upds []*UpdateObjectParams) {
-	upds = make([]*UpdateObjectParams, len(protobufs))
-	for i, proto := range protobufs {
-		keyProto := proto.GetKeyParams()
-		upd := &UpdateObjectParams{
-			KeyParams: CreateKeyParams(string(keyProto.GetKey()), keyProto.GetType(), string(keyProto.GetBucket())),
-		}
-		upds[i] = upd
-		var updArgs crdt.UpdateArguments
-		switch upd.CrdtType {
-		case CRDTType_COUNTER:
-			updArgs = remote.protoToCounterDownstream(proto.GetCounterOp())
-		case CRDTType_ORSET:
-			updArgs = remote.protoToSetDownstream(proto.GetSetOp())
-		}
-		upd.UpdateArgs = updArgs
-	}
-	return upds
-}
-
-func (remote *RemoteConn) protoToCounterDownstream(protobuf *ProtoCounterDownstream) (args crdt.UpdateArguments) {
-	if protobuf.GetIsInc() {
-		return crdt.Increment{Change: protobuf.GetChange()}
-	} else {
-		return crdt.Decrement{Change: protobuf.GetChange()}
-	}
-}
-
-func (remote *RemoteConn) protoToSetDownstream(protobuf *ProtoSetDownstream) (args crdt.UpdateArguments) {
-	//TODO: Test if this works, as maybe it is set as an empty slice?
-	if adds := protobuf.GetAdds(); adds != nil {
-		elems := make(map[crdt.Element]crdt.Unique)
-		for _, pairProto := range adds {
-			elems[crdt.Element(pairProto.GetValue())] = crdt.Unique(pairProto.GetUnique())
-		}
-		return crdt.DownstreamAddAll{Elems: elems}
-	} else {
-		elems := make(map[crdt.Element]crdt.UniqueSet)
-		for _, pairProto := range protobuf.GetRems() {
-			elems[crdt.Element(pairProto.GetValue())] = crdt.UInt64ArrayToUniqueSet(pairProto.GetUniques())
-		}
-		return crdt.DownstreamRemoveAll{}
-	}
-}
-
-func (remote *RemoteConn) GetNextRemoteRequest() (request *NewReplicatorRequest) {
+func (remote *RemoteConn) GetNextRemoteRequest() (request ReplicatorMsg) {
 	return <-remote.listenerChan
 }
 
-//TODO: These probably should be moved to protoLib.
-func (remote *RemoteConn) createProtoReplicatePart(request *NewReplicatorRequest) (protobuf *ProtoReplicatePart) {
-	return &ProtoReplicatePart{
-		SenderID:     &request.SenderID,
-		PartitionID:  &request.PartitionID,
-		PartStableTs: &request.StableTs,
-		Txns:         remote.createProtoRemoteTxns(request.Txns),
+/*
+func (remote *RemoteConn) SendReplicatorRequest(request *NewReplicatorRequest) {
+	tools.FancyDebugPrint(tools.REMOTE_PRINT, remote.replicaID, "Sending remote request:", *request)
+	if len(request.Txns) > 0 {
+		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Actually sending txns to other replicas.")
 	}
-}
-
-func (remote *RemoteConn) createProtoRemoteTxns(txnsRequests []NewRemoteTxns) (protobufs []*ProtoRemoteTxns) {
-	protobufs = make([]*ProtoRemoteTxns, len(txnsRequests))
-	for i, req := range txnsRequests {
-		protobufs[i] = &ProtoRemoteTxns{
-			Timestamp: req.Timestamp.ToBytes(),
-			Upds:      remote.createProtoDownstreamUpds(&req),
-		}
+	protobuf := createProtoReplicatePart(request)
+	data, err := proto.Marshal(protobuf)
+	if err != nil {
+		tools.FancyErrPrint(tools.REMOTE_PRINT, remote.replicaID, "Failed to generate bytes of request to send. Error:", err)
 	}
-	return protobufs
+	remote.sendCh.Publish(exchangeName, strconv.FormatInt(request.PartitionID, 10), false, false, amqp.Publishing{Body: data})
 }
-
-func (remote *RemoteConn) createProtoDownstreamUpds(req *NewRemoteTxns) (protobufs []*ProtoDownstreamUpd) {
-	protobufs = make([]*ProtoDownstreamUpd, len(req.Upds))
-	for i, upd := range req.Upds {
-		protobufs[i] = &ProtoDownstreamUpd{KeyParams: createBoundObject(upd.Key, upd.CrdtType, upd.Bucket)}
-		switch upd.CrdtType {
-		case CRDTType_COUNTER:
-			protobufs[i].CounterOp = remote.createProtoCounterDownstream(&upd.UpdateArgs)
-		case CRDTType_ORSET:
-			protobufs[i].SetOp = remote.createProtoSetDownstream(&upd.UpdateArgs)
-		}
-	}
-	return protobufs
-}
-
-func (remote *RemoteConn) createProtoCounterDownstream(upd *crdt.UpdateArguments) (protobuf *ProtoCounterDownstream) {
-	switch convertedUpd := (*upd).(type) {
-	case crdt.Increment:
-		return &ProtoCounterDownstream{IsInc: proto.Bool(true), Change: &convertedUpd.Change}
-	case crdt.Decrement:
-		return &ProtoCounterDownstream{IsInc: proto.Bool(false), Change: &convertedUpd.Change}
-	}
-	return nil
-}
-
-func (remote *RemoteConn) createProtoSetDownstream(upd *crdt.UpdateArguments) (protobuf *ProtoSetDownstream) {
-	switch convertedUpd := (*upd).(type) {
-	case crdt.DownstreamAddAll:
-		addProto := &ProtoSetDownstream{Adds: make([]*ProtoValueUnique, len(convertedUpd.Elems))}
-		i := 0
-		for value, unique := range convertedUpd.Elems {
-			intUnique := uint64(unique)
-			addProto.Adds[i] = &ProtoValueUnique{Value: []byte(value), Unique: &intUnique}
-			i++
-		}
-		protobuf = addProto
-	case crdt.DownstreamRemoveAll:
-		remProto := &ProtoSetDownstream{Rems: make([]*ProtoValueUniques, len(convertedUpd.Elems))}
-		i := 0
-		for value, uniques := range convertedUpd.Elems {
-			//TODO: Probably pass this uniquesInt thing to commonTools
-			uniquesInts := make([]uint64, len(uniques))
-			j := 0
-			for unique := range uniques {
-				uniquesInts[j] = uint64(unique)
-				j++
-			}
-			remProto.Rems[i] = &ProtoValueUniques{Value: []byte(value), Uniques: uniquesInts}
-			i++
-		}
-		protobuf = remProto
-	}
-	return
-}
+*/
 
 /*
 

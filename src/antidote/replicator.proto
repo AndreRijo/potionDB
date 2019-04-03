@@ -1,14 +1,18 @@
 import "antidote.proto";
 option go_package = "antidote";
 
-message ProtoReplicatePart {
+message ProtoStableClock {
     required int64 senderID = 1;
-    repeated ProtoRemoteTxns txns = 2;
-    required int64 partitionID = 3;
-    required int64 partStableTs = 4;
+    required int64 replicaTs = 2;
 }
 
-message ProtoRemoteTxns {
+message ProtoReplicatePart {
+    required int64 senderID = 1;
+    required ProtoRemoteTxn txn = 2;
+    required int64 partitionID = 3;
+}
+
+message ProtoRemoteTxn {
     required bytes timestamp = 1;
     repeated ProtoDownstreamUpd upds = 2;
 }

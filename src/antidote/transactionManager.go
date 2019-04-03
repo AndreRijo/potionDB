@@ -75,7 +75,7 @@ type TMCommitArgs struct {
 type TMAbortArgs struct {
 }
 
-//Used by the Replicatoin Layer. Use a different thread to handle this
+//Used by the Replication Layer. Use a different thread to handle this
 type TMRemoteTxn struct {
 	ReplicaID int64
 	Upds      []NewRemoteTxns
@@ -207,7 +207,7 @@ func (txnPartitions *ongoingTxn) reset() {
 /////*****************TRANSACTION MANAGER CODE***********************/////
 
 func Initialize(replicaID int64) (tm *TransactionManager) {
-	mat, loggers := InitializeMaterializer(replicaID)
+	mat, loggers, partitionsIDs := InitializeMaterializer(replicaID)
 	tm = &TransactionManager{
 		mat:           mat,
 		remoteTxnChan: make(chan TMRemoteTxn),
@@ -220,7 +220,7 @@ func Initialize(replicaID int64) (tm *TransactionManager) {
 		replicator:         &Replicator{},
 		replicaID:          replicaID,
 	}
-	tm.replicator.Initialize(tm, loggers, replicaID)
+	tm.replicator.Initialize(tm, loggers, partitionsIDs, replicaID)
 	go tm.handleRemoteTxnRequest()
 	return tm
 }
@@ -239,16 +239,6 @@ func (tm *TransactionManager) CreateClientHandler() (channel chan TransactionMan
 	channel = make(chan TransactionManagerRequest)
 	go tm.listenForProtobufRequests(channel)
 	return
-}
-
-/*
-func (tm *TransactionManager) AddRemoteID(remoteID int64) {
-	tm.replicator.AddRemoteReplicator(remoteID)
-}
-*/
-func (tm *TransactionManager) AddPartitionID() {
-	//TODO
-	return derp
 }
 
 /*

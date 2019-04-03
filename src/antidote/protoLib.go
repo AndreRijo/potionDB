@@ -429,3 +429,180 @@ func convertAntidoteStatesToProto(objectStates []crdt.State) (protobufs []*ApbRe
 	}
 	return
 }
+
+/***** REPLICATOR PROTOS ******/
+
+/*
+func createProtoReplicatePart(request *NewReplicatorRequest) (protobuf *ProtoReplicatePart) {
+	return &ProtoReplicatePart{
+		SenderID:     &request.SenderID,
+		PartitionID:  &request.PartitionID,
+		PartStableTs: &request.StableTs,
+		Txns:         createProtoRemoteTxns(request.Txns),
+	}
+}
+*/
+
+/*
+func createProtoRemoteTxns(txnsRequests []NewRemoteTxns) (protobufs []*ProtoRemoteTxns) {
+	protobufs = make([]*ProtoRemoteTxns, len(txnsRequests))
+	for i, req := range txnsRequests {
+		protobufs[i] = &ProtoRemoteTxns{
+			Timestamp: req.Timestamp.ToBytes(),
+			Upds:      createProtoDownstreamUpds(&req),
+		}
+	}
+	return protobufs
+}
+*/
+
+func createProtoStableClock(replicaID int64, ts int64) (protobuf *ProtoStableClock) {
+	return &ProtoStableClock{SenderID: &replicaID, ReplicaTs: &ts}
+}
+
+func createProtoReplicatePart(request *NewReplicatorRequest) (protobuf *ProtoReplicatePart) {
+	return &ProtoReplicatePart{
+		SenderID:    &request.SenderID,
+		PartitionID: &request.PartitionID,
+		Txns: &ProtoRemoteTxns{
+			Timestamp: request.Timestamp.ToBytes(),
+			Upds:      createProtoDownstreamUpds(request),
+		},
+	}
+}
+
+//func createProtoDownstreamUpds(req *NewRemoteTxns) (protobufs []*ProtoDownstreamUpd) {
+func createProtoDownstreamUpds(req *NewReplicatorRequest) (protobufs []*ProtoDownstreamUpd) {
+	protobufs = make([]*ProtoDownstreamUpd, len(req.Upds))
+	for i, upd := range req.Upds {
+		protobufs[i] = &ProtoDownstreamUpd{KeyParams: createBoundObject(upd.Key, upd.CrdtType, upd.Bucket)}
+		switch upd.CrdtType {
+		case CRDTType_COUNTER:
+			protobufs[i].CounterOp = createProtoCounterDownstream(&upd.UpdateArgs)
+		case CRDTType_ORSET:
+			protobufs[i].SetOp = createProtoSetDownstream(&upd.UpdateArgs)
+		}
+	}
+	return protobufs
+}
+
+func createProtoCounterDownstream(upd *crdt.UpdateArguments) (protobuf *ProtoCounterDownstream) {
+	switch convertedUpd := (*upd).(type) {
+	case crdt.Increment:
+		return &ProtoCounterDownstream{IsInc: proto.Bool(true), Change: &convertedUpd.Change}
+	case crdt.Decrement:
+		return &ProtoCounterDownstream{IsInc: proto.Bool(false), Change: &convertedUpd.Change}
+	}
+	return nil
+}
+
+func createProtoSetDownstream(upd *crdt.UpdateArguments) (protobuf *ProtoSetDownstream) {
+	switch convertedUpd := (*upd).(type) {
+	case crdt.DownstreamAddAll:
+		addProto := &ProtoSetDownstream{Adds: make([]*ProtoValueUnique, len(convertedUpd.Elems))}
+		i := 0
+		for value, unique := range convertedUpd.Elems {
+			intUnique := uint64(unique)
+			addProto.Adds[i] = &ProtoValueUnique{Value: []byte(value), Unique: &intUnique}
+			i++
+		}
+		protobuf = addProto
+	case crdt.DownstreamRemoveAll:
+		remProto := &ProtoSetDownstream{Rems: make([]*ProtoValueUniques, len(convertedUpd.Elems))}
+		i := 0
+		for value, uniques := range convertedUpd.Elems {
+			//TODO: Probably pass this uniquesInt thing to commonTools
+			uniquesInts := make([]uint64, len(uniques))
+			j := 0
+			for unique := range uniques {
+				uniquesInts[j] = uint64(unique)
+				j++
+			}
+			remProto.Rems[i] = &ProtoValueUniques{Value: []byte(value), Uniques: uniquesInts}
+			i++
+		}
+		protobuf = remProto
+	}
+	return
+}
+
+func protoToStableClock(protobuf *ProtoStableClock) (stableClk *StableClock) {
+	return &StableClock{SenderID: protobuf.GetSenderID(), Ts: protobuf.GetReplicaTs()}
+}
+
+func protoToReplicatorRequest(protobuf *ProtoReplicatePart) (request *NewReplicatorRequest) {
+	partBuf := protobuf.Txn
+	return &NewReplicatorRequest{
+		PartitionID: protobuf.GetPartitionID(),
+		SenderID:    protobuf.GetSenderID(),
+		Timestamp:   clocksi.ClockSiTimestamp{}.FromBytes(protobuf.Txn.Timestamp),
+		Upds:        protoToDownstreamUpds(protobuf.Txn.Upds),
+	}
+}
+
+/*
+func protoToReplicatorRequest(protobuf *ProtoReplicatePart) (request *NewReplicatorRequest) {
+	return &NewReplicatorRequest{
+		PartitionID: protobuf.GetPartitionID(),
+		SenderID:    protobuf.GetSenderID(),
+		StableTs:    protobuf.GetPartStableTs(),
+		Txns:        protoToRemoteTxns(protobuf.Txns),
+	}
+}
+
+func protoToRemoteTxns(protobufs []*ProtoRemoteTxns) (remoteTxns []NewRemoteTxns) {
+	remoteTxns = make([]NewRemoteTxns, len(protobufs))
+	for i, proto := range protobufs {
+		remoteTxns[i] = NewRemoteTxns{
+			Timestamp: clocksi.ClockSiTimestamp{}.FromBytes(proto.Timestamp),
+			Upds:      protoToDownstreamUpds(proto.Upds),
+		}
+	}
+	return
+}
+*/
+
+func protoToDownstreamUpds(protobufs []*ProtoDownstreamUpd) (upds []*UpdateObjectParams) {
+	upds = make([]*UpdateObjectParams, len(protobufs))
+	for i, proto := range protobufs {
+		keyProto := proto.GetKeyParams()
+		upd := &UpdateObjectParams{
+			KeyParams: CreateKeyParams(string(keyProto.GetKey()), keyProto.GetType(), string(keyProto.GetBucket())),
+		}
+		upds[i] = upd
+		var updArgs crdt.UpdateArguments
+		switch upd.CrdtType {
+		case CRDTType_COUNTER:
+			updArgs = protoToCounterDownstream(proto.GetCounterOp())
+		case CRDTType_ORSET:
+			updArgs = protoToSetDownstream(proto.GetSetOp())
+		}
+		upd.UpdateArgs = updArgs
+	}
+	return upds
+}
+
+func protoToCounterDownstream(protobuf *ProtoCounterDownstream) (args crdt.UpdateArguments) {
+	if protobuf.GetIsInc() {
+		return crdt.Increment{Change: protobuf.GetChange()}
+	} else {
+		return crdt.Decrement{Change: protobuf.GetChange()}
+	}
+}
+
+func protoToSetDownstream(protobuf *ProtoSetDownstream) (args crdt.UpdateArguments) {
+	//TODO: Test if this works, as maybe it is set as an empty slice?
+	if adds := protobuf.GetAdds(); adds != nil {
+		elems := make(map[crdt.Element]crdt.Unique)
+		for _, pairProto := range adds {
+			elems[crdt.Element(pairProto.GetValue())] = crdt.Unique(pairProto.GetUnique())
+		}
+		return crdt.DownstreamAddAll{Elems: elems}
+	} else {
+		elems := make(map[crdt.Element]crdt.UniqueSet)
+		for _, pairProto := range protobuf.GetRems() {
+			elems[crdt.Element(pairProto.GetValue())] = crdt.UInt64ArrayToUniqueSet(pairProto.GetUniques())
+		}
+		return crdt.DownstreamRemoveAll{Elems: elems}
+	}
+}

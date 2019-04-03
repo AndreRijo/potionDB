@@ -257,15 +257,17 @@ func (err UnknownCrdtTypeError) Error() (errString string) {
 /////*****************MATERIALIZER CODE***********************/////
 
 //Starts listening goroutines and channels. Also starts each partition's logger and returns it
-func InitializeMaterializer(replicaID int64) (mat *Materializer, loggers []Logger) {
+func InitializeMaterializer(replicaID int64) (mat *Materializer, loggers []Logger, partitionsIDs []uint64) {
 	mat = &Materializer{
 		channels: make([]chan MaterializerRequest, nGoRoutines),
 	}
 	loggers = make([]Logger, nGoRoutines)
+	partitionsIDs = make([]uint64, nGoRoutines)
 	var i uint64
 	for i = 0; i < nGoRoutines; i++ {
 		loggers[i] = &MemLogger{}
 		loggers[i].Initialize(mat, i)
+		partitionsIDs[i] = i //Yes this is silly for now, but we'll need this later when partition IDs stop being from 0 to nGoRoutines - 1
 		go listenForTransactionManagerRequests(i, loggers[i], replicaID, mat)
 	}
 	return

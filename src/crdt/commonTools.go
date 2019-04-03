@@ -69,5 +69,9 @@ func ByteMatrixToElementArray(bytes [][]byte) (elements []Element) {
 }
 
 func UInt64ArrayToUniqueSet(uniques []uint64) (uniqueSet UniqueSet) {
-	//TODO
+	uniqueSet = makeUniqueSet()
+	for _, unique := range uniques {
+		uniqueSet.add(Unique(unique))
+	}
+	return
 }

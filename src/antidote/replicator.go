@@ -18,25 +18,40 @@ type Replicator struct {
 	replicaID  int64
 }
 
+type ReplicatorMsg interface {
+	getSenderID() int64
+}
+
+/*
 type NewReplicatorRequest struct {
 	SenderID    int64
-	Txns        []NewRemoteTxns
+	Txns        []NewRemotePartTxn
 	PartitionID int64
 	StableTs    int64
 }
+*/
 
-type NewRemoteTxns struct {
+type NewReplicatorRequest struct {
 	clocksi.Timestamp
-	Upds []*UpdateObjectParams
+	Upds        []*UpdateObjectParams
+	SenderID    int64
+	PartitionID int64
 }
 
+type StableClock struct {
+	SenderID int64
+	Ts       int64
+}
+
+/*
 type ReplicatorRequest struct {
 	SenderID int64
 	Txns     []RemoteTxns
 	StableTs int64
 }
+*/
 
-type RemoteTxns struct {
+type RemoteTxn struct {
 	clocksi.Timestamp
 	Upds *map[int][]UpdateObjectParams
 }
@@ -47,15 +62,21 @@ const (
 	toSendInitialSize               = 10
 )
 
-func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, replicaID int64) {
+func (req NewReplicatorRequest) getSenderID() int64 {
+	return req.SenderID
+}
+
+func (req StableClock) getSenderID() int64 {
+	return req.SenderID
+}
+
+func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, partitionIDs []uint64, replicaID int64) {
 	if !repl.started {
 		repl.tm = tm
 		repl.started = true
 		//nGoRoutines: number of partitions (defined in Materializer)
 		repl.localPartitions = loggers
-		//TODO: Some way to know how many and which remoteReps there is
-		//repl.remoteReps = make([]chan ReplicatorRequest, 0)
-		remoteConn, err := CreateRemoteConnStruct(replicaID)
+		remoteConn, err := CreateRemoteConnStruct(partitionIDs, replicaID)
 		//TODO: Not ignore err
 		ignore(err)
 		repl.remoteConn = remoteConn
@@ -66,31 +87,17 @@ func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, rep
 		repl.lastSentClk = clocksi.NewClockSiTimestamp(replicaID)
 		//repl.receiveReplChan = make(chan ReplicatorRequest)
 		repl.replicaID = replicaID
-		go repl.receiveRemoteTxns()
+		go repl.receiveRemoteTxn()
 		go repl.replicateCycle()
 	}
-}
-
-/*
-//All replicators must be added before any transaction is executed, otherwise new replicators may not receive old transactions
-//I need to test this and/or read rabbitmq docs to be sure of this
-func (repl *Replicator) AddRemoteReplicator(remoteID int64) {
-	//repl.remoteReps = append(repl.remoteReps, remoteRepl)
-	repl.remoteConn.listenToReplica(remoteID)
-}
-*/
-
-//Should be called for every partition we want to replicate *before* transactions start happening
-func (repl *Replicator) AddInterestInPartition(partitionID int64) {
-	repl.remoteConn.listenToPartition(partitionID)
 }
 
 func (repl *Replicator) replicateCycle() {
 	for {
 		tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "starting replicateCycle")
 		repl.getNewTxns()
-		toSend, stableTs := repl.preparateDataToSend()
-		repl.sendTxns(toSend, stableTs)
+		toSend := repl.preparateDataToSend()
+		repl.sendTxns(toSend)
 		tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "finishing replicateCycle")
 		time.Sleep(tsSendDelay * time.Millisecond)
 	}
@@ -133,9 +140,9 @@ func (repl *Replicator) getNewTxns() {
 	tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "getNewTxns() finish")
 }
 
-func (repl *Replicator) preparateDataToSend() (toSend []RemoteTxns, stableTs int64) {
+func (repl *Replicator) preparateDataToSend() (toSend []RemoteTxn) {
 	tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "starting prepareDataToSend")
-	toSend = make([]RemoteTxns, 0, toSendInitialSize)
+	toSend = make([]RemoteTxn, 0, toSendInitialSize)
 	foundStableClk := false
 	for !foundStableClk {
 		minClk := *repl.txnCache[0][0].clk //Using first entry of first partition as initial value
@@ -168,10 +175,7 @@ func (repl *Replicator) preparateDataToSend() (toSend []RemoteTxns, stableTs int
 		if !foundStableClk {
 			//Safe to include the actual txn's clock in the list to send. We can remove entry from cache
 			tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "appending upds. Upds:", txnUpdates)
-			toSend = append(toSend, RemoteTxns{Timestamp: minClk, Upds: &txnUpdates})
-		} else {
-			tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "storing stableClk as at least one entry was empty. Clk:", minClk.GetPos(repl.replicaID))
-			stableTs = minClk.GetPos(repl.replicaID)
+			toSend = append(toSend, RemoteTxn{Timestamp: minClk, Upds: &txnUpdates})
 		}
 		for id := range txnUpdates {
 			repl.txnCache[id] = repl.txnCache[id][1:]
@@ -181,7 +185,7 @@ func (repl *Replicator) preparateDataToSend() (toSend []RemoteTxns, stableTs int
 	return
 }
 
-func (repl *Replicator) sendTxns(toSend []RemoteTxns, stableTs int64) {
+func (repl *Replicator) sendTxns(toSend []RemoteTxn) {
 	/*
 		fmt.Print(tools.REPL_PRINT+string(repl.replicaID)+"]"+tools.DEBUG, "starting sendTxns:[")
 		for _, txn := range toSend {
@@ -194,7 +198,14 @@ func (repl *Replicator) sendTxns(toSend []RemoteTxns, stableTs int64) {
 			remoteChan <- ReplicatorRequest{SenderID: repl.replicaID, Txns: toSend, StableTs: stableTs}
 		}
 	*/
-	repl.remoteConn.SendReplicatorRequest(&ReplicatorRequest{SenderID: repl.replicaID, Txns: toSend, StableTs: stableTs})
+	//Separate each txn into partitions
+	//TODO: Batch of transactions for the same partition? Not simple due to clock updates.
+	for _, txn := range toSend {
+		for partId, upds := range txn.Upds {
+			repl.remoteConn.SendPartTxn(&NewReplicatorRequest{PartitionID: partId, SenderID: repl.replicaID, Timestamp: txn.Timestamp, Upds: upds})
+		}
+		repl.remoteConn.SendStableClk(txn.Timestamp.GetPos(repl.replicaID))
+	}
 	tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "finished sendTxns")
 }
 
@@ -203,11 +214,18 @@ func (repl *Replicator) receiveRemoteTxns() {
 		tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "iterating receiveRemoteTxns")
 		//remoteReq := <-repl.receiveReplChan
 		remoteReq := repl.remoteConn.GetNextRemoteRequest()
-		repl.tm.SendRemoteTxnRequest(TMRemoteTxn{
-			ReplicaID: remoteReq.SenderID,
-			Upds:      remoteReq.Txns,
-			StableTs:  remoteReq.StableTs,
-		})
+		switch typedReq := remoteReq.(type) {
+		case *StableClock:
+
+		case *NewReplicatorRequest:
+			//TODO
+			repl.tm.SendRemoteTxnRequest(TMRemoteTxn{
+				ReplicaID: remoteReq.SenderID,
+				Upds:      remoteReq.Txns,
+				StableTs:  remoteReq.StableTs,
+			})
+		}
+
 		tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "receiveRemoteTxns finished processing request")
 	}
 }
