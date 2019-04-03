@@ -301,3 +301,14 @@ message ApbStaticReadObjectsResp {
     required ApbReadObjectsResp objects = 1;
     required ApbCommitResp committime = 2;
 }
+
+
+
+//Replica connection
+message ApbConnectReplica {
+    required int64 id = 1;
+}
+
+message ApbConnectReplicaResp {
+    repeated int64 knownIDs = 1;
+}

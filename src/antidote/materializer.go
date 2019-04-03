@@ -277,7 +277,7 @@ func listenForTransactionManagerRequests(id uint64, logger Logger, replicaID int
 
 	partitionData := partitionData{
 		db:                  make(map[uint64]VersionManager),
-		stableVersion:       clocksi.ClockSiTimestamp{}.NewTimestamp(),
+		stableVersion:       clocksi.ClockSiTimestamp{}.NewTimestamp(replicaID),
 		highestPendingTs:    nil,
 		pendingOps:          make(map[TransactionId][]UpdateObjectParams),
 		suggestedTimestamps: make(map[TransactionId]clocksi.Timestamp),
@@ -652,9 +652,9 @@ func handleMatClkPosUpd(request MaterializerRequest, partitionData *partitionDat
 func initializeCrdt(crdtType CRDTType) (newCrdt crdt.CRDT) {
 	switch crdtType {
 	case CRDTType_COUNTER:
-		newCrdt = (&crdt.CounterCrdt{}).Initialize()
+		newCrdt = (&crdt.CounterCrdt{}).Initialize(nil)
 	case CRDTType_ORSET:
-		newCrdt = (&crdt.SetAWCrdt{}).Initialize()
+		newCrdt = (&crdt.SetAWCrdt{}).Initialize(nil)
 	default:
 		newCrdt = nil
 	}

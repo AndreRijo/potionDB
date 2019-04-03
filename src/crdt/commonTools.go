@@ -67,3 +67,7 @@ func ByteMatrixToElementArray(bytes [][]byte) (elements []Element) {
 	}
 	return
 }
+
+func UInt64ArrayToUniqueSet(uniques []uint64) (uniqueSet UniqueSet) {
+	//TODO
+}

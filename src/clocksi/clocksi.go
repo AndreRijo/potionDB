@@ -10,7 +10,7 @@ import (
 
 type Timestamp interface {
 	//Creates a new timestamp representing the initial value.
-	NewTimestamp() (newTs Timestamp)
+	NewTimestamp(id int64) (newTs Timestamp)
 	//Gets a timestamp that is more recent than the actual one
 	NextTimestamp(id int64) (newTs Timestamp)
 	//Compares two timestamps. Returns HigherTs if the current timestamp is higher than otherTs. Others should be self explanatory.
@@ -78,9 +78,7 @@ const (
 
 var (
 	//Useful for comparations or other situations in which we need a temporary, non-significant, timestamp
-	DummyTs = NewClockSiTimestamp()
-	//Useful for situations in which we need a timestamp bigger than all others
-	DummyHighTs = prepareDummyHighTs()
+	DummyTs = NewClockSiTimestamp(0)
 )
 
 func prepareDummyHighTs() (ts Timestamp) {
@@ -92,13 +90,13 @@ func prepareDummyHighTs() (ts Timestamp) {
 
 //Creates a new timestamp. This gives the same result as doing: newTs = ClockSiTimestamp{}.NewTimestamp().
 //Use whichever option feels more natural.
-func NewClockSiTimestamp() (ts Timestamp) {
-	return ClockSiTimestamp{}.NewTimestamp()
+func NewClockSiTimestamp(id int64) (ts Timestamp) {
+	return ClockSiTimestamp{}.NewTimestamp(id)
 }
 
-func (ts ClockSiTimestamp) NewTimestamp() (newTs Timestamp) {
+func (ts ClockSiTimestamp) NewTimestamp(id int64) (newTs Timestamp) {
 	vc := make(map[int64]int64)
-	vc[0] = 0
+	vc[id] = 0
 	ts = ClockSiTimestamp{VectorClock: vc}
 	return ts
 }
@@ -318,9 +316,11 @@ func (ts ClockSiTimestamp) ToBytes() (bytes []byte) {
 		return
 	*/
 	bytes = make([]byte, len(ts.VectorClock)*2*entrySize)
+	nAdded := 0
 	for i, vcEntry := range ts.VectorClock {
-		binary.LittleEndian.PutUint64(bytes[i*2*entrySize:i*2*entrySize+entrySize], uint64(i))
-		binary.LittleEndian.PutUint64(bytes[i*2*entrySize+entrySize:(i+1)*2*entrySize], uint64(vcEntry))
+		binary.LittleEndian.PutUint64(bytes[nAdded*2*entrySize:nAdded*2*entrySize+entrySize], uint64(i))
+		binary.LittleEndian.PutUint64(bytes[nAdded*2*entrySize+entrySize:(nAdded+1)*2*entrySize], uint64(vcEntry))
+		nAdded++
 	}
 	return
 }
@@ -355,6 +355,7 @@ func (ts ClockSiTimestamp) FromBytes(bytes []byte) (newTs Timestamp) {
 			newVC[replicaID] = value
 		}
 	}
+	fmt.Println("Decoded clock:", newVC)
 	return ClockSiTimestamp{VectorClock: newVC}
 }
 

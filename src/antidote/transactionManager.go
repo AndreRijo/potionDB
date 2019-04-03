@@ -78,7 +78,7 @@ type TMAbortArgs struct {
 //Used by the Replicatoin Layer. Use a different thread to handle this
 type TMRemoteTxn struct {
 	ReplicaID int64
-	Upds      []RemoteTxns
+	Upds      []NewRemoteTxns
 	StableTs  int64
 }
 
@@ -213,7 +213,7 @@ func Initialize(replicaID int64) (tm *TransactionManager) {
 		remoteTxnChan: make(chan TMRemoteTxn),
 		localClock: ProtectedClock{
 			Mutex:     sync.Mutex{},
-			Timestamp: clocksi.NewClockSiTimestamp(),
+			Timestamp: clocksi.NewClockSiTimestamp(replicaID),
 		},
 		downstreamQueue:    make(map[int64][]RemoteTxns),
 		downstreamClkQueue: make(map[int64]int64),
@@ -239,6 +239,42 @@ func (tm *TransactionManager) CreateClientHandler() (channel chan TransactionMan
 	channel = make(chan TransactionManagerRequest)
 	go tm.listenForProtobufRequests(channel)
 	return
+}
+
+/*
+func (tm *TransactionManager) AddRemoteID(remoteID int64) {
+	tm.replicator.AddRemoteReplicator(remoteID)
+}
+*/
+func (tm *TransactionManager) AddPartitionID() {
+	//TODO
+	return derp
+}
+
+/*
+	Two steps:
+		- Starts a goroutine that will listen to incoming connections.
+		- Attempts to connect to each replica in addresses, and upon connect adds it to the replicator.
+*/
+func (tm *TransactionManager) ConnectToReplicas(addresses []string) {
+	go tm.listenToRemoteConn()
+	go func() {
+		replyChan := make(chan int64)
+		for _, add := range addresses {
+			go tm.tryConn(&add, replyChan)
+		}
+		for _ = range addresses {
+			tm.replicator.AddRemoteReplicator(<-replyChan)
+		}
+	}()
+}
+
+func (tm *TransactionManager) tryConn(address *string, replyChan chan int64) {
+
+}
+
+func (tm *TransactionManager) listenToRemoteConn() {
+
 }
 
 func (tm *TransactionManager) SendRemoteTxnRequest(request TMRemoteTxn) {

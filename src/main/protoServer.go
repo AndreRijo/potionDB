@@ -16,6 +16,8 @@ import (
 	rand "math/rand"
 	"net"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 	"tools"
 
@@ -28,14 +30,27 @@ var (
 
 func main() {
 
-	//fmt.Println("Port?")
-	//portString, _ := in.ReadString('\n')
+	fmt.Println("Port?")
+	portString, _ := in.ReadString('\n')
+	portString = strings.Trim(portString, "\n")
 	rand.Seed(time.Now().UTC().UnixNano())
-	//id, _ := strconv.ParseInt(portString, 0, 64)
-	//tm := antidote.Initialize(id)
-	tm := antidote.Initialize(0)
-	//server, err := net.Listen("tcp", "127.0.0.1:"+strings.TrimSpace(portString))
-	server, err := net.Listen("tcp", "127.0.0.1:8087")
+	id, _ := strconv.ParseInt(portString, 0, 64)
+
+	fmt.Println("Other servers? Type their IDs, all in the same line separated by a space.")
+	otherIDsString, _ := in.ReadString('\n')
+	otherIDsString = strings.Trim(otherIDsString, "\n")
+	otherReplicasIDs := strings.Split(otherIDsString, " ")
+
+	tm := antidote.Initialize(id)
+	//tm := antidote.Initialize(0)
+	for _, idStr := range otherReplicasIDs {
+		remoteID, _ := strconv.ParseInt(idStr, 0, 64)
+		tm.AddRemoteID(remoteID)
+	}
+
+	server, err := net.Listen("tcp", "127.0.0.1:"+strings.TrimSpace(portString))
+
+	//server, err := net.Listen("tcp", "127.0.0.1:8087")
 	tools.CheckErr(tools.PORT_ERROR, err)
 	fmt.Println("PotionDB started.")
 
@@ -45,7 +60,7 @@ func main() {
 	for {
 		conn, err := server.Accept()
 		tools.CheckErr(tools.NEW_CONN_ERROR, err)
-		go processConnection(conn, tm)
+		go processConnection(conn, tm, id)
 	}
 }
 
@@ -57,7 +72,7 @@ Note that this is the same interaction type as in antidote.
 
 conn - the TCP connection between the client and this server.
 */
-func processConnection(conn net.Conn, tm *antidote.TransactionManager) {
+func processConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID int64) {
 	tmChan := tm.CreateClientHandler()
 	//TODO: Change this to a random ID generated inside the transaction. This ID should be different from transaction to transaction
 	//The current solution can give problems in the Materializer when a commited transaction is put on hold and another transaction from the same client arrives
@@ -80,6 +95,15 @@ func processConnection(conn net.Conn, tm *antidote.TransactionManager) {
 		}
 		tools.CheckErr(tools.NETWORK_READ_ERROR, err)
 		switch protoType {
+		case antidote.ConnectReplica:
+			tools.FancyInfoPrint(tools.INFO, replicaID, "Received proto of type ApbConnectReplica")
+			replyType = antidote.ConnectReplicaReply
+			reply = handleReplicaConn(protobuf.(*antidote.ApbConnectReplica), tmChan)
+		case antidote.ConnectReplicaReply:
+			tools.FancyInfoPrint(tools.INFO, replicaID, "Received proto of type ApbConnectReplicaReply")
+			handleReplicaConnReply(protobuf.(*antidote.ApbConnectReplicaResp), tmChan)
+			//Don't need to send any reply
+			continue
 		case antidote.ReadObjs:
 			fmt.Println("Received proto of type ApbReadObjects")
 			replyType = antidote.ReadObjsReply
@@ -117,6 +141,19 @@ func processConnection(conn net.Conn, tm *antidote.TransactionManager) {
 		fmt.Println("Sending reply proto")
 		antidote.SendProto(replyType, reply, conn)
 	}
+}
+
+func handleReplicaConn(proto *antidote.ApbConnectReplica, tmChan chan antidote.TransactionManagerRequest) (respProto *antidote.ApbConnectReplicaResp) {
+	/*
+		tmChan <- antidote.TransactionManagerRequest{
+			Args:
+		}
+	*/
+	return nil
+}
+
+func handleReplicaConnReply(proto *antidote.ApbConnectReplicaResp, tmChan chan antidote.TransactionManagerRequest) {
+
 }
 
 //TODO: Error cases in which it should return ApbErrorResp

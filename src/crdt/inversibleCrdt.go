@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"clocksi"
+	"fmt"
 )
 
 type InversibleCRDT interface {
@@ -39,13 +40,14 @@ const (
 	initialEffectsSize = 5
 )
 
-func (crdt *genericInversibleCRDT) initialize() (newCrdt *genericInversibleCRDT) {
+func (crdt *genericInversibleCRDT) initialize(startTs *clocksi.Timestamp) (newCrdt *genericInversibleCRDT) {
 	newCrdt = &genericInversibleCRDT{
 		genericCRDT: genericCRDT{}.initialize(),
-		history:     make([]*History, 1, initialHistSize),
+		//history:     make([]*History, 1, initialHistSize),
+		history: make([]*History, 0, initialHistSize),
 	}
 	//Add a "initial state" entry to history
-	newCrdt.history[0] = &History{ts: &clocksi.DummyTs, updsArgs: []*UpdateArguments{}, effects: []*Effect{}}
+	//newCrdt.history[0] = &History{ts: startTs, updsArgs: []*UpdateArguments{}, effects: []*Effect{}}
 	return
 }
 
@@ -93,14 +95,21 @@ func (crdt *genericInversibleCRDT) addToHistory(ts *clocksi.Timestamp, updArgs *
 //Note that both undoEffectFunc and downstreamFunc should be provided by each wrapping CRDT.
 func (crdt *genericInversibleCRDT) rebuildCRDTToVersion(targetTs clocksi.Timestamp,
 	undoEffectFunc func(*Effect), reapplyOpFunc func(UpdateArguments) *Effect) {
+	//No history, the CRDT is already in the empty/initial state
+	if len(crdt.history) == 0 {
+		return
+	}
 	currTs := *crdt.history[len(crdt.history)-1].ts
 	var i int
 	//Go back in history until we find a version in which every entry is <= than targetTs.
-	for i = len(crdt.history) - 1; !currTs.IsLowerOrEqual(targetTs); i-- {
+	for i = len(crdt.history) - 1; i >= 0 && !currTs.IsLowerOrEqual(targetTs); i-- {
+		fmt.Println((*crdt.history[i].ts).ToString())
 		for _, effect := range crdt.history[i].effects {
 			undoEffectFunc(effect)
 		}
-		currTs = *crdt.history[i-1].ts
+		if i > 0 {
+			currTs = *crdt.history[i-1].ts
+		}
 	}
 	//We didn't undo the history to which i points atm
 	i++

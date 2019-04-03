@@ -44,10 +44,10 @@ func (vm *InverseOpVM) ReadOld(readArgs crdt.ReadArguments, readTs clocksi.Times
 //PRIVATE METHODS
 
 func (vm *InverseOpVM) getClosestMatch(readTs clocksi.Timestamp) (crdt crdt.CRDT) {
-	var smallestClk clocksi.Timestamp = clocksi.DummyHighTs
+	var smallestClk clocksi.Timestamp = nil
 
 	for cacheClkKey, cacheClk := range vm.KeysToTimestamp {
-		if cacheClk.IsHigher(readTs) && cacheClk.IsLower(smallestClk) {
+		if cacheClk.IsHigher(readTs) && (smallestClk == nil || cacheClk.IsLower(smallestClk)) {
 			smallestClk, crdt = cacheClk, vm.OldVersions[cacheClkKey]
 		}
 	}

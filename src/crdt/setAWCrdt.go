@@ -79,9 +79,9 @@ type RemoveAllEffect struct {
 }
 
 //Note: crdt can (and most often will be) nil
-func (crdt *SetAWCrdt) Initialize() (newCrdt CRDT) {
+func (crdt *SetAWCrdt) Initialize(startTs *clocksi.Timestamp) (newCrdt CRDT) {
 	crdt = &SetAWCrdt{
-		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(),
+		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
 		elems:                 make(map[Element]UniqueSet),
 		random:                rand.NewSource(time.Now().Unix())} //TODO: Assign to crdt is potencially unecessary (idea: Updates self in the map (reset operation?))
 	newCrdt = crdt

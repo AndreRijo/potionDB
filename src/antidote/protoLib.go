@@ -13,6 +13,7 @@ import (
 
 const (
 	//Requests
+	ConnectReplica   = 10
 	ReadObjs         = 116
 	UpdateObjs       = 118
 	StartTrans       = 119
@@ -21,6 +22,7 @@ const (
 	StaticUpdateObjs = 122
 	StaticReadObjs   = 123
 	//Replies
+	ConnectReplicaReply = 11
 	OpReply             = 111
 	StartTransReply     = 124
 	ReadObjsReply       = 126
@@ -357,33 +359,21 @@ func CreateUpdateObjs(transId []byte, key string, crdtType CRDTType,
 	switch crdtType {
 	case CRDTType_TOPK:
 		//fmt.Println("Creating update topk")
-		converted := updObj.(*ApbTopkUpdate)
-		updateOperation.Topkop = converted
-		protoBuf = &ApbUpdateObjects{
-			Updates:               updateOpArray,
-			TransactionDescriptor: transId,
-		}
+		updateOperation.Topkop = updObj.(*ApbTopkUpdate)
 
 	case CRDTType_COUNTER:
 		//fmt.Println("Creating update counter")
-		converted := updObj.(*ApbCounterUpdate)
-		updateOperation.Counterop = converted
-		protoBuf = &ApbUpdateObjects{
-			Updates:               updateOpArray,
-			TransactionDescriptor: transId,
-		}
+		updateOperation.Counterop = updObj.(*ApbCounterUpdate)
 	case CRDTType_ORSET:
-		converted := updObj.(*ApbSetUpdate)
-		updateOperation.Setop = converted
-		protoBuf = &ApbUpdateObjects{
-			Updates:               updateOpArray,
-			TransactionDescriptor: transId,
-		}
+		updateOperation.Setop = updObj.(*ApbSetUpdate)
 	default:
 		//fmt.Println("Didn't recognize CRDTType:", crdtType)
-		protoBuf = nil
+		return nil
 	}
-	return
+	return &ApbUpdateObjects{
+		Updates:               updateOpArray,
+		TransactionDescriptor: transId,
+	}
 }
 
 //TODO: Support the remaining CRDT types

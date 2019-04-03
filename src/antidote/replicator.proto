@@ -1,0 +1,64 @@
+import "antidote.proto";
+option go_package = "antidote";
+
+message ProtoReplicatePart {
+    required int64 senderID = 1;
+    repeated ProtoRemoteTxns txns = 2;
+    required int64 partitionID = 3;
+    required int64 partStableTs = 4;
+}
+
+message ProtoRemoteTxns {
+    required bytes timestamp = 1;
+    repeated ProtoDownstreamUpd upds = 2;
+}
+
+message ProtoDownstreamUpd {
+    required ApbBoundObject keyParams = 1;
+    optional ProtoCounterDownstream counterOp = 2;
+    optional ProtoSetDownstream setOp = 3;
+}
+
+message ProtoCounterDownstream {
+    required bool isInc = 1;
+    required int32 change = 2;
+}
+
+message ProtoSetDownstream {
+    repeated ProtoValueUnique adds = 1;    //key -> unique
+    repeated ProtoValueUniques rems = 2;   //key -> set/array of uniques
+}
+
+message ProtoValueUnique {
+    required bytes value = 1;
+    required uint64 unique = 2;
+}
+
+message ProtoValueUniques {
+    required bytes value = 1;
+    repeated uint64 uniques = 2;
+}
+
+/*
+type DownstreamAddAll struct {
+	Elems map[Element]Unique
+}
+
+type DownstreamRemoveAll struct {
+	Elems map[Element]UniqueSet
+}
+*/
+
+/*
+type NewReplicatorRequest struct {
+	SenderID    int64
+	Txns        []NewRemoteTxns
+	PartitionID int64
+	StableTs    int64
+}
+
+type NewRemoteTxns struct {
+	clocksi.Timestamp
+	Upds []*UpdateObjectParams
+}
+*/

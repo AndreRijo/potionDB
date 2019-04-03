@@ -3,7 +3,7 @@ package crdt
 import "clocksi"
 
 type CRDT interface {
-	Initialize() (newCrdt CRDT)
+	Initialize(startTs *clocksi.Timestamp) (newCrdt CRDT)
 
 	Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State)
 
@@ -11,7 +11,7 @@ type CRDT interface {
 
 	Downstream(updTs clocksi.Timestamp, downstreamArgs UpdateArguments)
 
-	GetVersion() (ts clocksi.Timestamp) //TODO: This is probably not needed at all
+	//GetVersion() (ts clocksi.Timestamp) //TODO: This is probably not needed at all
 
 	IsOperationWellTyped(args UpdateArguments) (ok bool, err error)
 
@@ -26,9 +26,8 @@ var (
 	DummyCRDTs = []CRDT{&SetAWCrdt{}, &CounterCrdt{}}
 )
 
-//The idea is to include here the methods/data common to every CRDT. For now, that's only the vectorClock and GetVersion()
+//The idea is to include here the methods/data common to every CRDT. For now, there's... nothing
 type genericCRDT struct {
-	ts clocksi.Timestamp
 }
 
 type State interface {
@@ -51,17 +50,11 @@ type ArgsError struct {
 	args UpdateArguments
 }
 
-func (crdt genericCRDT) GetVersion() (ts clocksi.Timestamp) {
-	ts = crdt.ts
-	return
-}
-
 func (crdt genericCRDT) initialize() (newCrdt genericCRDT) {
-	return genericCRDT{ts: clocksi.NewClockSiTimestamp()}
+	return genericCRDT{}
 }
 
 //Note that this only copies the generic part
 func (crdt genericCRDT) copy() (copyCrdt genericCRDT) {
-	//Should be safe to use the same clock
-	return genericCRDT{ts: crdt.ts}
+	return genericCRDT{}
 }

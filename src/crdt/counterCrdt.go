@@ -29,9 +29,9 @@ type DecrementEffect struct {
 }
 
 //Note: crdt can (and most often will be) nil
-func (crdt *CounterCrdt) Initialize() (newCrdt CRDT) {
+func (crdt *CounterCrdt) Initialize(startTs *clocksi.Timestamp) (newCrdt CRDT) {
 	crdt = &CounterCrdt{
-		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(),
+		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
 		value:                 0,
 	} //TODO: Assign to crdt is potencially unecessary (idea: Updates self in the map (reset operation?))
 	newCrdt = crdt
