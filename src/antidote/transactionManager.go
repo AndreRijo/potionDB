@@ -75,12 +75,34 @@ type TMCommitArgs struct {
 type TMAbortArgs struct {
 }
 
+/*****Remote/Replicator interaction structs*****/
+
 //Used by the Replication Layer. Use a different thread to handle this
+/*
 type TMRemoteTxn struct {
 	ReplicaID int64
 	Upds      []NewRemoteTxns
 	StableTs  int64
 }
+*/
+
+type TMRemoteMsg interface {
+	getReplicaID() int64
+}
+
+type TMRemoteClk struct {
+	ReplicaID int64
+	StableTs  int64
+}
+
+type TMRemotePartTxn struct {
+	PartitionID int64
+	ReplicaID   int64
+	clocksi.Timestamp
+	Upds []UpdateObjectParams
+}
+
+/***** *****/
 
 type TMStaticReadReply struct {
 	States    []crdt.State
@@ -133,14 +155,16 @@ type ProtectedClock struct {
 }
 
 type TransactionManager struct {
-	mat           *Materializer
-	remoteTxnChan chan TMRemoteTxn
-	//TODO: Currently downstreaming txns holds the lock until the whole process is done (i.e., all transactions are either downstreamed to Materialized or queued). This can be a problem if we need to wait for Materializer - use bounded chans?
-	localClock         ProtectedClock
-	downstreamQueue    map[int64][]RemoteTxns
-	downstreamClkQueue map[int64]int64 //Stores clock updates of replicas that have txns in queue
-	replicator         *Replicator
-	replicaID          int64
+	mat        *Materializer
+	remoteChan chan TMRemoteMsg
+	//remoteTxnChan chan TMRemoteTxn
+	//TODO: Currently downstreaming txns holds the lock until the whole process is done (i.e., all transactions are either downstreamed to Materializer or queued). This can be a problem if we need to wait for Materializer - use bounded chans?
+	localClock      ProtectedClock
+	downstreamQueue map[int64][]TMRemoteMsg
+	//downstreamQueue    map[int64][]RemoteTxns
+	//downstreamClkQueue map[int64]int64 //Stores clock updates of replicas that have txns in queue
+	replicator *Replicator
+	replicaID  int64
 }
 
 /////*****************CONSTANTS AND VARIABLES***********************/////
@@ -190,6 +214,14 @@ func (args TMAbortArgs) getRequestType() (requestType TMRequestType) {
 	return abortTMRequest
 }
 
+func (req TMRemoteClk) getReplicaID() (id int64) {
+	return req.ReplicaID
+}
+
+func (req TMRemotePartTxn) getReplicaID() (id int64) {
+	return req.ReplicaID
+}
+
 func makePartSet() (set partSet) {
 	set = partSet(make(map[uint64]struct{}))
 	return
@@ -209,19 +241,22 @@ func (txnPartitions *ongoingTxn) reset() {
 func Initialize(replicaID int64) (tm *TransactionManager) {
 	mat, loggers, partitionsIDs := InitializeMaterializer(replicaID)
 	tm = &TransactionManager{
-		mat:           mat,
-		remoteTxnChan: make(chan TMRemoteTxn),
+		mat: mat,
+		//remoteTxnChan: make(chan TMRemoteTxn),
+		remoteChan: make(chan TMRemoteMsg),
 		localClock: ProtectedClock{
 			Mutex:     sync.Mutex{},
 			Timestamp: clocksi.NewClockSiTimestamp(replicaID),
 		},
-		downstreamQueue:    make(map[int64][]RemoteTxns),
-		downstreamClkQueue: make(map[int64]int64),
-		replicator:         &Replicator{},
-		replicaID:          replicaID,
+		downstreamQueue: make(map[int64][]TMRemoteMsg),
+		//downstreamQueue:    make(map[int64][]RemoteTxns),
+		//downstreamClkQueue: make(map[int64]int64),
+		replicator: &Replicator{},
+		replicaID:  replicaID,
 	}
 	tm.replicator.Initialize(tm, loggers, partitionsIDs, replicaID)
-	go tm.handleRemoteTxnRequest()
+	//go tm.handleRemoteTxnRequest()
+	go tm.handleRemoteMsgs()
 	return tm
 }
 
@@ -242,33 +277,12 @@ func (tm *TransactionManager) CreateClientHandler() (channel chan TransactionMan
 }
 
 /*
-	Two steps:
-		- Starts a goroutine that will listen to incoming connections.
-		- Attempts to connect to each replica in addresses, and upon connect adds it to the replicator.
-*/
-func (tm *TransactionManager) ConnectToReplicas(addresses []string) {
-	go tm.listenToRemoteConn()
-	go func() {
-		replyChan := make(chan int64)
-		for _, add := range addresses {
-			go tm.tryConn(&add, replyChan)
-		}
-		for _ = range addresses {
-			tm.replicator.AddRemoteReplicator(<-replyChan)
-		}
-	}()
-}
-
-func (tm *TransactionManager) tryConn(address *string, replyChan chan int64) {
-
-}
-
-func (tm *TransactionManager) listenToRemoteConn() {
-
-}
-
 func (tm *TransactionManager) SendRemoteTxnRequest(request TMRemoteTxn) {
 	tm.remoteTxnChan <- request
+}
+*/
+func (tm *TransactionManager) SendRemoteMsg(msg TMRemoteMsg) {
+	tm.remoteChan <- msg
 }
 
 func (tm *TransactionManager) listenForProtobufRequests(channel chan TransactionManagerRequest) {
@@ -309,10 +323,23 @@ func (tm *TransactionManager) handleTMRequest(request TransactionManagerRequest,
 	return
 }
 
+/*
 func (tm *TransactionManager) handleRemoteTxnRequest() {
 	for {
 		request := <-tm.remoteTxnChan
 		tm.applyRemoteTxn(request.ReplicaID, request.Upds, request.StableTs)
+	}
+}
+*/
+func (tm *TransactionManager) handleRemoteMsgs() {
+	for {
+		request := <-tm.remoteChan
+		switch typedReq := request.(type) {
+		case TMRemoteClk:
+			tm.applyRemoteClk(&typedReq)
+		case TMRemotePartTxn:
+			tm.applyRemoteTxn(&typedReq)
+		}
 	}
 }
 
@@ -657,6 +684,105 @@ func (tm *TransactionManager) handleTMAbort(request TransactionManagerRequest, t
 	txnPartitions.reset()
 }
 
+//Temporary method. This is used to avoid compile errors on unused variables
+//This unused variables mark stuff that isn't being processed yet.
+func ignore(any interface{}) {
+
+}
+
+func (tm *TransactionManager) applyRemoteClk(request *TMRemoteClk) {
+	//All txns were applied, so it's safe to update the local clock of both TM and materializer.
+	if tm.downstreamQueue[request.ReplicaID] == nil {
+		tm.localClock.Lock()
+		tm.localClock.Timestamp = tm.localClock.Timestamp.UpdatePos(request.ReplicaID, request.StableTs)
+		tm.localClock.Unlock()
+		tm.mat.SendRequestToAllChannels(MaterializerRequest{MatRequestArgs: MatClkPosUpdArgs{ReplicaID: request.ReplicaID, StableTs: request.StableTs}})
+	} else {
+		tm.downstreamQueue[request.ReplicaID] = append(tm.downstreamQueue[request.ReplicaID], request)
+	}
+}
+
+func (tm *TransactionManager) applyRemoteTxn(request *TMRemotePartTxn) {
+	tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Started applying remote txn. Local clk:", tm.localClock.Timestamp, ". Remote clk:", request.Timestamp)
+	tm.localClock.Lock()
+	//TODO: Maybe I should check with Materializer's clock?
+	isLowerOrEqual := request.Timestamp.IsLowerOrEqualExceptFor(tm.localClock.Timestamp, tm.replicaID, request.ReplicaID)
+	if isLowerOrEqual {
+		tm.downstreamRemoteTxn(request.PartitionID, request.ReplicaID, request.Timestamp, &request.Upds)
+		tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Finished applying remote txn")
+		tm.checkPendingRemoteTxns()
+	} else {
+		//Queue
+		tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Queuing remote txn")
+		tm.downstreamQueue[request.ReplicaID] = append(tm.downstreamQueue[request.ReplicaID], request)
+	}
+	tm.localClock.Unlock()
+}
+
+//Pre-condition: localClock's mutex is hold
+func (tm *TransactionManager) downstreamRemoteTxn(partitionID int64, replicaID int64, txnClk clocksi.Timestamp, txnOps *[]UpdateObjectParams) {
+	tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Started downstream remote txn")
+	currRequest := MaterializerRequest{MatRequestArgs: MatRemoteTxnArgs{
+		ReplicaID: replicaID,
+		Timestamp: txnClk,
+		Upds:      *txnOps,
+	}}
+	tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Sending remoteTxn request to Materializer")
+	if len(*txnOps) > 0 {
+		tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Partition", partitionID, "has operations:", *txnOps)
+	} else {
+		tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Partition", partitionID, "has NO operations:", *txnOps)
+	}
+	tm.mat.SendRequestToChannel(currRequest, uint64(partitionID))
+	tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Finished downstream remote txn")
+}
+
+//Pre-condition: localClock's mutex is hold
+func (tm *TransactionManager) checkPendingRemoteTxns() {
+	tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Started checking for pending remote txns")
+	appliedAtLeastOne := true
+	//No txns pending, can return right away
+	if len(tm.downstreamQueue) == 0 {
+		tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Finished checking for pending remote txns")
+		return
+	}
+	for appliedAtLeastOne {
+		for replicaID, pendingTxns := range tm.downstreamQueue {
+			if !appliedAtLeastOne {
+				break
+			}
+			appliedAtLeastOne = false
+			for _, req := range pendingTxns {
+				switch typedReq := req.(type) {
+				case *TMRemoteClk:
+					tm.localClock.UpdatePos(typedReq.ReplicaID, typedReq.StableTs)
+					tm.mat.SendRequestToAllChannels(MaterializerRequest{MatRequestArgs: MatClkPosUpdArgs{ReplicaID: typedReq.ReplicaID, StableTs: typedReq.StableTs}})
+				case *TMRemotePartTxn:
+					isLowerOrEqual := typedReq.Timestamp.IsLowerOrEqualExceptFor(tm.localClock.Timestamp, tm.replicaID, typedReq.ReplicaID)
+					if isLowerOrEqual {
+						tm.downstreamRemoteTxn(typedReq.PartitionID, typedReq.ReplicaID, typedReq.Timestamp, &typedReq.Upds)
+						appliedAtLeastOne = true
+						if len(pendingTxns) > 1 {
+							pendingTxns = pendingTxns[1:]
+						} else {
+							pendingTxns = nil
+						}
+					} else {
+						break
+					}
+				}
+			}
+			if pendingTxns != nil {
+				tm.downstreamQueue[replicaID] = pendingTxns
+			} else {
+				delete(tm.downstreamQueue, replicaID)
+			}
+		}
+	}
+	tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Finished checking for pending remote txns")
+}
+
+/*
 func (tm *TransactionManager) applyRemoteTxn(replicaID int64, upds []RemoteTxns, stableTs int64) {
 	tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Started applying remote txn")
 	tm.localClock.Lock()
@@ -740,7 +866,6 @@ func (tm *TransactionManager) checkPendingRemoteTxns() {
 				replicaClkValue := tm.downstreamClkQueue[replicaID]
 				tm.localClock.Timestamp = tm.localClock.Timestamp.UpdatePos(replicaID, replicaClkValue)
 				tm.mat.SendRequestToAllChannels(MaterializerRequest{MatRequestArgs: MatClkPosUpdArgs{ReplicaID: replicaID, StableTs: replicaClkValue}})
-				tm.localClock.UpdatePos(replicaID, replicaClkValue)
 
 				delete(tm.downstreamQueue, replicaID)
 				delete(tm.downstreamClkQueue, replicaID)
@@ -793,9 +918,4 @@ func (tm *TransactionManager) findCommonTimestamp(objsParams []KeyParams, client
 	}
 	return smallestTS
 }
-
-//Temporary method. This is used to avoid compile errors on unused variables
-//This unused variables mark stuff that isn't being processed yet.
-func ignore(any interface{}) {
-
-}
+*/

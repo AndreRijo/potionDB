@@ -464,7 +464,7 @@ func createProtoReplicatePart(request *NewReplicatorRequest) (protobuf *ProtoRep
 	return &ProtoReplicatePart{
 		SenderID:    &request.SenderID,
 		PartitionID: &request.PartitionID,
-		Txns: &ProtoRemoteTxns{
+		Txn: &ProtoRemoteTxn{
 			Timestamp: request.Timestamp.ToBytes(),
 			Upds:      createProtoDownstreamUpds(request),
 		},
@@ -512,13 +512,10 @@ func createProtoSetDownstream(upd *crdt.UpdateArguments) (protobuf *ProtoSetDown
 		i := 0
 		for value, uniques := range convertedUpd.Elems {
 			//TODO: Probably pass this uniquesInt thing to commonTools
-			uniquesInts := make([]uint64, len(uniques))
-			j := 0
-			for unique := range uniques {
-				uniquesInts[j] = uint64(unique)
-				j++
-			}
+			tools.FancyInfoPrint(tools.PROTOLIB_PRINT, -1, "Encoding uniques for remove. ", value, uniques)
+			uniquesInts := crdt.UniqueSetToUInt64Array(uniques)
 			remProto.Rems[i] = &ProtoValueUniques{Value: []byte(value), Uniques: uniquesInts}
+			tools.FancyInfoPrint(tools.PROTOLIB_PRINT, -1, "Encoded uniques (ints).", value, uniquesInts)
 			i++
 		}
 		protobuf = remProto
@@ -531,12 +528,57 @@ func protoToStableClock(protobuf *ProtoStableClock) (stableClk *StableClock) {
 }
 
 func protoToReplicatorRequest(protobuf *ProtoReplicatePart) (request *NewReplicatorRequest) {
-	partBuf := protobuf.Txn
 	return &NewReplicatorRequest{
 		PartitionID: protobuf.GetPartitionID(),
 		SenderID:    protobuf.GetSenderID(),
 		Timestamp:   clocksi.ClockSiTimestamp{}.FromBytes(protobuf.Txn.Timestamp),
 		Upds:        protoToDownstreamUpds(protobuf.Txn.Upds),
+	}
+}
+
+func protoToDownstreamUpds(protobufs []*ProtoDownstreamUpd) (upds []UpdateObjectParams) {
+	upds = make([]UpdateObjectParams, len(protobufs))
+	for i, proto := range protobufs {
+		keyProto := proto.GetKeyParams()
+		upd := &UpdateObjectParams{
+			KeyParams: CreateKeyParams(string(keyProto.GetKey()), keyProto.GetType(), string(keyProto.GetBucket())),
+		}
+		var updArgs crdt.UpdateArguments
+		switch upd.CrdtType {
+		case CRDTType_COUNTER:
+			updArgs = protoToCounterDownstream(proto.GetCounterOp())
+		case CRDTType_ORSET:
+			updArgs = protoToSetDownstream(proto.GetSetOp())
+		}
+		upd.UpdateArgs = updArgs
+		upds[i] = *upd
+	}
+	return upds
+}
+
+func protoToCounterDownstream(protobuf *ProtoCounterDownstream) (args crdt.UpdateArguments) {
+	if protobuf.GetIsInc() {
+		return crdt.Increment{Change: protobuf.GetChange()}
+	} else {
+		return crdt.Decrement{Change: protobuf.GetChange()}
+	}
+}
+
+func protoToSetDownstream(protobuf *ProtoSetDownstream) (args crdt.UpdateArguments) {
+	if adds := protobuf.GetAdds(); adds != nil {
+		tools.FancyInfoPrint(tools.PROTOLIB_PRINT, -1, "Decoding set add. Rems:", protobuf.GetRems())
+		elems := make(map[crdt.Element]crdt.Unique)
+		for _, pairProto := range adds {
+			elems[crdt.Element(pairProto.GetValue())] = crdt.Unique(pairProto.GetUnique())
+		}
+		return crdt.DownstreamAddAll{Elems: elems}
+	} else {
+		tools.FancyWarnPrint(tools.PROTOLIB_PRINT, -1, "Decoding set remove. Rems:", protobuf.GetRems())
+		elems := make(map[crdt.Element]crdt.UniqueSet)
+		for _, pairProto := range protobuf.GetRems() {
+			elems[crdt.Element(pairProto.GetValue())] = crdt.UInt64ArrayToUniqueSet(pairProto.GetUniques())
+		}
+		return crdt.DownstreamRemoveAll{Elems: elems}
 	}
 }
 
@@ -561,48 +603,3 @@ func protoToRemoteTxns(protobufs []*ProtoRemoteTxns) (remoteTxns []NewRemoteTxns
 	return
 }
 */
-
-func protoToDownstreamUpds(protobufs []*ProtoDownstreamUpd) (upds []*UpdateObjectParams) {
-	upds = make([]*UpdateObjectParams, len(protobufs))
-	for i, proto := range protobufs {
-		keyProto := proto.GetKeyParams()
-		upd := &UpdateObjectParams{
-			KeyParams: CreateKeyParams(string(keyProto.GetKey()), keyProto.GetType(), string(keyProto.GetBucket())),
-		}
-		upds[i] = upd
-		var updArgs crdt.UpdateArguments
-		switch upd.CrdtType {
-		case CRDTType_COUNTER:
-			updArgs = protoToCounterDownstream(proto.GetCounterOp())
-		case CRDTType_ORSET:
-			updArgs = protoToSetDownstream(proto.GetSetOp())
-		}
-		upd.UpdateArgs = updArgs
-	}
-	return upds
-}
-
-func protoToCounterDownstream(protobuf *ProtoCounterDownstream) (args crdt.UpdateArguments) {
-	if protobuf.GetIsInc() {
-		return crdt.Increment{Change: protobuf.GetChange()}
-	} else {
-		return crdt.Decrement{Change: protobuf.GetChange()}
-	}
-}
-
-func protoToSetDownstream(protobuf *ProtoSetDownstream) (args crdt.UpdateArguments) {
-	//TODO: Test if this works, as maybe it is set as an empty slice?
-	if adds := protobuf.GetAdds(); adds != nil {
-		elems := make(map[crdt.Element]crdt.Unique)
-		for _, pairProto := range adds {
-			elems[crdt.Element(pairProto.GetValue())] = crdt.Unique(pairProto.GetUnique())
-		}
-		return crdt.DownstreamAddAll{Elems: elems}
-	} else {
-		elems := make(map[crdt.Element]crdt.UniqueSet)
-		for _, pairProto := range protobuf.GetRems() {
-			elems[crdt.Element(pairProto.GetValue())] = crdt.UInt64ArrayToUniqueSet(pairProto.GetUniques())
-		}
-		return crdt.DownstreamRemoveAll{Elems: elems}
-	}
-}

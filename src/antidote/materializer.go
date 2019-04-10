@@ -5,6 +5,7 @@ import (
 	"crdt"
 	fmt "fmt"
 	math "math"
+	"reflect"
 	"tools"
 
 	hashFunc "github.com/twmb/murmur3"
@@ -522,12 +523,26 @@ func updatePartitionDataWithCommit(transactionId *TransactionId, commitTimestamp
 	deleteTransactionMetadata(transactionId, partitionData)
 	//Transactions are commited in order, so this commit timestamp is always more recent than the previous stableVersion
 	partitionData.stableVersion = *commitTimestamp
+	//TODO: Delete
+	for _, upd := range *downstreamUpds {
+		switch typedUpd := upd.UpdateArgs.(type) {
+		case crdt.DownstreamRemoveAll:
+			tools.FancyWarnPrint(tools.MAT_PRINT, -1, "Sending request to log with a remove: ", typedUpd)
+		}
+	}
 	partitionData.log.SendLoggerRequest(LoggerRequest{
 		LogRequestArgs: LogCommitArgs{
 			TxnClk: commitTimestamp,
 			Upds:   downstreamUpds,
 		},
 	})
+	for _, upd := range *downstreamUpds {
+		switch typedUpd := upd.UpdateArgs.(type) {
+		case crdt.DownstreamRemoveAll:
+			tools.FancyWarnPrint(tools.MAT_PRINT, -1, "Sent request to log with a remove: ", typedUpd)
+		}
+	}
+
 	handlePendingCommits(partitionData)
 }
 
@@ -586,8 +601,10 @@ func applyUpdates(updates []UpdateObjectParams, commitTimestamp *clocksi.Timesta
 			KeyParams:  upd.KeyParams,
 			UpdateArgs: obj.Update(upd.UpdateArgs),
 		}
-		tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Downstream args:", (*downstreamUpds)[i].UpdateArgs)
+		//tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Downstream args:", (*downstreamUpds)[i].UpdateArgs)
+		tools.FancyWarnPrint(tools.MAT_PRINT, partitionData.replicaID, "Downstream args:", (*downstreamUpds)[i].UpdateArgs, "type:", reflect.TypeOf((*downstreamUpds)[i].UpdateArgs))
 		obj.Downstream(*commitTimestamp, (*downstreamUpds)[i].UpdateArgs)
+		tools.FancyWarnPrint(tools.MAT_PRINT, partitionData.replicaID, "Downstream args after applying downstream:", (*downstreamUpds)[i].UpdateArgs, "type:", reflect.TypeOf((*downstreamUpds)[i].UpdateArgs))
 	}
 	return
 }
@@ -620,6 +637,7 @@ func handleMatRemoteTxn(request MaterializerRequest, partitionData *partitionDat
 		tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Remote txn clock is lower or equal. Upds:", remoteTxnArgs.Upds)
 		for _, upd := range remoteTxnArgs.Upds {
 			tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Downstreaming remote op", upd, "Args:", upd.UpdateArgs)
+			tools.FancyWarnPrint(tools.MAT_PRINT, partitionData.replicaID, "Remote Downstream args:", upd.UpdateArgs)
 			hashKey := getHash(getCombinedKey(upd.KeyParams))
 
 			obj, hasKey := partitionData.db[hashKey]

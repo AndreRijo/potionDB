@@ -36,17 +36,21 @@ func main() {
 	rand.Seed(time.Now().UTC().UnixNano())
 	id, _ := strconv.ParseInt(portString, 0, 64)
 
-	fmt.Println("Other servers? Type their IDs, all in the same line separated by a space.")
-	otherIDsString, _ := in.ReadString('\n')
-	otherIDsString = strings.Trim(otherIDsString, "\n")
-	otherReplicasIDs := strings.Split(otherIDsString, " ")
+	/*
+		fmt.Println("Other servers? Type their IDs, all in the same line separated by a space.")
+		otherIDsString, _ := in.ReadString('\n')
+		otherIDsString = strings.Trim(otherIDsString, "\n")
+		otherReplicasIDs := strings.Split(otherIDsString, " ")
+	*/
 
 	tm := antidote.Initialize(id)
 	//tm := antidote.Initialize(0)
-	for _, idStr := range otherReplicasIDs {
-		remoteID, _ := strconv.ParseInt(idStr, 0, 64)
-		tm.AddRemoteID(remoteID)
-	}
+	/*
+		for _, idStr := range otherReplicasIDs {
+			remoteID, _ := strconv.ParseInt(idStr, 0, 64)
+			tm.AddRemoteID(remoteID)
+		}
+	*/
 
 	server, err := net.Listen("tcp", "127.0.0.1:"+strings.TrimSpace(portString))
 

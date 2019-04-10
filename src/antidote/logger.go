@@ -2,6 +2,8 @@ package antidote
 
 import (
 	"clocksi"
+	"crdt"
+	"tools"
 )
 
 //TODO: Delete methods with string "old" in their name
@@ -141,6 +143,14 @@ func (logger *MemLogger) handleRequests() {
 
 func (logger *MemLogger) handleCommitLogRequest(request LogCommitArgs) {
 	logger.log = append(logger.log, PairClockUpdates{clk: request.TxnClk, upds: request.Upds})
+
+	//TODO: Delete
+	for _, upd := range *request.Upds {
+		switch typedUpd := upd.UpdateArgs.(type) {
+		case crdt.DownstreamRemoveAll:
+			tools.FancyWarnPrint(tools.LOG_PRINT, int64(logger.partId), "Logging remove downstream:", typedUpd.Elems)
+		}
+	}
 }
 
 func (logger *MemLogger) handleTxnLogRequest(request LogTxnArgs) {

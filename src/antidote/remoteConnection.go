@@ -1,10 +1,10 @@
 package antidote
 
 import (
-	"bytes"
 	"clocksi"
 	"crdt"
 	"encoding/gob"
+	"reflect"
 	"strconv"
 	"tools"
 
@@ -46,6 +46,10 @@ func CreateRemoteConnStruct(partitionsToListen []uint64, replicaID int64) (remot
 		tools.FancyWarnPrint(tools.REMOTE_PRINT, replicaID, "failed to obtain channel from rabbitMQ:", err)
 		return nil, err
 	}
+
+	//Call this to delete existing exchange/queues/binds/etc if configurations are changed
+	//deleteRabbitMQStructures(sendCh)
+
 	//We send msgs to the exchange
 	//sendCh.ExchangeDelete(exchangeName, false, true)
 	err = sendCh.ExchangeDeclare(exchangeName, exchangeType, false, false, false, false, nil)
@@ -84,24 +88,32 @@ func CreateRemoteConnStruct(partitionsToListen []uint64, replicaID int64) (remot
 		}
 	}
 
-	var encBuf, decBuf bytes.Buffer
 	remote = &RemoteConn{
 		sendCh:       sendCh,
 		conn:         conn,
 		recCh:        recCh,
-		listenerChan: make(chan *NewReplicatorRequest, defaultListenerSize),
+		listenerChan: make(chan ReplicatorMsg, defaultListenerSize),
 		replicaID:    replicaID,
 	}
 	go remote.startReceiver()
 	return
 }
 
+//Note: This should *ONLY* be used when a declaration of one of RabbitMQ structures (exchange, queue, etc.) changes
+func deleteRabbitMQStructures(ch *amqp.Channel) {
+	//Also deletes queue binds
+	ch.ExchangeDelete(exchangeName, false, false)
+}
+
 func (remote *RemoteConn) SendPartTxn(request *NewReplicatorRequest) {
 	tools.FancyDebugPrint(tools.REMOTE_PRINT, remote.replicaID, "Sending remote request:", *request)
-	if len(request.Txns) > 0 {
-		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Actually sending txns to other replicas.")
+	if len(request.Upds) > 0 {
+		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Actually sending txns to other replicas. Sending ops:", request.Upds)
+		for _, upd := range request.Upds {
+			tools.FancyWarnPrint(tools.REMOTE_PRINT, remote.replicaID, "Downstream args:", upd, "type:", reflect.TypeOf(upd.UpdateArgs))
+		}
 	}
-	protobuf := createProtoRemotePartTxn(request)
+	protobuf := createProtoReplicatePart(request)
 	data, err := proto.Marshal(protobuf)
 	if err != nil {
 		tools.FancyErrPrint(tools.REMOTE_PRINT, remote.replicaID, "Failed to generate bytes of partTxn request to send. Error:", err)
@@ -155,6 +167,7 @@ func (remote *RemoteConn) startReceiver() {
 				remote.listenerChan <- request
 			}
 		} else {
+			//TODO: Maybe analyze data.routingKey to avoid decoding the protobuf if it was sent by this own replica?
 			protobuf := &ProtoReplicatePart{}
 			err := proto.Unmarshal(data.Body, protobuf)
 			if err != nil {
@@ -163,14 +176,18 @@ func (remote *RemoteConn) startReceiver() {
 			request := protoToReplicatorRequest(protobuf)
 			//remote.decBuf.Reset()
 			tools.FancyDebugPrint(tools.REMOTE_PRINT, remote.replicaID, "Received remote request:", *request)
-			if len(request.Txns) > 0 {
+			if len(request.Upds) > 0 && request.SenderID != remote.replicaID {
 				tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Actually received txns from other replicas.")
+				for _, upd := range request.Upds {
+					tools.FancyWarnPrint(tools.REMOTE_PRINT, remote.replicaID, "Received downstream args:", upd, "type:", reflect.TypeOf(upd.UpdateArgs))
+				}
 			}
-			if request.SenderID == remote.replicaID {
-				tools.FancyErrPrint(tools.REMOTE_PRINT, remote.replicaID, "Received remote request from myself!")
+			if request.SenderID != remote.replicaID {
+				remote.listenerChan <- request
+			} else {
+				tools.FancyDebugPrint(tools.REMOTE_PRINT, remote.replicaID, "Ignored request from self.")
 			}
 			//tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "My replicaID:", remote.replicaID, "senderID:", request.SenderID)
-			remote.listenerChan <- request
 		}
 	}
 }

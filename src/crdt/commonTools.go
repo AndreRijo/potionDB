@@ -75,3 +75,13 @@ func UInt64ArrayToUniqueSet(uniques []uint64) (uniqueSet UniqueSet) {
 	}
 	return
 }
+
+func UniqueSetToUInt64Array(uniqueSet UniqueSet) (uniques []uint64) {
+	uniques = make([]uint64, len(uniqueSet))
+	j := 0
+	for unique := range uniqueSet {
+		uniques[j] = uint64(unique)
+		j++
+	}
+	return
+}

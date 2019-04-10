@@ -355,7 +355,7 @@ func (ts ClockSiTimestamp) FromBytes(bytes []byte) (newTs Timestamp) {
 			newVC[replicaID] = value
 		}
 	}
-	fmt.Println("Decoded clock:", newVC)
+	//fmt.Println("Decoded clock:", newVC)
 	return ClockSiTimestamp{VectorClock: newVC}
 }
 

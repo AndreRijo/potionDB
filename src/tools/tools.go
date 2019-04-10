@@ -9,12 +9,13 @@ import (
 )
 
 const (
-	PROTO_PRINT  = "[PROTO_SERVER"
-	MAT_PRINT    = "[MAT"
-	TM_PRINT     = "[TM"
-	LOG_PRINT    = "[LOG"
-	REPL_PRINT   = "[REPLICATOR"
-	REMOTE_PRINT = "[REMOTE_CONNECTION"
+	PROTO_PRINT    = "[PROTO_SERVER"
+	MAT_PRINT      = "[MAT"
+	TM_PRINT       = "[TM"
+	LOG_PRINT      = "[LOG"
+	REPL_PRINT     = "[REPLICATOR"
+	REMOTE_PRINT   = "[REMOTE_CONNECTION"
+	PROTOLIB_PRINT = "[PROTO_LIB"
 
 	WARNING = "[WARNING]"
 	ERROR   = "[ERROR]"
@@ -23,7 +24,15 @@ const (
 )
 
 var (
-	disabledDebugs = map[string]struct{}{PROTO_PRINT: {}, MAT_PRINT: {}, TM_PRINT: {}, LOG_PRINT: {}, REPL_PRINT: {}, REMOTE_PRINT: {}}
+	disabledDebugs = map[string]struct{}{
+		PROTO_PRINT:    {},
+		MAT_PRINT:      {},
+		TM_PRINT:       {},
+		LOG_PRINT:      {},
+		REPL_PRINT:     {},
+		REMOTE_PRINT:   {},
+		PROTOLIB_PRINT: {},
+	}
 )
 
 func CheckErr(msg string, err error) {

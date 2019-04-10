@@ -425,8 +425,8 @@ func TestReplicator1(t *testing.T) {
 	tm1 := Initialize(0)
 	time.Sleep(time.Duration(200) * time.Millisecond)
 	tm2 := Initialize(1)
-	tm1.replicator.AddRemoteReplicator(tm2.replicator.replicaID)
-	tm2.replicator.AddRemoteReplicator(tm1.replicator.replicaID)
+	//tm1.replicator.AddRemoteReplicator(tm2.replicator.replicaID)
+	//tm2.replicator.AddRemoteReplicator(tm1.replicator.replicaID)
 	//tm1.replicator.AddRemoteReplicator(make(chan ReplicatorRequest))
 
 	//Sleep for a bit to ensure all gothreads initialize
@@ -449,6 +449,49 @@ func TestReplicator1(t *testing.T) {
 		t.Error("Read of key doesn't match")
 		t.Error("Received: ", firstTxnReadReply.staticReadReply.States[0].(crdt.SetAWValueState).Elems)
 		t.Error("Expected: ", writeReq)
+	}
+
+}
+
+func TestReplicator2(t *testing.T) {
+	tm1 := Initialize(0)
+	time.Sleep(time.Duration(200) * time.Millisecond)
+	tm2 := Initialize(1)
+	//tm1.replicator.AddRemoteReplicator(tm2.replicator.replicaID)
+	//tm2.replicator.AddRemoteReplicator(tm1.replicator.replicaID)
+	//tm1.replicator.AddRemoteReplicator(make(chan ReplicatorRequest))
+
+	//Sleep for a bit to ensure all gothreads initialize
+	time.Sleep(initializeTime * time.Millisecond)
+
+	key := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), CRDTType_ORSET, "bkt")
+	writeReq, writeReply := createAndProcessWrite(tm1, nil, static, key, createRandomSetAdd, TransactionId(rand.Uint64()), clocksi.NewClockSiTimestamp(0))
+	checkStaticUpdateError(1, writeReply.staticUpdateReply, t)
+	ignore(writeReq)
+	//ignore(tm2)
+
+	writeRemParams := make([]UpdateObjectParams, 1)
+	writeRemParams[0] = UpdateObjectParams{KeyParams: key, UpdateArgs: crdt.Remove{Element: writeReq[0].UpdateArgs.(crdt.Add).Element}}
+	writeReq2, tmChan := createStaticWrite(TransactionId(rand.Uint64()), writeReply.staticUpdateReply.Timestamp, writeRemParams)
+	go tm1.handleStaticTMUpdate(writeReq2)
+	reply := <-tmChan
+	ignore(reply)
+
+	//Wait for replication
+	time.Sleep(tsSendDelay * 2 * time.Millisecond)
+
+	readParams := []ReadObjectParams{createReadObjParams(key)}
+	fmt.Println("[TM_TEST]Requesting read...")
+	firstTxnReadReply := createAndProccessRead(tm2, static, readParams, writeReply.staticUpdateReply.TransactionId, writeReply.staticUpdateReply.Timestamp)
+	fmt.Println("[TM_TEST]Received read reply")
+	//TODO: Actually take in consideration the remove
+	appliedWriteParams := make([]UpdateObjectParams, 2)
+	appliedWriteParams[0] = writeReq[0]
+	appliedWriteParams[1] = writeRemParams[0]
+	if len(firstTxnReadReply.staticReadReply.States[0].(crdt.SetAWValueState).Elems) > 0 {
+		t.Error("Read of key doesn't match")
+		t.Error("Received: ", firstTxnReadReply.staticReadReply.States[0].(crdt.SetAWValueState).Elems)
+		t.Error("Expected: ", []crdt.Element{})
 	}
 
 }

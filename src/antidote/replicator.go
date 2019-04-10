@@ -33,7 +33,7 @@ type NewReplicatorRequest struct {
 
 type NewReplicatorRequest struct {
 	clocksi.Timestamp
-	Upds        []*UpdateObjectParams
+	Upds        []UpdateObjectParams
 	SenderID    int64
 	PartitionID int64
 }
@@ -87,7 +87,7 @@ func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, par
 		repl.lastSentClk = clocksi.NewClockSiTimestamp(replicaID)
 		//repl.receiveReplChan = make(chan ReplicatorRequest)
 		repl.replicaID = replicaID
-		go repl.receiveRemoteTxn()
+		go repl.receiveRemoteTxns()
 		go repl.replicateCycle()
 	}
 }
@@ -176,6 +176,7 @@ func (repl *Replicator) preparateDataToSend() (toSend []RemoteTxn) {
 			//Safe to include the actual txn's clock in the list to send. We can remove entry from cache
 			tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "appending upds. Upds:", txnUpdates)
 			toSend = append(toSend, RemoteTxn{Timestamp: minClk, Upds: &txnUpdates})
+			tools.FancyWarnPrint(tools.REPL_PRINT, repl.replicaID, "upds to send:", txnUpdates)
 		}
 		for id := range txnUpdates {
 			repl.txnCache[id] = repl.txnCache[id][1:]
@@ -201,8 +202,8 @@ func (repl *Replicator) sendTxns(toSend []RemoteTxn) {
 	//Separate each txn into partitions
 	//TODO: Batch of transactions for the same partition? Not simple due to clock updates.
 	for _, txn := range toSend {
-		for partId, upds := range txn.Upds {
-			repl.remoteConn.SendPartTxn(&NewReplicatorRequest{PartitionID: partId, SenderID: repl.replicaID, Timestamp: txn.Timestamp, Upds: upds})
+		for partId, upds := range *txn.Upds {
+			repl.remoteConn.SendPartTxn(&NewReplicatorRequest{PartitionID: int64(partId), SenderID: repl.replicaID, Timestamp: txn.Timestamp, Upds: upds})
 		}
 		repl.remoteConn.SendStableClk(txn.Timestamp.GetPos(repl.replicaID))
 	}
@@ -216,13 +217,17 @@ func (repl *Replicator) receiveRemoteTxns() {
 		remoteReq := repl.remoteConn.GetNextRemoteRequest()
 		switch typedReq := remoteReq.(type) {
 		case *StableClock:
-
+			repl.tm.SendRemoteMsg(TMRemoteClk{
+				ReplicaID: typedReq.SenderID,
+				StableTs:  typedReq.Ts,
+			})
 		case *NewReplicatorRequest:
 			//TODO
-			repl.tm.SendRemoteTxnRequest(TMRemoteTxn{
-				ReplicaID: remoteReq.SenderID,
-				Upds:      remoteReq.Txns,
-				StableTs:  remoteReq.StableTs,
+			repl.tm.SendRemoteMsg(TMRemotePartTxn{
+				ReplicaID:   typedReq.SenderID,
+				PartitionID: typedReq.PartitionID,
+				Upds:        typedReq.Upds,
+				Timestamp:   typedReq.Timestamp,
 			})
 		}
 

@@ -229,10 +229,11 @@ func (crdt *SetAWCrdt) getAddAllDownstreamArgs(elems []Element) (downstreamArgs 
 func (crdt *SetAWCrdt) getRemoveAllDownstreamArgs(elems []Element) (downstreamArgs UpdateArguments) {
 	uniqueMap := make(map[Element]UniqueSet)
 	for _, key := range elems {
-		//In go, the "=" symbol does a deep copy. This is true for any object, unless you use references
-		uniqueMap[key] = crdt.elems[key]
+		//Maps are in fact references, so doing "uniqueMap[key] = crdt.elems[key]" wouldn't actually copy the uniqueSet's (which is a map) contents to a new uniqueSet.
+		uniqueMap[key] = crdt.elems[key].copy()
 	}
 	downstreamArgs = DownstreamRemoveAll{Elems: uniqueMap}
+	fmt.Println("[SETAWCRDT]Remove all downstream generated:", downstreamArgs)
 	return
 }
 
