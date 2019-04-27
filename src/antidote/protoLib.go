@@ -460,21 +460,21 @@ func createProtoStableClock(replicaID int64, ts int64) (protobuf *ProtoStableClo
 	return &ProtoStableClock{SenderID: &replicaID, ReplicaTs: &ts}
 }
 
-func createProtoReplicatePart(request *NewReplicatorRequest) (protobuf *ProtoReplicatePart) {
+func createProtoReplicatePart(replicaID int64, partitionID int64, timestamp clocksi.Timestamp, upds []UpdateObjectParams) (protobuf *ProtoReplicatePart) {
 	return &ProtoReplicatePart{
-		SenderID:    &request.SenderID,
-		PartitionID: &request.PartitionID,
+		SenderID:    &replicaID,
+		PartitionID: &partitionID,
 		Txn: &ProtoRemoteTxn{
-			Timestamp: request.Timestamp.ToBytes(),
-			Upds:      createProtoDownstreamUpds(request),
+			Timestamp: timestamp.ToBytes(),
+			Upds:      createProtoDownstreamUpds(upds),
 		},
 	}
 }
 
 //func createProtoDownstreamUpds(req *NewRemoteTxns) (protobufs []*ProtoDownstreamUpd) {
-func createProtoDownstreamUpds(req *NewReplicatorRequest) (protobufs []*ProtoDownstreamUpd) {
-	protobufs = make([]*ProtoDownstreamUpd, len(req.Upds))
-	for i, upd := range req.Upds {
+func createProtoDownstreamUpds(upds []UpdateObjectParams) (protobufs []*ProtoDownstreamUpd) {
+	protobufs = make([]*ProtoDownstreamUpd, len(upds))
+	for i, upd := range upds {
 		protobufs[i] = &ProtoDownstreamUpd{KeyParams: createBoundObject(upd.Key, upd.CrdtType, upd.Bucket)}
 		switch upd.CrdtType {
 		case CRDTType_COUNTER:

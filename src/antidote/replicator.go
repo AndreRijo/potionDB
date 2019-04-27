@@ -22,15 +22,6 @@ type ReplicatorMsg interface {
 	getSenderID() int64
 }
 
-/*
-type NewReplicatorRequest struct {
-	SenderID    int64
-	Txns        []NewRemotePartTxn
-	PartitionID int64
-	StableTs    int64
-}
-*/
-
 type NewReplicatorRequest struct {
 	clocksi.Timestamp
 	Upds        []UpdateObjectParams
@@ -42,14 +33,6 @@ type StableClock struct {
 	SenderID int64
 	Ts       int64
 }
-
-/*
-type ReplicatorRequest struct {
-	SenderID int64
-	Txns     []RemoteTxns
-	StableTs int64
-}
-*/
 
 type RemoteTxn struct {
 	clocksi.Timestamp
@@ -76,7 +59,11 @@ func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, par
 		repl.started = true
 		//nGoRoutines: number of partitions (defined in Materializer)
 		repl.localPartitions = loggers
-		remoteConn, err := CreateRemoteConnStruct(partitionIDs, replicaID)
+		//TODO: Actually choose which buckets are to be listen to
+		//remoteConn, err := CreateRemoteConnStruct(partitionIDs, replicaID)
+		bucketsToListen := make([]string, 1)
+		bucketsToListen[0] = "*"
+		remoteConn, err := CreateRemoteConnStruct(bucketsToListen, replicaID)
 		//TODO: Not ignore err
 		ignore(err)
 		repl.remoteConn = remoteConn
@@ -212,7 +199,7 @@ func (repl *Replicator) sendTxns(toSend []RemoteTxn) {
 
 func (repl *Replicator) receiveRemoteTxns() {
 	for {
-		tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "iterating receiveRemoteTxns")
+		tools.FancyInfoPrint(tools.REPL_PRINT, repl.replicaID, "iterating receiveRemoteTxns")
 		//remoteReq := <-repl.receiveReplChan
 		remoteReq := repl.remoteConn.GetNextRemoteRequest()
 		switch typedReq := remoteReq.(type) {
@@ -222,16 +209,17 @@ func (repl *Replicator) receiveRemoteTxns() {
 				StableTs:  typedReq.Ts,
 			})
 		case *NewReplicatorRequest:
-			//TODO
 			repl.tm.SendRemoteMsg(TMRemotePartTxn{
 				ReplicaID:   typedReq.SenderID,
 				PartitionID: typedReq.PartitionID,
 				Upds:        typedReq.Upds,
 				Timestamp:   typedReq.Timestamp,
 			})
+		default:
+			tools.FancyErrPrint(tools.REPL_PRINT, repl.replicaID, "failed to process remoteConnection message - unknown msg type.")
 		}
 
-		tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "receiveRemoteTxns finished processing request")
+		tools.FancyInfoPrint(tools.REPL_PRINT, repl.replicaID, "receiveRemoteTxns finished processing request")
 	}
 }
 

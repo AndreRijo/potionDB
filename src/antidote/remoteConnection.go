@@ -1,9 +1,6 @@
 package antidote
 
 import (
-	"clocksi"
-	"crdt"
-	"encoding/gob"
 	"reflect"
 	"strconv"
 	"tools"
@@ -13,11 +10,20 @@ import (
 )
 
 type RemoteConn struct {
-	conn         *amqp.Connection
-	sendCh       *amqp.Channel
-	recCh        <-chan amqp.Delivery
-	listenerChan chan ReplicatorMsg
-	replicaID    int64
+	conn             *amqp.Connection
+	sendCh           *amqp.Channel
+	recCh            <-chan amqp.Delivery
+	listenerChan     chan ReplicatorMsg
+	replicaID        int64
+	holdOperations   map[int64]*HoldOperations
+	nBucketsToListen int
+}
+
+//Idea: hold operations from a replica until all operations for a partition are received.
+type HoldOperations struct {
+	lastRecUpds []*NewReplicatorRequest
+	partitionID int64
+	nOpsSoFar   int
 }
 
 const (
@@ -34,8 +40,7 @@ const (
 //There's one queue per replica. Each replica's queue will receive messages from ALL other replicas, as long as the topics match the ones
 //that were binded to the replica's queue.
 
-//TODO: Remove replicaID, it's just here for debugging purposes
-func CreateRemoteConnStruct(partitionsToListen []uint64, replicaID int64) (remote *RemoteConn, err error) {
+func CreateRemoteConnStruct(bucketsToListen []string, replicaID int64) (remote *RemoteConn, err error) {
 	conn, err := amqp.Dial(protocol + ip + port)
 	if err != nil {
 		tools.FancyWarnPrint(tools.REMOTE_PRINT, replicaID, "failed to open connection to rabbitMQ:", err)
@@ -63,9 +68,10 @@ func CreateRemoteConnStruct(partitionsToListen []uint64, replicaID int64) (remot
 		tools.FancyWarnPrint(tools.REMOTE_PRINT, replicaID, "failed to declare queue with rabbitMQ:", err)
 		return nil, err
 	}
-	//The previously declared queue will receive messages from any replica that publishes for the partitions in partitionsToListen
-	for _, partId := range partitionsToListen {
-		sendCh.QueueBind(queue.Name, strconv.FormatUint(partId, 10)+".*", exchangeName, false, nil)
+	//The previously declared queue will receive messages from any replica that publishes updates for objects in buckets in bucketsToListen
+	//TODO: Probably remove the partition part? (i.e., the *.)
+	for _, bucket := range bucketsToListen {
+		sendCh.QueueBind(queue.Name, "*."+bucket, exchangeName, false, nil)
 	}
 	//We also need to listen to stable clocks.
 	//TODO: Some kind of filtering for this
@@ -79,21 +85,14 @@ func CreateRemoteConnStruct(partitionsToListen []uint64, replicaID int64) (remot
 		return nil, err
 	}
 
-	//initializing gob. Need to register all types which will be used as interface implementations
-	gob.Register(clocksi.DummyTs)
-	for _, crdt := range crdt.DummyCRDTs {
-		args := crdt.GetPossibleDownstreamTypes()
-		for _, arg := range args {
-			gob.Register(arg)
-		}
-	}
-
 	remote = &RemoteConn{
-		sendCh:       sendCh,
-		conn:         conn,
-		recCh:        recCh,
-		listenerChan: make(chan ReplicatorMsg, defaultListenerSize),
-		replicaID:    replicaID,
+		sendCh:           sendCh,
+		conn:             conn,
+		recCh:            recCh,
+		listenerChan:     make(chan ReplicatorMsg, defaultListenerSize),
+		replicaID:        replicaID,
+		holdOperations:   make(map[int64]*HoldOperations),
+		nBucketsToListen: len(bucketsToListen),
 	}
 	go remote.startReceiver()
 	return
@@ -113,17 +112,34 @@ func (remote *RemoteConn) SendPartTxn(request *NewReplicatorRequest) {
 			tools.FancyWarnPrint(tools.REMOTE_PRINT, remote.replicaID, "Downstream args:", upd, "type:", reflect.TypeOf(upd.UpdateArgs))
 		}
 	}
-	protobuf := createProtoReplicatePart(request)
-	data, err := proto.Marshal(protobuf)
-	if err != nil {
-		tools.FancyErrPrint(tools.REMOTE_PRINT, remote.replicaID, "Failed to generate bytes of partTxn request to send. Error:", err)
+
+	//We need to send one message per bucket. Note that we're sending operations out of order here - this might be relevant later on!
+	bucketOps := make(map[string][]UpdateObjectParams)
+	for _, upd := range request.Upds {
+		entry, hasEntry := bucketOps[upd.KeyParams.Bucket]
+		if !hasEntry {
+			entry = make([]UpdateObjectParams, 0, len(request.Upds))
+		}
+		entry = append(entry, upd)
+		bucketOps[upd.KeyParams.Bucket] = entry
+		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Entry upds:", entry)
+		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Map's entry upds:", bucketOps[upd.KeyParams.Bucket])
 	}
-	//TODO: Actually I need to separate this further into buckets (i.e., a msg per bucket). Sigh.
-	remote.sendCh.Publish(exchangeName, strconv.FormatInt(request.PartitionID, 10)+".*", false, false, amqp.Publishing{Body: data})
+
+	for bucket, upds := range bucketOps {
+		protobuf := createProtoReplicatePart(request.SenderID, request.PartitionID, request.Timestamp, upds)
+		data, err := proto.Marshal(protobuf)
+		if err != nil {
+			tools.FancyErrPrint(tools.REMOTE_PRINT, remote.replicaID, "Failed to generate bytes of partTxn request to send. Error:", err)
+		}
+		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Sending bucket ops to topic:", strconv.FormatInt(request.PartitionID, 10)+"."+bucket)
+		remote.sendCh.Publish(exchangeName, strconv.FormatInt(request.PartitionID, 10)+"."+bucket, false, false, amqp.Publishing{Body: data})
+		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Finished sending bucket ops to topic:", strconv.FormatInt(request.PartitionID, 10)+"."+bucket)
+	}
 }
 
 func (remote *RemoteConn) SendStableClk(ts int64) {
-	tools.FancyDebugPrint(tools.REMOTE_PRINT, remote.replicaID, "Sending stable clk:", ts)
+	tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Sending stable clk:", ts)
 	protobuf := createProtoStableClock(remote.replicaID, ts)
 	data, err := proto.Marshal(protobuf)
 	if err != nil {
@@ -150,46 +166,110 @@ func (remote *RemoteConn) SendReplicatorRequest(request *NewReplicatorRequest) {
 //This should not be called externally.
 func (remote *RemoteConn) startReceiver() {
 	for data := range remote.recCh {
-		//This code duplication can be avoided once I remove these messages
+		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Received something!")
+		//TODO: Maybe analyze data.routingKey to avoid decoding the protobuf if it was sent by this own replica? RoutingKey no longer has information about the sender though...
 		if data.RoutingKey == clockTopic {
-			protobuf := &ProtoStableClock{}
-			err := proto.Unmarshal(data.Body, protobuf)
-			if err != nil {
-				tools.FancyErrPrint(tools.REMOTE_PRINT, remote.replicaID, "Failed to decode bytes of received stableClock. Error:", err)
-			}
-			request := protoToStableClock(protobuf)
-			//remote.decBuf.Reset()
-			tools.FancyDebugPrint(tools.REMOTE_PRINT, remote.replicaID, "Received remote stableClock:", *request)
-			//TODO: Avoid receiving own messages?
-			if request.SenderID == remote.replicaID {
-				tools.FancyDebugPrint(tools.REMOTE_PRINT, remote.replicaID, "Ignored received stableClock as it was sent by myself.")
-			} else {
-				remote.listenerChan <- request
-			}
+			remote.handleReceivedStableClock(data.Body)
 		} else {
-			//TODO: Maybe analyze data.routingKey to avoid decoding the protobuf if it was sent by this own replica?
-			protobuf := &ProtoReplicatePart{}
-			err := proto.Unmarshal(data.Body, protobuf)
-			if err != nil {
-				tools.FancyErrPrint(tools.REMOTE_PRINT, remote.replicaID, "Failed to decode bytes of received request. Error:", err)
-			}
-			request := protoToReplicatorRequest(protobuf)
-			//remote.decBuf.Reset()
-			tools.FancyDebugPrint(tools.REMOTE_PRINT, remote.replicaID, "Received remote request:", *request)
-			if len(request.Upds) > 0 && request.SenderID != remote.replicaID {
-				tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Actually received txns from other replicas.")
-				for _, upd := range request.Upds {
-					tools.FancyWarnPrint(tools.REMOTE_PRINT, remote.replicaID, "Received downstream args:", upd, "type:", reflect.TypeOf(upd.UpdateArgs))
-				}
-			}
-			if request.SenderID != remote.replicaID {
-				remote.listenerChan <- request
-			} else {
-				tools.FancyDebugPrint(tools.REMOTE_PRINT, remote.replicaID, "Ignored request from self.")
-			}
-			//tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "My replicaID:", remote.replicaID, "senderID:", request.SenderID)
+			remote.handleReceivedOps(data.Body)
 		}
 	}
+}
+
+func (remote *RemoteConn) handleReceivedOps(data []byte) {
+	protobuf := &ProtoReplicatePart{}
+	err := proto.Unmarshal(data, protobuf)
+	if err != nil {
+		tools.FancyErrPrint(tools.REMOTE_PRINT, remote.replicaID, "Failed to decode bytes of received request. Error:", err)
+	}
+	request := protoToReplicatorRequest(protobuf)
+	//remote.decBuf.Reset()
+	tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Received remote request:", *request)
+	if len(request.Upds) > 0 && request.SenderID != remote.replicaID {
+		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Actually received txns from other replicas.")
+		for _, upd := range request.Upds {
+			tools.FancyWarnPrint(tools.REMOTE_PRINT, remote.replicaID, "Received downstream args:", upd, "type:", reflect.TypeOf(upd.UpdateArgs))
+		}
+	}
+	if request.SenderID != remote.replicaID {
+		holdOps, hasHold := remote.holdOperations[remote.replicaID]
+		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Processing received remote transactions.")
+		if !hasHold {
+			//Initial case
+			tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Initial case - Creating hold for remote ops.")
+			remote.holdOperations[request.SenderID] = remote.buildHoldOperations(request)
+		} else if holdOps.partitionID == request.PartitionID {
+			//Hold the received operations
+			tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Adding remote ops to hold.")
+			holdOps.lastRecUpds = append(holdOps.lastRecUpds, request)
+			holdOps.nOpsSoFar += len(request.Upds)
+		} else {
+			//This request corresponds to a different partition from the one we have cached. As such, we can send the cached partition's updates
+			tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Different partitions - sending previous ops to replicator and creating hold for the ones received now.")
+			reqToSend := remote.getMergedReplicatorRequest(holdOps, remote.replicaID)
+			remote.holdOperations[request.SenderID] = remote.buildHoldOperations(request)
+			remote.listenerChan <- reqToSend
+		}
+	} else {
+		tools.FancyDebugPrint(tools.REMOTE_PRINT, remote.replicaID, "Ignored request from self.")
+	}
+	//tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "My replicaID:", remote.replicaID, "senderID:", request.SenderID)
+}
+
+func (remote *RemoteConn) handleReceivedStableClock(data []byte) {
+	protobuf := &ProtoStableClock{}
+	err := proto.Unmarshal(data, protobuf)
+	if err != nil {
+		tools.FancyErrPrint(tools.REMOTE_PRINT, remote.replicaID, "Failed to decode bytes of received stableClock. Error:", err)
+	}
+	clkReq := protoToStableClock(protobuf)
+	tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Received remote stableClock:", *clkReq)
+	//TODO: Avoid receiving own messages?
+	if clkReq.SenderID == remote.replicaID {
+		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Ignored received stableClock as it was sent by myself.")
+	} else {
+		//We also need to send a request with the last partition ops, if there's any
+		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Processing received stableClock.")
+		holdOperations, hasOps := remote.holdOperations[clkReq.SenderID]
+		if hasOps {
+			tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Merging previous requests before sending stableClock to replicator.")
+			partReq := remote.getMergedReplicatorRequest(holdOperations, clkReq.SenderID)
+			remote.listenerChan <- partReq
+		} else {
+			tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "No previous request.")
+		}
+		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Sending stableClock to replicator.")
+		remote.listenerChan <- clkReq
+	}
+}
+
+func (remote *RemoteConn) getMergedReplicatorRequest(holdOps *HoldOperations, replicaID int64) (request *NewReplicatorRequest) {
+	tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Merging received replicator requests")
+	request = &NewReplicatorRequest{
+		PartitionID: holdOps.partitionID,
+		SenderID:    replicaID,
+		Timestamp:   holdOps.lastRecUpds[0].Timestamp,
+		Upds:        make([]UpdateObjectParams, 0, holdOps.nOpsSoFar),
+	}
+	for _, reqs := range holdOps.lastRecUpds {
+		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Merging upds:", reqs.Upds)
+		request.Upds = append(request.Upds, reqs.Upds...)
+	}
+	delete(remote.holdOperations, replicaID)
+	tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Upds in merged request:", request.Upds)
+	return
+}
+
+func (remote *RemoteConn) buildHoldOperations(request *NewReplicatorRequest) (holdOps *HoldOperations) {
+	holdOps = &HoldOperations{
+		lastRecUpds: make([]*NewReplicatorRequest, 1, remote.nBucketsToListen),
+		partitionID: request.PartitionID,
+		nOpsSoFar:   len(request.Upds),
+	}
+	holdOps.lastRecUpds[0] = request
+	tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Hold after creation:", *holdOps)
+	tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Ops of request added to hold:", *holdOps.lastRecUpds[0])
+	return
 }
 
 //This should not be called externally.
@@ -217,6 +297,9 @@ func (remote *RemoteConn) startReceiver() {
 */
 
 func (remote *RemoteConn) GetNextRemoteRequest() (request ReplicatorMsg) {
+	//Wait until all operations for a partition arrive. We can detect this in two ways:
+	//1st - the next operation we receive is for a different partition
+	//2nd - the next operation is a clock update
 	return <-remote.listenerChan
 }
 
