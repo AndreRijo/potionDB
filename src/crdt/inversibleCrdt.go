@@ -2,7 +2,6 @@ package crdt
 
 import (
 	"clocksi"
-	"fmt"
 )
 
 type InversibleCRDT interface {
@@ -103,7 +102,6 @@ func (crdt *genericInversibleCRDT) rebuildCRDTToVersion(targetTs clocksi.Timesta
 	var i int
 	//Go back in history until we find a version in which every entry is <= than targetTs.
 	for i = len(crdt.history) - 1; i >= 0 && !currTs.IsLowerOrEqual(targetTs); i-- {
-		fmt.Println((*crdt.history[i].ts).ToString())
 		for _, effect := range crdt.history[i].effects {
 			undoEffectFunc(effect)
 		}
@@ -113,6 +111,11 @@ func (crdt *genericInversibleCRDT) rebuildCRDTToVersion(targetTs clocksi.Timesta
 	}
 	//We didn't undo the history to which i points atm
 	i++
+	//This can happen in the case in which there has been commits in this CRDT's partition but without this CRDT being modified by those commits
+	//In this case, we just need to return the state as it is.
+	if i == len(crdt.history) {
+		return
+	}
 	canStop := false
 	//Go forward in history and re-apply only the relevant operations...
 	//Note that we might have to stop in a timestamp before targetTs. Example: history has [1], [4] (upds with ts [2], [3] was in other CRDTs) and targetTs is [3]

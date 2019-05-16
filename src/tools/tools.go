@@ -25,14 +25,15 @@ const (
 
 var (
 	disabledDebugs = map[string]struct{}{
-		PROTO_PRINT: {},
-		MAT_PRINT:   {},
-		//TM_PRINT:       {},
+		PROTO_PRINT:    {},
+		MAT_PRINT:      {},
+		TM_PRINT:       {},
 		LOG_PRINT:      {},
 		REPL_PRINT:     {},
 		REMOTE_PRINT:   {},
 		PROTOLIB_PRINT: {},
 	}
+	allOutputDisabled = true
 )
 
 func CheckErr(msg string, err error) {
@@ -54,24 +55,32 @@ func ReadFromNetwork(nBytes int, conn net.Conn) (sizeBuf []byte) {
 
 //Prints a msg to stdout with a prefix of who generated the message and the indication that it is a debug message
 func FancyDebugPrint(src string, replicaID int64, msgs ...interface{}) {
-	if _, has := disabledDebugs[src]; !has {
-		fancyPrint(DEBUG, src, replicaID, msgs)
+	if !allOutputDisabled {
+		if _, has := disabledDebugs[src]; !has {
+			fancyPrint(DEBUG, src, replicaID, msgs)
+		}
 	}
 }
 
 //Prints a msg to stdout with a prefix of who generated the message and the indication that it is an info message
 func FancyInfoPrint(src string, replicaID int64, msgs ...interface{}) {
-	fancyPrint(INFO, src, replicaID, msgs)
+	if !allOutputDisabled {
+		fancyPrint(INFO, src, replicaID, msgs)
+	}
 }
 
 //Prints a msg to stdout with a prefix of who generated the message and the indication that it is a warning message
 func FancyWarnPrint(src string, replicaID int64, msgs ...interface{}) {
-	fancyPrint(WARNING, src, replicaID, msgs)
+	if !allOutputDisabled {
+		fancyPrint(WARNING, src, replicaID, msgs)
+	}
 }
 
 //Prints a msg to stdout with a prefix of who generated the message and the indication that it is an error message
 func FancyErrPrint(src string, replicaID int64, msgs ...interface{}) {
-	fancyPrint(ERROR, src, replicaID, msgs)
+	if !allOutputDisabled {
+		fancyPrint(ERROR, src, replicaID, msgs)
+	}
 }
 
 func fancyPrint(typeMsg string, src string, replicaID int64, msgs []interface{}) {

@@ -13,7 +13,7 @@ type Replicator struct {
 	txnCache    map[int][]PairClockUpdates //int: partitionID
 	lastSentClk clocksi.Timestamp
 	//receiveReplChan chan ReplicatorRequest
-	remoteConn *RemoteConn
+	remoteConn *RemoteGroup
 	started    bool
 	replicaID  int64
 }
@@ -63,7 +63,8 @@ func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, par
 		//remoteConn, err := CreateRemoteConnStruct(partitionIDs, replicaID)
 		bucketsToListen := make([]string, 1)
 		bucketsToListen[0] = "*"
-		remoteConn, err := CreateRemoteConnStruct(bucketsToListen, replicaID)
+		//remoteConn, err := CreateRemoteGroupStruct(myDefaultIp, defaultIpList, bucketsToListen, replicaID)
+		remoteConn, err := CreateRemoteGroupStruct(bucketsToListen, replicaID)
 		//TODO: Not ignore err
 		ignore(err)
 		repl.remoteConn = remoteConn

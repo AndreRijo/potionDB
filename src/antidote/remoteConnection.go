@@ -27,21 +27,24 @@ type HoldOperations struct {
 }
 
 const (
-	protocol            = "amqp://"
-	ip                  = "guest:guest@localhost:"
-	port                = "5672/"
-	exchangeName        = "objRepl"
-	exchangeType        = "topic"
-	defaultListenerSize = 100
-	clockTopic          = "clk"
+	protocol = "amqp://"
+	//ip                  = "guest:guest@localhost:"
+	prefix = "guest:guest@"
+	//port         = "5672/"
+	exchangeName = "objRepl"
+	exchangeType = "topic"
+	//Go back to using this to buffer requests if we stop using remoteGroup
+	//defaultListenerSize = 100
+	clockTopic = "clk"
 )
 
 //Topics (i.e., queue filters): partitionID.bucket
 //There's one queue per replica. Each replica's queue will receive messages from ALL other replicas, as long as the topics match the ones
 //that were binded to the replica's queue.
-
-func CreateRemoteConnStruct(bucketsToListen []string, replicaID int64) (remote *RemoteConn, err error) {
-	conn, err := amqp.Dial(protocol + ip + port)
+//Ip includes both ip and port in format: ip:port
+func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int64) (remote *RemoteConn, err error) {
+	//conn, err := amqp.Dial(protocol + prefix + ip + port)
+	conn, err := amqp.Dial(protocol + prefix + ip)
 	if err != nil {
 		tools.FancyWarnPrint(tools.REMOTE_PRINT, replicaID, "failed to open connection to rabbitMQ:", err)
 		return nil, err
@@ -86,10 +89,11 @@ func CreateRemoteConnStruct(bucketsToListen []string, replicaID int64) (remote *
 	}
 
 	remote = &RemoteConn{
-		sendCh:           sendCh,
-		conn:             conn,
-		recCh:            recCh,
-		listenerChan:     make(chan ReplicatorMsg, defaultListenerSize),
+		sendCh: sendCh,
+		conn:   conn,
+		recCh:  recCh,
+		//listenerChan:     make(chan ReplicatorMsg, defaultListenerSize),
+		listenerChan:     make(chan ReplicatorMsg),
 		replicaID:        replicaID,
 		holdOperations:   make(map[int64]*HoldOperations),
 		nBucketsToListen: len(bucketsToListen),
@@ -192,7 +196,7 @@ func (remote *RemoteConn) handleReceivedOps(data []byte) {
 		}
 	}
 	if request.SenderID != remote.replicaID {
-		holdOps, hasHold := remote.holdOperations[remote.replicaID]
+		holdOps, hasHold := remote.holdOperations[request.SenderID]
 		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Processing received remote transactions.")
 		if !hasHold {
 			//Initial case
@@ -206,7 +210,7 @@ func (remote *RemoteConn) handleReceivedOps(data []byte) {
 		} else {
 			//This request corresponds to a different partition from the one we have cached. As such, we can send the cached partition's updates
 			tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Different partitions - sending previous ops to replicator and creating hold for the ones received now.")
-			reqToSend := remote.getMergedReplicatorRequest(holdOps, remote.replicaID)
+			reqToSend := remote.getMergedReplicatorRequest(holdOps, request.SenderID)
 			remote.holdOperations[request.SenderID] = remote.buildHoldOperations(request)
 			remote.listenerChan <- reqToSend
 		}

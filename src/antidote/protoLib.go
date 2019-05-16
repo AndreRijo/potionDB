@@ -178,6 +178,14 @@ func CreateStaticReadObjs(readParams []ReadObjectParams) (protobuf *ApbStaticRea
 	return
 }
 
+func CreateReadObjsFromArray(transId []byte, readParams []ReadObjectParams) (protobuf *ApbReadObjects) {
+	protobuf = &ApbReadObjects{
+		TransactionDescriptor: transId,
+		Boundobjects:          createBoundObjectsArray(readParams),
+	}
+	return
+}
+
 func createBoundObjectsArray(readParams []ReadObjectParams) (protobufs []*ApbBoundObject) {
 	protobufs = make([]*ApbBoundObject, len(readParams))
 	for i, param := range readParams {
@@ -200,6 +208,14 @@ func CreateStaticUpdateObjs(updates []UpdateObjectParams) (protobuf *ApbStaticUp
 	protobuf = &ApbStaticUpdateObjects{
 		Transaction: CreateStartTransaction(nil),
 		Updates:     createUpdateOps(updates),
+	}
+	return
+}
+
+func CreateUpdateObjsFromArray(transId []byte, updates []UpdateObjectParams) (protobuf *ApbUpdateObjects) {
+	protobuf = &ApbUpdateObjects{
+		TransactionDescriptor: transId,
+		Updates:               createUpdateOps(updates),
 	}
 	return
 }

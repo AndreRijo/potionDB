@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"math/rand"
 	"strings"
 	"time"
 )
@@ -54,6 +55,8 @@ type Timestamp interface {
 	ToString() (tsString string)
 	//Gets a representation of this clock that is safe to use in GO maps
 	GetMapKey() (key TimestampKey)
+	//Performs a deep copy of the current timestamp and returns the copy
+	Copy() (copyTs Timestamp)
 }
 
 type ClockSiTimestamp struct {
@@ -73,7 +76,8 @@ const (
 	ConcurrentTs TsResult = 3
 
 	//Specific to clocksi implementation
-	entrySize = 8
+	entrySize    = 8
+	randomFactor = 500 //max value that can be added to the timestamp to avoid collisions
 )
 
 var (
@@ -106,7 +110,16 @@ func (ts ClockSiTimestamp) NextTimestamp(id int64) (newTs Timestamp) {
 	for i, value := range ts.VectorClock {
 		newVc[i] = value
 	}
-	newVc[id] = time.Now().UTC().UnixNano()
+	newValue := time.Now().UTC().UnixNano()
+	//Add a small random value to avoid equal timestamps
+	newValue += rand.Int63n(randomFactor)
+	//In case we ask two timestamps in a very small window, this new value might be <= than the previous.
+	//So, in that case, add again a random factor.
+	if newValue < newVc[id] {
+		newVc[id] = newVc[id] + rand.Int63n(randomFactor)
+	} else {
+		newVc[id] = newValue
+	}
 	return ClockSiTimestamp{VectorClock: newVc}
 
 }
@@ -379,4 +392,12 @@ func (ts ClockSiTimestamp) GetMapKey() (key TimestampKey) {
 		builder.WriteString(fmt.Sprint(value, ","))
 	}
 	return builder.String()
+}
+
+func (ts ClockSiTimestamp) Copy() (copyTs Timestamp) {
+	copySiTS := ClockSiTimestamp{VectorClock: make(map[int64]int64)}
+	for key, value := range ts.VectorClock {
+		copySiTS.VectorClock[key] = value
+	}
+	return copySiTS
 }

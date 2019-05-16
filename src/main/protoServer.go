@@ -12,6 +12,7 @@ import (
 	"bufio"
 	"clocksi"
 	"crdt"
+	"flag"
 	"fmt"
 	rand "math/rand"
 	"net"
@@ -30,9 +31,20 @@ var (
 
 func main() {
 
-	fmt.Println("Port?")
-	portString, _ := in.ReadString('\n')
-	portString = strings.Trim(portString, "\n")
+	configFolder := flag.String("config", "default", "sub-folder in configs folder that contains the configuration files to be used.")
+	flag.Parse()
+	configs := &tools.ConfigLoader{}
+	configs.LoadConfigs(*configFolder)
+
+	/*
+		fmt.Println("Port?")
+		portString, _ := in.ReadString('\n')
+		portString = strings.Trim(portString, "\n")
+		rand.Seed(time.Now().UTC().UnixNano())
+		id, _ := strconv.ParseInt(portString, 0, 64)
+	*/
+
+	portString := configs.GetConfig("protoPort")
 	rand.Seed(time.Now().UTC().UnixNano())
 	id, _ := strconv.ParseInt(portString, 0, 64)
 
@@ -52,11 +64,13 @@ func main() {
 		}
 	*/
 
-	server, err := net.Listen("tcp", "127.0.0.1:"+strings.TrimSpace(portString))
+	//server, err := net.Listen("tcp", "127.0.0.1:"+strings.TrimSpace(portString))
+	//For docker:
+	server, err := net.Listen("tcp", "0.0.0.0:"+strings.TrimSpace(portString))
 
 	//server, err := net.Listen("tcp", "127.0.0.1:8087")
 	tools.CheckErr(tools.PORT_ERROR, err)
-	fmt.Println("PotionDB started.")
+	fmt.Println("PotionDB started at port", portString)
 
 	//Stop listening to port on shutdown
 	defer server.Close()
@@ -88,61 +102,61 @@ func processConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID
 		//TODO: Handle when client breaks connection or sends invalid data
 		//Possible invalid data case (e.g.): sends code for "StaticUpdateObjs" but instead sends a protobuf of another type (e.g: StartTrans)
 		//Read protobuf
-		fmt.Println("Waiting for client's request...")
+		tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Waiting for client's request...")
 		protoType, protobuf, err := antidote.ReceiveProto(conn)
 		//This works in MacOS, but not on windows. For now we'll add any error here
 		//if err == io.EOF
 		if err != nil {
-			fmt.Println("Connection closed by client.")
+			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Connection closed by client.")
 			tmChan <- antidote.TransactionManagerRequest{Args: antidote.TMConnLostArgs{}}
 			return
 		}
 		tools.CheckErr(tools.NETWORK_READ_ERROR, err)
 		switch protoType {
 		case antidote.ConnectReplica:
-			tools.FancyInfoPrint(tools.INFO, replicaID, "Received proto of type ApbConnectReplica")
+			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbConnectReplica")
 			replyType = antidote.ConnectReplicaReply
 			reply = handleReplicaConn(protobuf.(*antidote.ApbConnectReplica), tmChan)
 		case antidote.ConnectReplicaReply:
-			tools.FancyInfoPrint(tools.INFO, replicaID, "Received proto of type ApbConnectReplicaReply")
+			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbConnectReplicaReply")
 			handleReplicaConnReply(protobuf.(*antidote.ApbConnectReplicaResp), tmChan)
 			//Don't need to send any reply
 			continue
 		case antidote.ReadObjs:
-			fmt.Println("Received proto of type ApbReadObjects")
+			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbReadObjects")
 			replyType = antidote.ReadObjsReply
 			reply = handleReadObjects(protobuf.(*antidote.ApbReadObjects), tmChan, clientId)
 		case antidote.UpdateObjs:
-			fmt.Println("Received proto of type ApbUpdateObjects")
+			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbUpdateObjects")
 			//TODO: Check what antidote replies on this case
 			replyType = antidote.OpReply
 			reply = handleUpdateObjects(protobuf.(*antidote.ApbUpdateObjects), tmChan, clientId)
 		case antidote.StartTrans:
-			fmt.Println("Received proto of type ApbStartTransaction")
+			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbStartTransaction")
 			replyType = antidote.StartTransReply
 			reply = handleStartTxn(protobuf.(*antidote.ApbStartTransaction), tmChan, clientId)
 		case antidote.AbortTrans:
-			fmt.Println("Received proto of type ApbAbortTransaction")
+			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbAbortTransaction")
 			//TODO: Check what antidote replies on this case
 			replyType = antidote.CommitTransReply
 			reply = handleAbortTxn(protobuf.(*antidote.ApbAbortTransaction), tmChan, clientId)
 		case antidote.CommitTrans:
-			fmt.Println("Received proto of type ApbCommitTransaction")
+			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbCommitTransaction")
 			replyType = antidote.CommitTransReply
 			reply = handleCommitTxn(protobuf.(*antidote.ApbCommitTransaction), tmChan, clientId)
 		case antidote.StaticUpdateObjs:
-			fmt.Println("Received proto of type ApbStaticUpdateObjects")
+			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbStaticUpdateObjects")
 			replyType = antidote.CommitTransReply
 			reply = handleStaticUpdateObjects(protobuf.(*antidote.ApbStaticUpdateObjects), tmChan, clientId)
 		case antidote.StaticReadObjs:
-			fmt.Println("Received proto of type ApbStaticReadObjects")
+			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbStaticReadObjects")
 			replyType = antidote.StaticReadObjsReply
 			reply = handleStaticReadObjects(protobuf.(*antidote.ApbStaticReadObjects), tmChan, clientId)
 		default:
-			fmt.Println("Received unknown proto, ignored... sort of")
+			tools.FancyErrPrint(tools.PROTO_PRINT, replicaID, "Received unknown proto, ignored... sort of")
 		}
 		//TODO: Handle errors that may be returned due to incorrect parameters/internal errors
-		fmt.Println("Sending reply proto")
+		tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Sending reply proto")
 		antidote.SendProto(replyType, reply, conn)
 	}
 }

@@ -5,7 +5,7 @@ import (
 	"crdt"
 	fmt "fmt"
 	math "math"
-	"reflect"
+	"os"
 	"tools"
 
 	hashFunc "github.com/twmb/murmur3"
@@ -102,18 +102,19 @@ type MatRequestType byte
 type partitionData struct {
 	//db                    map[uint64]crdt.CRDT //CRDT database of this partition
 	db                    map[uint64]VersionManager
-	stableVersion         clocksi.Timestamp //latest commited timestamp
+	stableVersion         clocksi.Timestamp //latest commited timestamp.
 	twoSmallestPendingTxn [2]*TransactionId //Contains the two transactionIds that have been prepared with the smallest timestamps.
 	//Idea: avoids the issue of the txn we're verying being the one with the lowest proposed timestamp (in this case, check the 2nd entry)
 	highestPendingTs    clocksi.Timestamp                      //Contains the highest timestamp that was prepared. Used to check if a read can be executed or not.
 	pendingOps          map[TransactionId][]UpdateObjectParams //pending transactions waiting for commit
 	suggestedTimestamps map[TransactionId]clocksi.Timestamp    //map of transactionId -> timestamp suggested on first write request for transactionId
-	commitedWaitToApply map[TransactionId]clocksi.Timestamp    //set of transactionId -> commit timestamp of commited transactions that couldn't be applied due to pending versions
+	commitedWaitToApply map[TransactionId]clocksi.Timestamp    //map of transactionId -> commit timestamp of commited transactions that couldn't be applied due to pending versions
 	//TODO: Choose a better option to hold pending reads? Checking the whole map takes a long time...
 	pendingReads  map[clocksi.TimestampKey]*PendingReads //pending reads that require a more recent version than stableVersion
 	log           Logger                                 //logs the operations of txns that were commited in this partition
 	remoteWaiting map[int64][]PairClockUpdates           //remote transactions that are waiting for other remote transactions to be applied. Int: replicaID
 	replicaID     int64
+	partitionID   int64 //Useful for debugging
 }
 
 type BoolErrorPair struct {
@@ -156,8 +157,9 @@ const (
 
 	//TODO: Maybe each bucket should correspond to one goroutine...?
 	//Number of goroutines in the pool to access the database. Each goroutine has a (automatically assigned) range of keys that it can access.
-	nGoRoutines   uint64 = 8
-	readQueueSize        = 10 //Initial size of the read queue for pending reads (partitionData.pendingReads)
+	nGoRoutines      uint64 = 8
+	readQueueSize           = 10 //Initial size of the read queue for pending reads (partitionData.pendingReads)
+	requestQueueSize        = 10 //Size for the channel that handles requests
 )
 
 var (
@@ -289,9 +291,10 @@ func listenForTransactionManagerRequests(id uint64, logger Logger, replicaID int
 		log:                 logger,
 		remoteWaiting:       make(map[int64][]PairClockUpdates),
 		replicaID:           replicaID,
+		partitionID:         int64(id),
 	}
-	//Listens to the channel and processes requests
-	channel := make(chan MaterializerRequest)
+	//Listens to the channel and processes requests. Has a buffer since requests may be received from multiple sources.
+	channel := make(chan MaterializerRequest, requestQueueSize)
 	materializer.channels[id] = channel
 	for {
 		request := <-channel
@@ -336,11 +339,11 @@ func handleMatRead(request MaterializerRequest, partitionData *partitionData) {
 }
 
 func auxiliaryRead(readArgs MatReadCommonArgs, txnId TransactionId, partitionData *partitionData) {
-	tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "auxiliaryRead. ReadTS:", readArgs.Timestamp, "Stable timestamp:", partitionData.stableVersion)
 	if canRead, readLatest := canRead(readArgs.Timestamp, partitionData); canRead {
 		applyReadAndReply(&readArgs, readLatest, readArgs.Timestamp, txnId, partitionData)
 	} else {
 		//Queue the request.
+		//##fmt.Println(partitionData.partitionID, "Warning - queuing read")
 		tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Warning - Queuing read")
 		queue, exists := partitionData.pendingReads[readArgs.Timestamp.GetMapKey()]
 		if !exists {
@@ -357,18 +360,23 @@ func auxiliaryRead(readArgs MatReadCommonArgs, txnId TransactionId, partitionDat
 
 func canRead(readTs clocksi.Timestamp, partitionData *partitionData) (canRead bool, readLatest bool) {
 	compResult := readTs.Compare(partitionData.stableVersion)
-	tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "canRead. Compare result:", compResult)
 	if compResult == clocksi.EqualTs {
+		//fmt.Printf("canRead - %s and %s are equal, thus canRead and readLatest.\n", readTs.ToString(), partitionData.stableVersion.ToString())
 		canRead, readLatest = true, true
 	} else if compResult == clocksi.LowerTs {
+		//fmt.Printf("canRead - %s is lower than %s, thus canRead and !readLatest.\n", readTs.ToString(), partitionData.stableVersion.ToString())
 		canRead, readLatest = true, false
 	} else if partitionData.twoSmallestPendingTxn[0] != nil &&
 		partitionData.suggestedTimestamps[*partitionData.twoSmallestPendingTxn[0]].IsLower(readTs) {
+		//fmt.Printf("canRead - pending ts %s is lower than read ts %s, thus !canRead and !readLatest.\n", partitionData.suggestedTimestamps[*partitionData.twoSmallestPendingTxn[0]].ToString(), readTs.ToString())
 		//There's a commit prepared with a timestamp lower than read's
 		canRead, readLatest = false, false
 	} else {
 		localTs := partitionData.stableVersion.NextTimestamp(partitionData.replicaID)
+		//fmt.Printf("canRead - else case, asking for next timestamp. New ts is %s, previous read is %s, stable is %s\n", localTs.ToString(), readTs.ToString(), partitionData.stableVersion.ToString())
+		//TODO: Can this be false when we consider concurrent replicas...?
 		if localTs.IsHigherOrEqual(readTs) {
+			//fmt.Println("canRead - generated timestamp is higher, thus canRead and readLatest\n")
 			canRead, readLatest = true, true
 		}
 	}
@@ -390,10 +398,8 @@ func applyReadAndReply(readArgs *MatReadCommonArgs, readLatest bool, readTs cloc
 	}
 	if readLatest {
 		state = obj.ReadLatest(readArgs.ReadArgs, pendingObjOps)
-		tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Reading latest for", hashKey, "state:", state)
 	} else {
 		state = obj.ReadOld(readArgs.ReadArgs, readTs, pendingObjOps)
-		tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Reading old for", hashKey, "state", state)
 	}
 
 	readArgs.ReplyChan <- state
@@ -478,6 +484,7 @@ func typecheckWrites(updates []UpdateObjectParams) (ok bool, err error) {
 func handleMatPrepare(request MaterializerRequest, partitionData *partitionData) {
 	prepareArgs := request.MatRequestArgs.(MatPrepareArgs)
 	auxiliaryStartTransaction(prepareArgs.TransactionId, partitionData)
+	//fmt.Println(partitionData.partitionID, "Prepared txn", prepareArgs.TransactionId, "with clock", partitionData.suggestedTimestamps[prepareArgs.TransactionId].ToString())
 	prepareArgs.ReplyChan <- partitionData.suggestedTimestamps[prepareArgs.TransactionId]
 }
 
@@ -497,18 +504,67 @@ func handleMatCommit(request MaterializerRequest, partitionData *partitionData) 
 		//Safe to commit
 		applyCommit(&commitArgs.TransactionId, &commitArgs.CommitTimestamp, partitionData)
 	} else {
-		//A transaction with smaller version is pending, so we need to queue this commit.
+		//A transaction with smaller version is pending, thus we queue this commit
+		partitionData.suggestedTimestamps[commitArgs.TransactionId] = commitArgs.CommitTimestamp
 		partitionData.commitedWaitToApply[commitArgs.TransactionId] = commitArgs.CommitTimestamp
+		//This might now be the highest pending timestamp
+		if commitArgs.CommitTimestamp.IsHigher(partitionData.highestPendingTs) {
+			partitionData.highestPendingTs = commitArgs.CommitTimestamp
+		}
+		//##fmt.Println(partitionData.partitionID, "Queue commit")
 		tools.FancyWarnPrint(tools.MAT_PRINT, partitionData.replicaID, "Warning - Queuing commit")
+
+		//Update smallestPendingTxns
+		//If this txn ID corresponds with twoSmallestPendingTxn[0], then it no longer is the smallest.
+		//In that case we need to update both entries. Also, we might be able to apply a pending commit.
+		//If this txn ID corresponds with twoSmallestPendingTxn[1], we only need to update the 2nd entry.
+		//Otherwise, no update is needed
+		if *partitionData.twoSmallestPendingTxn[0] == commitArgs.TransactionId {
+			partitionData.twoSmallestPendingTxn[0] = partitionData.twoSmallestPendingTxn[1]
+			updateSecondSmallestPendingTxn(partitionData)
+			//Check if now the transaction with smaller version can be executed.
+			//This may happen if the commit clock is higher than the suggested clock.
+			checkAndApplyPendingCommit(partitionData)
+		} else if *partitionData.twoSmallestPendingTxn[1] == commitArgs.TransactionId {
+			updateSecondSmallestPendingTxn(partitionData)
+		}
+
 	}
 }
 
 func canCommit(commitArgs MatCommitArgs, partitionData *partitionData) (canCommit bool) {
 	if commitArgs.TransactionId != *partitionData.twoSmallestPendingTxn[0] {
-		canCommit = commitArgs.CommitTimestamp.IsLower(partitionData.suggestedTimestamps[*partitionData.twoSmallestPendingTxn[0]])
+		//Is this ever false...?
+		/*
+			canCommit = commitArgs.CommitTimestamp.IsLower(partitionData.suggestedTimestamps[*partitionData.twoSmallestPendingTxn[0]])
+
+			if !canCommit {
+				if partitionData.suggestedTimestamps[*partitionData.twoSmallestPendingTxn[0]] == nil {
+					fmt.Println(partitionData.partitionID, "suggestedTimestamps is null for entry twoSmallestPendingTxn[0]!")
+				}
+				fmt.Printf("%d Can't commit because commit timestamp %s with txnID %d is higher than smallestPendingTxn's timestamp %s.\n", partitionData.partitionID,
+					commitArgs.CommitTimestamp.ToString(), commitArgs.TransactionId, partitionData.suggestedTimestamps[*partitionData.twoSmallestPendingTxn[0]].ToString())
+			}
+		*/
+		//##canCommit = commitArgs.CommitTimestamp.IsLower(partitionData.suggestedTimestamps[*partitionData.twoSmallestPendingTxn[0]])
+		//##if canCommit {
+		//##fmt.Printf("%d I hope to never see this.\n", partitionData.partitionID)
+		//##}
+		//##fmt.Printf("%d Can't commit because commit timestamp %s with txnID %d is higher than smallestPendingTxn's timestamp %s with txnID %d.\n", partitionData.partitionID,
+		//##commitArgs.CommitTimestamp.ToString(), commitArgs.TransactionId, partitionData.suggestedTimestamps[*partitionData.twoSmallestPendingTxn[0]].ToString(),
+		//##*partitionData.twoSmallestPendingTxn[0])
+		canCommit = false
 	} else {
 		//The txn we're verying is the one for which we proposed the lowest value. Check the 2nd lowest.
 		canCommit = partitionData.twoSmallestPendingTxn[1] == nil || commitArgs.CommitTimestamp.IsLower(partitionData.suggestedTimestamps[*partitionData.twoSmallestPendingTxn[1]])
+
+		//##if !canCommit {
+		//##fmt.Printf("%d Can't commit because commit timestamp %s with TxnID %d is higher than the 2nd smallestPendingTxn's timestamp %s with txnID %d.\n", partitionData.partitionID,
+		//##commitArgs.CommitTimestamp.ToString(), commitArgs.TransactionId, partitionData.suggestedTimestamps[*partitionData.twoSmallestPendingTxn[1]].ToString(),
+		//##*partitionData.twoSmallestPendingTxn[1])
+		//##fmt.Printf("twoSmallestPendingTxnIDs: 1st - %d, 2nd - %d.\n", *partitionData.twoSmallestPendingTxn[0], *partitionData.twoSmallestPendingTxn[1])
+		//##}
+
 	}
 	return
 }
@@ -517,31 +573,20 @@ func applyCommit(transactionId *TransactionId, commitTimestamp *clocksi.Timestam
 	downstreamUpds := applyUpdates(partitionData.pendingOps[*transactionId], commitTimestamp, partitionData)
 
 	updatePartitionDataWithCommit(transactionId, commitTimestamp, downstreamUpds, partitionData)
+	//fmt.Println(partitionData.partitionID, "Finished applying commit with ID", *transactionId)
 }
 
 func updatePartitionDataWithCommit(transactionId *TransactionId, commitTimestamp *clocksi.Timestamp, downstreamUpds *[]UpdateObjectParams, partitionData *partitionData) {
 	deleteTransactionMetadata(transactionId, partitionData)
-	//Transactions are commited in order, so this commit timestamp is always more recent than the previous stableVersion
-	partitionData.stableVersion = *commitTimestamp
-	//TODO: Delete
-	for _, upd := range *downstreamUpds {
-		switch typedUpd := upd.UpdateArgs.(type) {
-		case crdt.DownstreamRemoveAll:
-			tools.FancyWarnPrint(tools.MAT_PRINT, -1, "Sending request to log with a remove: ", typedUpd)
-		}
-	}
+	//To avoid concurrency conflicts between partitions we need to do a deep copy of the timestamp.
+	partitionData.stableVersion = (*commitTimestamp).Copy()
+
 	partitionData.log.SendLoggerRequest(LoggerRequest{
 		LogRequestArgs: LogCommitArgs{
 			TxnClk: commitTimestamp,
 			Upds:   downstreamUpds,
 		},
 	})
-	for _, upd := range *downstreamUpds {
-		switch typedUpd := upd.UpdateArgs.(type) {
-		case crdt.DownstreamRemoveAll:
-			tools.FancyWarnPrint(tools.MAT_PRINT, -1, "Sent request to log with a remove: ", typedUpd)
-		}
-	}
 
 	handlePendingCommits(partitionData)
 }
@@ -557,27 +602,22 @@ func handlePendingCommits(partitionData *partitionData) {
 	//Note that since commits are in order, the twoSmallestPendingTxn[0] was always the latest commit applied.
 	partitionData.twoSmallestPendingTxn[0] = partitionData.twoSmallestPendingTxn[1]
 	partitionData.twoSmallestPendingTxn[1] = nil
+	//tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Checking for pending commits")
 	//No further commits pending
 	if len(partitionData.suggestedTimestamps) == 0 {
+		//tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Nothing pending")
 		partitionData.highestPendingTs = nil
 	} else if len(partitionData.suggestedTimestamps) > 1 {
 		//Search for the now second smallest pending timestamp
-		var smallestTs clocksi.Timestamp = partitionData.highestPendingTs
-		for transId, ts := range partitionData.suggestedTimestamps {
-			if ts.IsLowerOrEqual(smallestTs) {
-				partitionData.twoSmallestPendingTxn[1] = &transId
-				smallestTs = ts
-			}
-		}
+		updateSecondSmallestPendingTxn(partitionData)
 	}
-	//Second step: check if the smallest version corresponds to a commited transaction that wasn't yet applied
-	if partitionData.twoSmallestPendingTxn[0] != nil {
-		nextCommitTs, isWaitingToApply := partitionData.commitedWaitToApply[*partitionData.twoSmallestPendingTxn[0]]
-		if isWaitingToApply {
-			//Third step: apply that transaction
-			applyCommit(partitionData.twoSmallestPendingTxn[0], &nextCommitTs, partitionData)
+	//Added for, delete
+	/*
+		for id, clk := range partitionData.commitedWaitToApply {
+			tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Pending id:", id, ". Pending clk:", clk.ToString())
 		}
-	}
+	*/
+	checkAndApplyPendingCommit(partitionData)
 	//Third step: apply pending reads
 	if len(partitionData.pendingReads) > 0 {
 		applyPendingReads(partitionData)
@@ -585,10 +625,63 @@ func handlePendingCommits(partitionData *partitionData) {
 	return
 }
 
+func updateSecondSmallestPendingTxn(partitionData *partitionData) {
+	//##fmt.Println(partitionData.partitionID, "Called updateSecondSmallestPendingTxn")
+	var smallestTs clocksi.Timestamp = partitionData.highestPendingTs
+	smallestFirst := partitionData.suggestedTimestamps[*partitionData.twoSmallestPendingTxn[0]]
+	var smallestId TransactionId = 0
+	for transId, ts := range partitionData.suggestedTimestamps {
+		//Actually this would be the same as <= && !=, since no ts can be smaller than smallestFirst.
+		if ts.IsLowerOrEqual(smallestTs) && ts.IsHigher(smallestFirst) {
+			//##fmt.Println(partitionData.partitionID, "Updating smallestTs")
+			smallestId = transId
+			smallestTs = ts
+		}
+	}
+	if smallestId != 0 {
+		partitionData.twoSmallestPendingTxn[1] = &smallestId
+	} else {
+		//No other txn is pending
+		partitionData.twoSmallestPendingTxn[1] = nil
+		//Debug
+		if len(partitionData.suggestedTimestamps) > 1 {
+			fmt.Println(partitionData.partitionID, "ERROR - len of suggested timestamps is > 1 yet the twoSmallestPendingTxn[1] couldn't be found!")
+			fmt.Println(partitionData.partitionID, "SmallestSuggestedTimestamp:", smallestFirst.ToString())
+			fmt.Println(partitionData.partitionID, "Value of smallestTs:", smallestTs.ToString())
+			for _, ts := range partitionData.suggestedTimestamps {
+				fmt.Println(partitionData.partitionID, "Found this suggestedTimestamp:", ts.ToString())
+				if ts.IsLowerOrEqual(smallestTs) {
+					fmt.Println(partitionData.partitionID, "It is lower than the smallestTs.")
+				}
+				if ts.IsHigher(smallestFirst) {
+					fmt.Println(partitionData.partitionID, "It is higher than the SmallestSuggestedTimestamp.")
+				}
+			}
+			os.Exit(1)
+		}
+	}
+}
+
+//Checks if the next smallest clock corresponds to a pending commit and, if it does, applies it
+func checkAndApplyPendingCommit(partitionData *partitionData) {
+	//Second step: check if the smallest version corresponds to a commited transaction that wasn't yet applied
+	if partitionData.twoSmallestPendingTxn[0] != nil {
+		nextCommitTs, isWaitingToApply := partitionData.commitedWaitToApply[*partitionData.twoSmallestPendingTxn[0]]
+		if isWaitingToApply {
+			//Third step: apply that transaction
+			//##fmt.Println(partitionData.partitionID, "Dequeued commit")
+			tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Dequeued commit")
+			applyCommit(partitionData.twoSmallestPendingTxn[0], &nextCommitTs, partitionData)
+		}
+	}
+}
+
 //downstreamUpds: key, CRDTType, bucket + downstream arguments of each update. This is what is sent to other replicas for them to apply the txn.
 func applyUpdates(updates []UpdateObjectParams, commitTimestamp *clocksi.Timestamp, partitionData *partitionData) (downstreamUpds *[]UpdateObjectParams) {
 	tmp := make([]UpdateObjectParams, len(updates))
 	downstreamUpds = &tmp
+	//Copy of timestamp to pass to downstream, in order to avoid conflits when updating the timestamp
+	copyTs := (*commitTimestamp).Copy()
 	for i, upd := range updates {
 		hashKey := getHash(getCombinedKey(upd.KeyParams))
 
@@ -601,10 +694,7 @@ func applyUpdates(updates []UpdateObjectParams, commitTimestamp *clocksi.Timesta
 			KeyParams:  upd.KeyParams,
 			UpdateArgs: obj.Update(upd.UpdateArgs),
 		}
-		//tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Downstream args:", (*downstreamUpds)[i].UpdateArgs)
-		tools.FancyWarnPrint(tools.MAT_PRINT, partitionData.replicaID, "Downstream args:", (*downstreamUpds)[i].UpdateArgs, "type:", reflect.TypeOf((*downstreamUpds)[i].UpdateArgs))
-		obj.Downstream(*commitTimestamp, (*downstreamUpds)[i].UpdateArgs)
-		tools.FancyWarnPrint(tools.MAT_PRINT, partitionData.replicaID, "Downstream args after applying downstream:", (*downstreamUpds)[i].UpdateArgs, "type:", reflect.TypeOf((*downstreamUpds)[i].UpdateArgs))
+		obj.Downstream(copyTs, (*downstreamUpds)[i].UpdateArgs)
 	}
 	return
 }
@@ -613,8 +703,11 @@ func applyPendingReads(partitionData *partitionData) {
 	for tsKey, pendingReads := range partitionData.pendingReads {
 		if canRead, readLatest := canRead(pendingReads.Timestamp, partitionData); canRead {
 			//Apply all reads of that transaction
+			//##fmt.Printf("%d Applying pending reads for txn with key %s. Number of reads: %d.\n", partitionData.partitionID, tsKey, len(pendingReads.Reads))
 			for _, readArgs := range pendingReads.Reads {
+				//##fmt.Println(partitionData.partitionID, "Applying pending read.")
 				applyReadAndReply(readArgs, readLatest, pendingReads.Timestamp, pendingReads.TransactionId, partitionData)
+				//##fmt.Println(partitionData.partitionID, "Finished applying pending read.")
 			}
 			delete(partitionData.pendingReads, tsKey)
 		}
@@ -633,7 +726,8 @@ func handleMatSafeClk(request MaterializerRequest, partitionData *partitionData)
 func handleMatRemoteTxn(request MaterializerRequest, partitionData *partitionData) {
 	tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Starting to handle remoteTxn")
 	remoteTxnArgs := request.MatRequestArgs.(MatRemoteTxnArgs)
-	if remoteTxnArgs.Timestamp.IsLowerOrEqualExceptFor(partitionData.stableVersion, partitionData.replicaID, remoteTxnArgs.ReplicaID) {
+	copyTs := remoteTxnArgs.Timestamp.Copy()
+	if copyTs.IsLowerOrEqualExceptFor(partitionData.stableVersion, partitionData.replicaID, remoteTxnArgs.ReplicaID) {
 		tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Remote txn clock is lower or equal. Upds:", remoteTxnArgs.Upds)
 		for _, upd := range remoteTxnArgs.Upds {
 			tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Downstreaming remote op", upd, "Args:", upd.UpdateArgs)
@@ -645,7 +739,7 @@ func handleMatRemoteTxn(request MaterializerRequest, partitionData *partitionDat
 				obj = initializeVersionManager(upd.CrdtType)
 				partitionData.db[hashKey] = obj
 			}
-			obj.Downstream(remoteTxnArgs.Timestamp, upd.UpdateArgs)
+			obj.Downstream(copyTs, upd.UpdateArgs)
 			tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Object after downstream:", obj, "hashkey:", hashKey)
 		}
 		tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Stable clk before:", partitionData.stableVersion)

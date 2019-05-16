@@ -2,8 +2,6 @@ package antidote
 
 import (
 	"clocksi"
-	"crdt"
-	"tools"
 )
 
 //TODO: Delete methods with string "old" in their name
@@ -30,18 +28,6 @@ type LogCommitArgs struct {
 	TxnClk *clocksi.Timestamp
 	Upds   *[]UpdateObjectParams //Should be downstream arguments
 }
-
-/*
-type LogOldNextClkArgs struct {
-	PreviousClk clocksi.Timestamp
-	ReplyChan   chan BoolTimestampPair
-}
-
-type LogOldTxnArgs struct {
-	TxnClk    clocksi.Timestamp
-	ReplyChan chan *[]UpdateObjectParams
-}
-*/
 
 type LogTxnArgs struct {
 	lastClock clocksi.Timestamp
@@ -71,16 +57,6 @@ const (
 func (args LogCommitArgs) GetRequestType() (requestType LogRequestType) {
 	return CommitLogRequest
 }
-
-/*
-func (args LogOldNextClkArgs) GetRequestType() (requestType LogRequestType) {
-	return NextClkOldLogRequest
-}
-
-func (args LogOldTxnArgs) GetRequestType() (requestType LogRequestType) {
-	return TxnOldLogRequest
-}
-*/
 
 func (args LogTxnArgs) GetRequestType() (requestType LogRequestType) {
 	return TxnLogRequest
@@ -131,26 +107,12 @@ func (logger *MemLogger) handleRequests() {
 			logger.handleCommitLogRequest(request.LogRequestArgs.(LogCommitArgs))
 		case TxnLogRequest:
 			logger.handleTxnLogRequest(request.LogRequestArgs.(LogTxnArgs))
-			/*
-				case NextClkOldLogRequest:
-					logger.handleNextClkOldLogRequest(request.LogRequestArgs.(LogOldNextClkArgs))
-				case TxnOldLogRequest:
-					logger.handleTxnOldLogRequest(request.LogRequestArgs.(LogOldTxnArgs))
-			*/
 		}
 	}
 }
 
 func (logger *MemLogger) handleCommitLogRequest(request LogCommitArgs) {
 	logger.log = append(logger.log, PairClockUpdates{clk: request.TxnClk, upds: request.Upds})
-
-	//TODO: Delete
-	for _, upd := range *request.Upds {
-		switch typedUpd := upd.UpdateArgs.(type) {
-		case crdt.DownstreamRemoveAll:
-			tools.FancyWarnPrint(tools.LOG_PRINT, int64(logger.partId), "Logging remove downstream:", typedUpd.Elems)
-		}
-	}
 }
 
 func (logger *MemLogger) handleTxnLogRequest(request LogTxnArgs) {
@@ -167,24 +129,3 @@ func (logger *MemLogger) handleTxnLogRequest(request LogTxnArgs) {
 	request.ReplyChan <- StableClkUpdatesPair{stableClock: stableClk, upds: txns}
 
 }
-
-/*
-func (logger *MemLogger) handleNextClkOldLogRequest(request LogOldNextClkArgs) {
-	//Compare request clk with the previous clk that was sent
-	clkCompare := request.PreviousClk.ComparePos(ReplicaID, *logger.log[logger.currLogPos].clk)
-
-	if clkCompare == clocksi.EqualTs && logger.currLogPos < len(logger.log) {
-		logger.currLogPos++
-		request.ReplyChan <- BoolTimestampPair{bool: true, Timestamp: *logger.log[logger.currLogPos].clk}
-	} else if clkCompare < clocksi.LowerTs {
-		request.ReplyChan <- BoolTimestampPair{bool: true, Timestamp: *logger.log[logger.currLogPos].clk}
-	} else {
-		//TODO: Request clock to materializer
-		request.ReplyChan <- BoolTimestampPair{bool: false, Timestamp: clocksi.DummyTs}
-	}
-}
-
-func (logger *MemLogger) handleTxnOldLogRequest(request LogOldTxnArgs) {
-	request.ReplyChan <- logger.log[logger.currLogPos].upds
-}
-*/

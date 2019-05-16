@@ -2,7 +2,6 @@ package crdt
 
 import (
 	"clocksi"
-	"fmt"
 	rand "math/rand"
 	"time"
 )
@@ -233,7 +232,7 @@ func (crdt *SetAWCrdt) getRemoveAllDownstreamArgs(elems []Element) (downstreamAr
 		uniqueMap[key] = crdt.elems[key].copy()
 	}
 	downstreamArgs = DownstreamRemoveAll{Elems: uniqueMap}
-	fmt.Println("[SETAWCRDT]Remove all downstream generated:", downstreamArgs)
+	//fmt.Println("[SETAWCRDT]Remove all downstream generated:", downstreamArgs)
 	return
 }
 
@@ -254,7 +253,7 @@ func (crdt *SetAWCrdt) applyDownstream(downstreamArgs UpdateArguments) (effect *
 	case *DownstreamRemoveAll:
 		effect = crdt.applyRemoveAll(opType.Elems)
 	}
-	fmt.Println("[SETAWCRDT]State after downstream: ", crdt.getState(nil))
+	//fmt.Println("[SETAWCRDT]State after downstream: ", crdt.getState(nil))
 	return
 }
 

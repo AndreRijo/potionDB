@@ -21,7 +21,7 @@ type CRDT interface {
 	GetPossibleDownstreamTypes() (possibleTypes []UpdateArguments)
 }
 
-//TODO: Whenever a new CRDT is added, add a dummy instance here. This is needed for remoteConnection.go
+//TODO: Whenever a new CRDT is added, add a dummy instance here. This is needed for remoteConnection.go. This might no longer be needed
 var (
 	DummyCRDTs = []CRDT{&SetAWCrdt{}, &CounterCrdt{}}
 )

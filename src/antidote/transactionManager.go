@@ -145,6 +145,7 @@ type TransactionId uint64
 type ongoingTxn struct {
 	TransactionId
 	partSet
+	debugID int //random ID just for debbuging purposes
 }
 
 type partSet map[uint64]struct{}
@@ -239,7 +240,8 @@ func (txnPartitions *ongoingTxn) reset() {
 /////*****************TRANSACTION MANAGER CODE***********************/////
 
 func Initialize(replicaID int64) (tm *TransactionManager) {
-	mat, loggers, partitionsIDs := InitializeMaterializer(replicaID)
+	//mat, loggers, partitionsIDs := InitializeMaterializer(replicaID)
+	mat, _, _ := InitializeMaterializer(replicaID)
 	tm = &TransactionManager{
 		mat: mat,
 		//remoteTxnChan: make(chan TMRemoteTxn),
@@ -254,9 +256,9 @@ func Initialize(replicaID int64) (tm *TransactionManager) {
 		replicator: &Replicator{},
 		replicaID:  replicaID,
 	}
-	tm.replicator.Initialize(tm, loggers, partitionsIDs, replicaID)
-	//go tm.handleRemoteTxnRequest()
-	go tm.handleRemoteMsgs()
+	//TODO: Uncomment
+	//tm.replicator.Initialize(tm, loggers, partitionsIDs, replicaID)
+	//go tm.handleRemoteMsgs()
 	return tm
 }
 
@@ -276,11 +278,6 @@ func (tm *TransactionManager) CreateClientHandler() (channel chan TransactionMan
 	return
 }
 
-/*
-func (tm *TransactionManager) SendRemoteTxnRequest(request TMRemoteTxn) {
-	tm.remoteTxnChan <- request
-}
-*/
 func (tm *TransactionManager) SendRemoteMsg(msg TMRemoteMsg) {
 	tm.remoteChan <- msg
 }
@@ -288,12 +285,13 @@ func (tm *TransactionManager) SendRemoteMsg(msg TMRemoteMsg) {
 func (tm *TransactionManager) listenForProtobufRequests(channel chan TransactionManagerRequest) {
 	stop := false
 	var txnPartitions *ongoingTxn = &ongoingTxn{}
+	txnPartitions.debugID = rand.Intn(10)
 	for !stop {
 		request := <-channel
 		stop = tm.handleTMRequest(request, txnPartitions)
 	}
 
-	fmt.Println("TransactionManager - connection lost, shutting down goroutine.")
+	tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "connection lost, shutting down goroutine for client.")
 }
 
 func (tm *TransactionManager) handleTMRequest(request TransactionManagerRequest,
@@ -323,14 +321,6 @@ func (tm *TransactionManager) handleTMRequest(request TransactionManagerRequest,
 	return
 }
 
-/*
-func (tm *TransactionManager) handleRemoteTxnRequest() {
-	for {
-		request := <-tm.remoteTxnChan
-		tm.applyRemoteTxn(request.ReplicaID, request.Upds, request.StableTs)
-	}
-}
-*/
 func (tm *TransactionManager) handleRemoteMsgs() {
 	for {
 		request := <-tm.remoteChan
@@ -376,31 +366,6 @@ func (tm *TransactionManager) handleStaticTMRead(request TransactionManagerReque
 		States:    states,
 		Timestamp: tsToUse,
 	}
-
-	/*
-		Algorithm:
-			First step: discover what timestamp to use
-				for each read
-					find channel;
-					if it is a new channel
-						ask for TS
-						if TS < previousTS
-							previousTS = TS
-							if previousTS < clientTS
-								panic for now (in future: put read on hold)
-					if allChannelsConsulted
-						break
-			Second step: create a read channel for each channel to use (on implementation a new channel is created for each read)
-				for each channel
-					create channel
-			Third step: perform read on smallest timestamp OR put on hold
-				for each read
-					send request
-					wait for state
-					//TODO: Paralelize the requests? This includes the TS ones
-			Four step: return states
-	*/
-
 }
 
 //TODO: Separate in parts?
@@ -490,6 +455,7 @@ func (tm *TransactionManager) handleStaticTMUpdate(request TransactionManagerReq
 
 //TODO: Group reads.
 func (tm *TransactionManager) handleTMRead(request TransactionManagerRequest) {
+	//++fmt.Println(tm.replicaID, "TM - Started handling read.")
 	readArgs := request.Args.(TMReadArgs)
 	tsToUse := request.Timestamp
 
@@ -515,9 +481,11 @@ func (tm *TransactionManager) handleTMRead(request TransactionManagerRequest) {
 	}
 
 	readArgs.ReplyChan <- states
+	//++fmt.Println(tm.replicaID, "TM - finished handling read.")
 }
 
 func (tm *TransactionManager) handleTMUpdate(request TransactionManagerRequest, txnPartitions *ongoingTxn) {
+	//++fmt.Printf("%d TM%d - Started handling update.\n", tm.replicaID, txnPartitions.debugID)
 	updateArgs := request.Args.(TMUpdateArgs)
 
 	updsPerPartition := groupWrites(updateArgs.UpdateParams)
@@ -543,10 +511,13 @@ func (tm *TransactionManager) handleTMUpdate(request TransactionManagerRequest, 
 			if _, hasPart := txnPartitions.partSet[partId]; !hasPart {
 				txnPartitions.add(partId)
 			}
+			//++fmt.Printf("%d TM%d - Trying to send upds list.\n", tm.replicaID, txnPartitions.debugID)
 			tm.mat.SendRequestToChannel(currRequest, partId)
+			//++fmt.Printf("%d TM%d - Upds list sent.\n", tm.replicaID, txnPartitions.debugID)
 		}
 	}
 
+	//++fmt.Printf("%d TM%d - Listening to upd replies.\n", tm.replicaID, txnPartitions.debugID)
 	var errString = ""
 	//TODO: Possibly paralelize? What if errors occour?
 	for _, channel := range replyChannels {
@@ -568,7 +539,7 @@ func (tm *TransactionManager) handleTMUpdate(request TransactionManagerRequest, 
 			Err:     fmt.Errorf(errString),
 		}
 	}
-
+	//++fmt.Printf("%d TM%d - Finished handling update.\n", tm.replicaID, txnPartitions.debugID)
 }
 
 /*
@@ -610,6 +581,7 @@ func groupWrites(updates []UpdateObjectParams) (updsPerPartition [][]UpdateObjec
 }
 
 func (tm *TransactionManager) handleTMStartTxn(request TransactionManagerRequest, txnPartitions *ongoingTxn) {
+	//++fmt.Printf("%d TM%d - Started handling startTxn.\n", tm.replicaID, txnPartitions.debugID)
 	startTxnArgs := request.Args.(TMStartTxnArgs)
 
 	//TODO: Ensure that the new clock is higher than the one received from the client. Also, take in consideration txn properties?
@@ -620,10 +592,12 @@ func (tm *TransactionManager) handleTMStartTxn(request TransactionManagerRequest
 	txnPartitions.partSet = makePartSet()
 
 	startTxnArgs.ReplyChan <- TMStartTxnReply{TransactionId: txnPartitions.TransactionId, Timestamp: newClock}
+	//++fmt.Printf("%d TM%d - Finished handling finishTxn.\n", tm.replicaID, txnPartitions.debugID)
 	return
 }
 
 func (tm *TransactionManager) handleTMCommit(request TransactionManagerRequest, txnPartitions *ongoingTxn) {
+	//++fmt.Printf("%d TM%d - Started handling commit.\n", tm.replicaID, txnPartitions.debugID)
 	commitArgs := request.Args.(TMCommitArgs)
 
 	//PREPARE
@@ -634,20 +608,24 @@ func (tm *TransactionManager) handleTMCommit(request TransactionManagerRequest, 
 	var currChan chan clocksi.Timestamp
 
 	//Send prepare to each partition involved
+	//++fmt.Printf("%d TM%d - Sending prepares to Materializers for id %d.\n", tm.replicaID, txnPartitions.debugID, request.TransactionId)
 	for partId, _ := range involvedPartitions {
 		currChan = make(chan clocksi.Timestamp)
 		currRequest = MaterializerRequest{MatRequestArgs: MatPrepareArgs{TransactionId: request.TransactionId, ReplyChan: currChan}}
 		replyChannels = append(replyChannels, currChan)
+		//++fmt.Printf("%d TM%d - Sending prepare to Materializer %d for id %d.\n", tm.replicaID, txnPartitions.debugID, partId, request.TransactionId)
 		tm.mat.SendRequestToChannel(currRequest, partId)
 	}
 
 	//Collect proposed timestamps and accept the maximum one
-	var maxTimestamp *clocksi.Timestamp = &clocksi.DummyTs
+	//var maxTimestamp clocksi.Timestamp = nil
+	var maxTimestamp clocksi.Timestamp = clocksi.DummyTs
 	//TODO: Possibly paralelize?
+	//++fmt.Printf("%d TM%d - Waiting for prepares from Materializers.\n", tm.replicaID, txnPartitions.debugID)
 	for _, channel := range replyChannels {
 		replyTs := <-channel
-		if replyTs.IsHigherOrEqual(*maxTimestamp) {
-			maxTimestamp = &replyTs
+		if replyTs.IsHigherOrEqual(maxTimestamp) {
+			maxTimestamp = replyTs
 		}
 	}
 
@@ -655,25 +633,27 @@ func (tm *TransactionManager) handleTMCommit(request TransactionManagerRequest, 
 	//Send commit to involved partitions
 	//TODO: Should I not assume that the 2nd phase of commit is fail-safe?
 
+	//++fmt.Printf("%d TM%d - Sending commits to Materializers.\n", tm.replicaID, txnPartitions.debugID)
 	for partId, _ := range involvedPartitions {
 		currRequest = MaterializerRequest{MatRequestArgs: MatCommitArgs{
 			TransactionId:   request.TransactionId,
-			CommitTimestamp: *maxTimestamp,
+			CommitTimestamp: maxTimestamp,
 		}}
 		tm.mat.SendRequestToChannel(currRequest, uint64(partId))
 	}
 
 	tm.localClock.Lock()
-	tm.localClock.Timestamp = tm.localClock.Merge(*maxTimestamp)
+	tm.localClock.Timestamp = tm.localClock.Merge(maxTimestamp)
 	tm.localClock.Unlock()
 
 	txnPartitions.reset()
 
 	//Send ok to client
 	commitArgs.ReplyChan <- TMCommitReply{
-		Timestamp: *maxTimestamp,
+		Timestamp: maxTimestamp,
 		Err:       nil,
 	}
+	//++fmt.Printf("%d TM%d - Finished handling commit.\n", tm.replicaID, txnPartitions.debugID)
 }
 
 func (tm *TransactionManager) handleTMAbort(request TransactionManagerRequest, txnPartitions *ongoingTxn) {
