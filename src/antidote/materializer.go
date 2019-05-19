@@ -629,10 +629,12 @@ func updateSecondSmallestPendingTxn(partitionData *partitionData) {
 	//##fmt.Println(partitionData.partitionID, "Called updateSecondSmallestPendingTxn")
 	var smallestTs clocksi.Timestamp = partitionData.highestPendingTs
 	smallestFirst := partitionData.suggestedTimestamps[*partitionData.twoSmallestPendingTxn[0]]
+	smallestFirstId := *partitionData.twoSmallestPendingTxn[0]
 	var smallestId TransactionId = 0
 	for transId, ts := range partitionData.suggestedTimestamps {
 		//Actually this would be the same as <= && !=, since no ts can be smaller than smallestFirst.
-		if ts.IsLowerOrEqual(smallestTs) && ts.IsHigher(smallestFirst) {
+		//if ts.IsLowerOrEqual(smallestTs) && ts.IsHigherOrEqual(smallestFirst) && smallestFirstId != transId {
+		if ts.IsLowerOrEqual(smallestTs) && smallestFirstId != transId {
 			//##fmt.Println(partitionData.partitionID, "Updating smallestTs")
 			smallestId = transId
 			smallestTs = ts

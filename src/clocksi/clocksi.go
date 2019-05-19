@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
-	"math/rand"
 	"strings"
 	"time"
 )
@@ -14,6 +13,10 @@ type Timestamp interface {
 	NewTimestamp(id int64) (newTs Timestamp)
 	//Gets a timestamp that is more recent than the actual one
 	NextTimestamp(id int64) (newTs Timestamp)
+	//Gets a timestamp that increments the id value by one
+	IncTimestamp(id int64) (newTs Timestamp)
+	//Increments this timestamp's value for id by one. This should only be used when it is known that the Timestamp won't be shared.
+	SelfIncTimestamp(id int64)
 	//Compares two timestamps. Returns HigherTs if the current timestamp is higher than otherTs. Others should be self explanatory.
 	//Possible results: HigherTs/LowerTs/EqualTs/ConcurrentTs
 	Compare(otherTs Timestamp) (compResult TsResult)
@@ -112,16 +115,29 @@ func (ts ClockSiTimestamp) NextTimestamp(id int64) (newTs Timestamp) {
 	}
 	newValue := time.Now().UTC().UnixNano()
 	//Add a small random value to avoid equal timestamps
-	newValue += rand.Int63n(randomFactor)
+	//newValue += rand.Int63n(randomFactor)
 	//In case we ask two timestamps in a very small window, this new value might be <= than the previous.
-	//So, in that case, add again a random factor.
-	if newValue < newVc[id] {
-		newVc[id] = newVc[id] + rand.Int63n(randomFactor)
+	//So, in that case, add +1
+	if newValue <= newVc[id] {
+		newVc[id] += 1
 	} else {
 		newVc[id] = newValue
 	}
 	return ClockSiTimestamp{VectorClock: newVc}
 
+}
+
+func (ts ClockSiTimestamp) IncTimestamp(id int64) (newTs Timestamp) {
+	newVc := make(map[int64]int64)
+	for i, value := range ts.VectorClock {
+		newVc[i] = value
+	}
+	newVc[id] += 1
+	return ClockSiTimestamp{VectorClock: newVc}
+}
+
+func (ts ClockSiTimestamp) SelfIncTimestamp(id int64) {
+	ts.VectorClock[id] += 1
 }
 
 func (ts ClockSiTimestamp) Compare(otherTs Timestamp) (compResult TsResult) {

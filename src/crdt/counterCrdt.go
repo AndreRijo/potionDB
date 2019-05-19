@@ -29,7 +29,7 @@ type DecrementEffect struct {
 }
 
 //Note: crdt can (and most often will be) nil
-func (crdt *CounterCrdt) Initialize(startTs *clocksi.Timestamp) (newCrdt CRDT) {
+func (crdt *CounterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int64) (newCrdt CRDT) {
 	crdt = &CounterCrdt{
 		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
 		value:                 0,
@@ -120,8 +120,4 @@ func (crdt *CounterCrdt) undoEffect(effect *Effect) {
 	case DecrementEffect:
 		crdt.value += typedEffect.Change
 	}
-}
-
-func (crdt *CounterCrdt) GetPossibleDownstreamTypes() (possibleTypes []UpdateArguments) {
-	return []UpdateArguments{&Increment{}, &Decrement{}}
 }

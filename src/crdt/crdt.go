@@ -3,7 +3,8 @@ package crdt
 import "clocksi"
 
 type CRDT interface {
-	Initialize(startTs *clocksi.Timestamp) (newCrdt CRDT)
+	//Note: replicaID may not be required by every CRDT - for those, any value can be passed.
+	Initialize(startTs *clocksi.Timestamp, replicaID int64) (newCrdt CRDT)
 
 	Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State)
 
@@ -14,11 +15,6 @@ type CRDT interface {
 	//GetVersion() (ts clocksi.Timestamp) //TODO: This is probably not needed at all
 
 	IsOperationWellTyped(args UpdateArguments) (ok bool, err error)
-
-	//Returns an instance of each possible downstream argument that this CRDT might generate
-	//This is needed for serialization, as it needs to know which types will be used per interface.
-	//The internal values of each returned type is irrelevant, as long as all types of downstream arguments are covered
-	GetPossibleDownstreamTypes() (possibleTypes []UpdateArguments)
 }
 
 //TODO: Whenever a new CRDT is added, add a dummy instance here. This is needed for remoteConnection.go. This might no longer be needed

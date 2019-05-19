@@ -78,7 +78,7 @@ type RemoveAllEffect struct {
 }
 
 //Note: crdt can (and most often will be) nil
-func (crdt *SetAWCrdt) Initialize(startTs *clocksi.Timestamp) (newCrdt CRDT) {
+func (crdt *SetAWCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int64) (newCrdt CRDT) {
 	crdt = &SetAWCrdt{
 		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
 		elems:                 make(map[Element]UniqueSet),
@@ -347,8 +347,4 @@ func (crdt *SetAWCrdt) undoRemoveAllEffect(effect *RemoveAllEffect) {
 			crdt.elems[key] = newSet
 		}
 	}
-}
-
-func (crdt *SetAWCrdt) GetPossibleDownstreamTypes() (possibleTypes []UpdateArguments) {
-	return []UpdateArguments{&DownstreamAddAll{}, &DownstreamRemoveAll{}}
 }
