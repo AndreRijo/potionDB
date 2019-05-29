@@ -24,15 +24,18 @@ const (
 )
 
 var (
-	disabledDebugs = map[string]struct{}{
-		PROTO_PRINT:    {},
-		MAT_PRINT:      {},
-		TM_PRINT:       {},
-		LOG_PRINT:      {},
-		REPL_PRINT:     {},
-		REMOTE_PRINT:   {},
-		PROTOLIB_PRINT: {},
-	}
+	/*
+		disabledDebugs = map[string]struct{}{
+			PROTO_PRINT:    {},
+			MAT_PRINT:      {},
+			TM_PRINT:       {},
+			LOG_PRINT:      {},
+			REPL_PRINT:     {},
+			REMOTE_PRINT:   {},
+			PROTOLIB_PRINT: {},
+		}
+	*/
+	disabledDebugs    = map[string]struct{}{}
 	allOutputDisabled = true
 )
 

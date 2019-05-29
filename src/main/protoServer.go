@@ -333,7 +333,7 @@ func protoUpdateOpToAntidoteUpdate(protoUp []*antidote.ApbUpdateOp) (upParams []
 	return
 }
 
-//TODO: Should this be moved to the CRDT code? Or left here?
+//TODO: Should this be moved to the CRDT code? Or left here? Or tbh this should be moved to protoLib...
 func protoUpdateOperationToAntidoteArguments(protoOperation *antidote.ApbUpdateOperation,
 	crdtType antidote.CRDTType) (updateArgs crdt.UpdateArguments) {
 	switch crdtType {
@@ -345,6 +345,15 @@ func protoUpdateOperationToAntidoteArguments(protoOperation *antidote.ApbUpdateO
 			updateArgs = crdt.AddAll{Elems: crdt.ByteMatrixToElementArray(setProto.GetAdds())}
 		} else {
 			updateArgs = crdt.RemoveAll{Elems: crdt.ByteMatrixToElementArray(setProto.GetRems())}
+		}
+	case antidote.CRDTType_TOPK_RMV:
+		topkProto := protoOperation.GetTopkrmvop()
+		if adds := topkProto.GetAdds(); adds != nil {
+			add := adds[0]
+			updateArgs = crdt.TopKAdd{TopKScore: crdt.TopKScore{Id: add.GetPlayerId(), Score: add.GetScore()}}
+		} else {
+			rem := topkProto.GetRems()[0]
+			updateArgs = crdt.TopKRemove{Id: rem}
 		}
 	default:
 		//TODO: Support other types and error case, and return error to client

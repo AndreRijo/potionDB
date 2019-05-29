@@ -10,7 +10,7 @@ type VersionManager interface {
 
 	ReadLatest(readArgs crdt.ReadArguments, updsNotYetApplied []crdt.UpdateArguments) (state crdt.State)
 
-	Update(updArgs crdt.UpdateArguments) crdt.UpdateArguments
+	Update(updArgs crdt.UpdateArguments) crdt.DownstreamArguments
 
-	Downstream(updTs clocksi.Timestamp, downstreamArgs crdt.UpdateArguments)
+	Downstream(updTs clocksi.Timestamp, downstreamArgs crdt.DownstreamArguments) (otherDownstreamArgs crdt.DownstreamArguments)
 }

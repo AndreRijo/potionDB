@@ -304,16 +304,20 @@ func DecodeTxnDescriptor(bytes []byte) (txnId TransactionId, ts clocksi.Timestam
 /***** CRDT SPECIFIC METHODS*****/
 
 func CreateCounterUpdate(amount int) (protoBuf *ApbCounterUpdate) {
-	protoBuf = &ApbCounterUpdate{
-		Inc: proto.Int64(int64(amount)),
-	}
-	return
+	return &ApbCounterUpdate{Inc: proto.Int64(int64(amount))}
 }
 
 func CreateTopkUpdate(playerId int, score int) (protoBuf *ApbTopkUpdate) {
-	protoBuf = &ApbTopkUpdate{
-		PlayerId: proto.Int64(int64(playerId)),
-		Score:    proto.Int64(int64(score)),
+	return &ApbTopkUpdate{PlayerId: proto.Int64(int64(playerId)), Score: proto.Int64(int64(score))}
+}
+
+func CreateTopKRmvUpdate(isAdd bool, playerId int, score int) (protoBuf *ApbTopkRmvUpdate) {
+	if isAdd {
+		protoBuf = &ApbTopkRmvUpdate{Adds: make([]*ApbIntPair, 1)}
+		protoBuf.Adds[0] = &ApbIntPair{PlayerId: proto.Int32(int32(playerId)), Score: proto.Int32(int32(score))}
+	} else {
+		protoBuf = &ApbTopkRmvUpdate{Rems: make([]int32, 1)}
+		protoBuf.Rems[0] = int32(playerId)
 	}
 	return
 }
@@ -340,19 +344,21 @@ func CreateSetUpdate(opType ApbSetUpdate_SetOpType, elems []string) (protoBuf *A
 
 //TODO: Get rid of so many type conversions (this will depend on CRDT's implementation)
 func createCounterReadResp(value int32) (protobuf *ApbReadObjectResp) {
-	protobuf = &ApbReadObjectResp{
-		Counter: &ApbGetCounterResp{
-			Value: proto.Int32(value),
-		},
-	}
-	return
+	return &ApbReadObjectResp{Counter: &ApbGetCounterResp{Value: proto.Int32(value)}}
 }
 
 func createSetReadResp(elems []crdt.Element) (protobuf *ApbReadObjectResp) {
-	protobuf = &ApbReadObjectResp{
-		Set: &ApbGetSetResp{
-			Value: crdt.ElementArrayToByteMatrix(elems),
-		},
+	return &ApbReadObjectResp{Set: &ApbGetSetResp{Value: crdt.ElementArrayToByteMatrix(elems)}}
+}
+
+func createTopkReadResp(values []crdt.TopKScore) (protobuf *ApbReadObjectResp) {
+	return &ApbReadObjectResp{Topk: &ApbGetTopkResp{Values: createApbIntPairs(values)}}
+}
+
+func createApbIntPairs(values []crdt.TopKScore) (protos []*ApbIntPair) {
+	protos = make([]*ApbIntPair, len(values))
+	for i, score := range values {
+		protos[i] = &ApbIntPair{PlayerId: proto.Int32(score.Id), Score: proto.Int32(score.Score)}
 	}
 	return
 }
@@ -376,7 +382,8 @@ func CreateUpdateObjs(transId []byte, key string, crdtType CRDTType,
 	case CRDTType_TOPK:
 		//fmt.Println("Creating update topk")
 		updateOperation.Topkop = updObj.(*ApbTopkUpdate)
-
+	case CRDTType_TOPK_RMV:
+		updateOperation.Topkrmvop = updObj.(*ApbTopkRmvUpdate)
 	case CRDTType_COUNTER:
 		//fmt.Println("Creating update counter")
 		updateOperation.Counterop = updObj.(*ApbCounterUpdate)
@@ -402,6 +409,7 @@ func createUpdateOperation(updateArgs crdt.UpdateArguments, crdtType CRDTType) (
 				Inc: proto.Int64(int64(updateArgs.(crdt.Increment).Change)),
 			},
 		}
+
 	case CRDTType_ORSET:
 		switch convertedArgs := updateArgs.(type) {
 		case crdt.Add:
@@ -425,6 +433,18 @@ func createUpdateOperation(updateArgs crdt.UpdateArguments, crdtType CRDTType) (
 			opType := ApbSetUpdate_ADD
 			protobuf = &ApbUpdateOperation{Setop: &ApbSetUpdate{Optype: &opType, Adds: crdt.ElementArrayToByteMatrix(elements)}}
 		}
+
+	case CRDTType_TOPK_RMV:
+		switch convertedArgs := updateArgs.(type) {
+		case crdt.TopKAdd:
+			score := convertedArgs.TopKScore
+			protobuf = &ApbUpdateOperation{Topkrmvop: &ApbTopkRmvUpdate{Adds: make([]*ApbIntPair, 1)}}
+			protobuf.Topkrmvop.Adds[0] = &ApbIntPair{PlayerId: proto.Int32(int32(score.Id)), Score: proto.Int32(int32(score.Score))}
+		case crdt.TopKRemove:
+			protobuf = &ApbUpdateOperation{Topkrmvop: &ApbTopkRmvUpdate{Rems: make([]int32, 1)}}
+			protobuf.Topkrmvop.Rems[0] = convertedArgs.Id
+		}
+
 	default:
 		tools.CheckErr("CrdtType not supported for update operation.", nil)
 	}
@@ -439,6 +459,8 @@ func convertAntidoteStatesToProto(objectStates []crdt.State) (protobufs []*ApbRe
 			protobufs[i] = createCounterReadResp(convertedState.Value)
 		case crdt.SetAWValueState:
 			protobufs[i] = createSetReadResp(convertedState.Elems)
+		case crdt.TopKValueState:
+			protobufs[i] = createTopkReadResp(convertedState.Scores)
 		default:
 			tools.CheckErr("Unsupported data type in convertAntidoteStatesToProto", nil)
 		}
@@ -497,6 +519,8 @@ func createProtoDownstreamUpds(upds []UpdateObjectParams) (protobufs []*ProtoDow
 			protobufs[i].CounterOp = createProtoCounterDownstream(&upd.UpdateArgs)
 		case CRDTType_ORSET:
 			protobufs[i].SetOp = createProtoSetDownstream(&upd.UpdateArgs)
+		case CRDTType_TOPK_RMV:
+			protobufs[i].TopkrmvOp = createProtoTopkRmvDownstream(&upd.UpdateArgs)
 		}
 	}
 	return protobufs
@@ -539,6 +563,19 @@ func createProtoSetDownstream(upd *crdt.UpdateArguments) (protobuf *ProtoSetDown
 	return
 }
 
+func createProtoTopkRmvDownstream(upd *crdt.UpdateArguments) (protobuf *ProtoTopKRmvDownstream) {
+	switch convUpd := (*upd).(type) {
+	case crdt.DownstreamTopKAdd:
+		protobuf = &ProtoTopKRmvDownstream{Adds: make([]*ProtoTopKElement, 1)}
+		protobuf.Adds[0] = &ProtoTopKElement{Id: proto.Int32(convUpd.Id), Score: proto.Int32(convUpd.Score),
+			Ts: proto.Int64(convUpd.Ts), ReplicaID: proto.Int64(convUpd.ReplicaID)}
+	case crdt.DownstreamTopKRemove:
+		protobuf = &ProtoTopKRmvDownstream{Rems: make([]*ProtoTopKIdVc, 1)}
+		protobuf.Rems[0] = &ProtoTopKIdVc{Id: proto.Int32(convUpd.Id), Vc: convUpd.Vc.ToBytes()}
+	}
+	return
+}
+
 func protoToStableClock(protobuf *ProtoStableClock) (stableClk *StableClock) {
 	return &StableClock{SenderID: protobuf.GetSenderID(), Ts: protobuf.GetReplicaTs()}
 }
@@ -565,6 +602,8 @@ func protoToDownstreamUpds(protobufs []*ProtoDownstreamUpd) (upds []UpdateObject
 			updArgs = protoToCounterDownstream(proto.GetCounterOp())
 		case CRDTType_ORSET:
 			updArgs = protoToSetDownstream(proto.GetSetOp())
+		case CRDTType_TOPK_RMV:
+			updArgs = protoToTopkrmvDownstream(proto.GetTopkrmvOp())
 		}
 		upd.UpdateArgs = updArgs
 		upds[i] = *upd
@@ -598,24 +637,14 @@ func protoToSetDownstream(protobuf *ProtoSetDownstream) (args crdt.UpdateArgumen
 	}
 }
 
-/*
-func protoToReplicatorRequest(protobuf *ProtoReplicatePart) (request *NewReplicatorRequest) {
-	return &NewReplicatorRequest{
-		PartitionID: protobuf.GetPartitionID(),
-		SenderID:    protobuf.GetSenderID(),
-		StableTs:    protobuf.GetPartStableTs(),
-		Txns:        protoToRemoteTxns(protobuf.Txns),
+func protoToTopkrmvDownstream(protobuf *ProtoTopKRmvDownstream) (args crdt.UpdateArguments) {
+	if adds := protobuf.GetAdds(); adds != nil {
+		//For now it's only 1 op
+		add := adds[0]
+		return crdt.DownstreamTopKAdd{TopKElement: crdt.TopKElement{Id: *add.Id, Score: *add.Score, Ts: *add.Ts, ReplicaID: *add.ReplicaID}}
+	} else {
+		//For now it's only 1 op
+		rem := protobuf.GetRems()[0]
+		return crdt.DownstreamTopKRemove{Id: *rem.Id, Vc: clocksi.ClockSiTimestamp{}.FromBytes(rem.Vc)}
 	}
 }
-
-func protoToRemoteTxns(protobufs []*ProtoRemoteTxns) (remoteTxns []NewRemoteTxns) {
-	remoteTxns = make([]NewRemoteTxns, len(protobufs))
-	for i, proto := range protobufs {
-		remoteTxns[i] = NewRemoteTxns{
-			Timestamp: clocksi.ClockSiTimestamp{}.FromBytes(proto.Timestamp),
-			Upds:      protoToDownstreamUpds(proto.Upds),
-		}
-	}
-	return
-}
-*/

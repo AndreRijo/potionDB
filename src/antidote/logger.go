@@ -4,8 +4,6 @@ import (
 	"clocksi"
 )
 
-//TODO: Delete methods with string "old" in their name
-
 /*****Logging interface*****/
 
 type Logger interface {
@@ -50,8 +48,6 @@ const (
 	//Types of requests
 	CommitLogRequest LogRequestType = 0
 	TxnLogRequest    LogRequestType = 1
-	//NextClkOldLogRequest LogRequestType = 2
-	//TxnOldLogRequest     LogRequestType = 3
 )
 
 func (args LogCommitArgs) GetRequestType() (requestType LogRequestType) {

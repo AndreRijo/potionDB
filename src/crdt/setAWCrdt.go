@@ -77,6 +77,10 @@ type RemoveAllEffect struct {
 	RemovedMap map[Element]UniqueSet
 }
 
+func (args DownstreamAddAll) MustReplicate() bool { return true }
+
+func (args DownstreamRemoveAll) MustReplicate() bool { return true }
+
 //Note: crdt can (and most often will be) nil
 func (crdt *SetAWCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int64) (newCrdt CRDT) {
 	crdt = &SetAWCrdt{
@@ -198,7 +202,7 @@ func (crdt *SetAWCrdt) lookup(elem Element, updsNotYetApplied []UpdateArguments)
 }
 
 //TODO: Maybe one day implement add and remove with their own methods (i.e., avoid the overhead of creating/handling arrays and maps?)
-func (crdt *SetAWCrdt) Update(args UpdateArguments) (downstreamArgs UpdateArguments) {
+func (crdt *SetAWCrdt) Update(args UpdateArguments) (downstreamArgs DownstreamArguments) {
 	switch opType := args.(type) {
 	case Add:
 		elemArray := make([]Element, 1)
@@ -216,7 +220,7 @@ func (crdt *SetAWCrdt) Update(args UpdateArguments) (downstreamArgs UpdateArgume
 	return
 }
 
-func (crdt *SetAWCrdt) getAddAllDownstreamArgs(elems []Element) (downstreamArgs UpdateArguments) {
+func (crdt *SetAWCrdt) getAddAllDownstreamArgs(elems []Element) (downstreamArgs DownstreamArguments) {
 	uniqueMap := make(map[Element]Unique)
 	for _, key := range elems {
 		uniqueMap[key] = Unique(crdt.random.Int63())
@@ -225,7 +229,7 @@ func (crdt *SetAWCrdt) getAddAllDownstreamArgs(elems []Element) (downstreamArgs 
 	return
 }
 
-func (crdt *SetAWCrdt) getRemoveAllDownstreamArgs(elems []Element) (downstreamArgs UpdateArguments) {
+func (crdt *SetAWCrdt) getRemoveAllDownstreamArgs(elems []Element) (downstreamArgs DownstreamArguments) {
 	uniqueMap := make(map[Element]UniqueSet)
 	for _, key := range elems {
 		//Maps are in fact references, so doing "uniqueMap[key] = crdt.elems[key]" wouldn't actually copy the uniqueSet's (which is a map) contents to a new uniqueSet.
@@ -236,13 +240,15 @@ func (crdt *SetAWCrdt) getRemoveAllDownstreamArgs(elems []Element) (downstreamAr
 	return
 }
 
-func (crdt *SetAWCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs UpdateArguments) {
+func (crdt *SetAWCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs DownstreamArguments) (otherDownstreamArgs DownstreamArguments) {
 	effect := crdt.applyDownstream(downstreamArgs)
 	//Necessary for inversibleCrdt
 	crdt.addToHistory(&updTs, &downstreamArgs, effect)
+
+	return nil
 }
 
-func (crdt *SetAWCrdt) applyDownstream(downstreamArgs UpdateArguments) (effect *Effect) {
+func (crdt *SetAWCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect *Effect) {
 	switch opType := downstreamArgs.(type) {
 	case DownstreamAddAll:
 		effect = crdt.applyAddAll(opType.Elems)
@@ -313,7 +319,7 @@ func (crdt *SetAWCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	crdt.genericInversibleCRDT.rebuildCRDTToVersion(targetTs, crdt.undoEffect, crdt.reapplyOp)
 }
 
-func (crdt *SetAWCrdt) reapplyOp(updArgs UpdateArguments) (effect *Effect) {
+func (crdt *SetAWCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
 	return crdt.applyDownstream(updArgs)
 }
 

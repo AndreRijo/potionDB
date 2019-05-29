@@ -13,7 +13,7 @@ type InversibleCRDT interface {
 
 	undoEffect(effect *Effect)
 
-	reapplyOp(updArgs UpdateArguments) (effect *Effect)
+	reapplyOp(updArgs DownstreamArguments) (effect *Effect)
 }
 
 type genericInversibleCRDT struct {
@@ -27,10 +27,14 @@ type Effect interface {
 
 type EffectType byte
 
+//Used by operations that had no effect at all. Quite useful for non-uniform CRDTs
+type NoEffect struct {
+}
+
 //Triple of clk, upd, effect
 type History struct {
 	ts       *clocksi.Timestamp
-	updsArgs []*UpdateArguments
+	updsArgs []*DownstreamArguments
 	effects  []*Effect
 }
 
@@ -39,6 +43,7 @@ const (
 	initialEffectsSize = 5
 )
 
+//TODO: This startTs is not even used anymore... delete?
 func (crdt *genericInversibleCRDT) initialize(startTs *clocksi.Timestamp) (newCrdt *genericInversibleCRDT) {
 	newCrdt = &genericInversibleCRDT{
 		genericCRDT: genericCRDT{}.initialize(),
@@ -74,12 +79,12 @@ func (crdt *genericInversibleCRDT) copy() (copyCrdt *genericInversibleCRDT) {
 }
 
 //Adds an operation to the history
-func (crdt *genericInversibleCRDT) addToHistory(ts *clocksi.Timestamp, updArgs *UpdateArguments, effect *Effect) {
+func (crdt *genericInversibleCRDT) addToHistory(ts *clocksi.Timestamp, updArgs *DownstreamArguments, effect *Effect) {
 	var hist *History
 	if len(crdt.history) == 0 || !(*crdt.history[len(crdt.history)-1].ts).IsEqual(*ts) {
 		hist = &History{
 			ts:       ts,
-			updsArgs: make([]*UpdateArguments, 0, initialEffectsSize),
+			updsArgs: make([]*DownstreamArguments, 0, initialEffectsSize),
 			effects:  make([]*Effect, 0, initialEffectsSize),
 		}
 		crdt.history = append(crdt.history, hist)
@@ -93,7 +98,7 @@ func (crdt *genericInversibleCRDT) addToHistory(ts *clocksi.Timestamp, updArgs *
 //Rebuilds the CRDT to match the CRDT's state in the version received as argument.
 //Note that both undoEffectFunc and downstreamFunc should be provided by each wrapping CRDT.
 func (crdt *genericInversibleCRDT) rebuildCRDTToVersion(targetTs clocksi.Timestamp,
-	undoEffectFunc func(*Effect), reapplyOpFunc func(UpdateArguments) *Effect) {
+	undoEffectFunc func(*Effect), reapplyOpFunc func(DownstreamArguments) *Effect) {
 	//No history, the CRDT is already in the empty/initial state
 	if len(crdt.history) == 0 {
 		return

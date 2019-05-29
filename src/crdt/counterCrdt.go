@@ -28,6 +28,10 @@ type DecrementEffect struct {
 	Change int32
 }
 
+func (args Increment) MustReplicate() bool { return true }
+
+func (args Decrement) MustReplicate() bool { return true }
+
 //Note: crdt can (and most often will be) nil
 func (crdt *CounterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int64) (newCrdt CRDT) {
 	crdt = &CounterCrdt{
@@ -60,31 +64,26 @@ func (crdt *CounterCrdt) GetValue() (state State) {
 	return
 }
 
-func (crdt *CounterCrdt) Update(args UpdateArguments) (downstreamArgs UpdateArguments) {
-	downstreamArgs = args
+func (crdt *CounterCrdt) Update(args UpdateArguments) (downstreamArgs DownstreamArguments) {
+	downstreamArgs = args.(DownstreamArguments)
 	return
 }
 
-//TODO: Generate effects
-func (crdt *CounterCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs UpdateArguments) {
+func (crdt *CounterCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs DownstreamArguments) (otherDownstreamArgs DownstreamArguments) {
 	effect := crdt.applyDownstream(downstreamArgs)
 	//Necessary for inversibleCrdt
 	crdt.addToHistory(&updTs, &downstreamArgs, effect)
+
+	return nil
 }
 
-func (crdt *CounterCrdt) applyDownstream(downstreamArgs UpdateArguments) (effect *Effect) {
+func (crdt *CounterCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect *Effect) {
 	var effectValue Effect
 	switch incOrDec := downstreamArgs.(type) {
-	case *Increment:
-		crdt.value += incOrDec.Change
-		effectValue = IncrementEffect{Change: incOrDec.Change}
 	case Increment:
 		crdt.value += incOrDec.Change
 		effectValue = IncrementEffect{Change: incOrDec.Change}
 	case Decrement:
-		crdt.value -= incOrDec.Change
-		effectValue = DecrementEffect{Change: incOrDec.Change}
-	case *Decrement:
 		crdt.value -= incOrDec.Change
 		effectValue = DecrementEffect{Change: incOrDec.Change}
 	}
@@ -109,7 +108,7 @@ func (crdt *CounterCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	crdt.genericInversibleCRDT.rebuildCRDTToVersion(targetTs, crdt.undoEffect, crdt.reapplyOp)
 }
 
-func (crdt *CounterCrdt) reapplyOp(updArgs UpdateArguments) (effect *Effect) {
+func (crdt *CounterCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
 	return crdt.applyDownstream(updArgs)
 }
 

@@ -1,6 +1,8 @@
 import "antidote.proto";
 option go_package = "antidote";
 
+//protoc -I=. --go_out=. ./replicator.proto
+
 message ProtoStableClock {
     required int64 senderID = 1;
     required int64 replicaTs = 2;
@@ -21,6 +23,7 @@ message ProtoDownstreamUpd {
     required ApbBoundObject keyParams = 1;
     optional ProtoCounterDownstream counterOp = 2;
     optional ProtoSetDownstream setOp = 3;
+    optional ProtoTopKRmvDownstream topkrmvOp = 4;
 }
 
 message ProtoCounterDownstream {
@@ -33,6 +36,11 @@ message ProtoSetDownstream {
     repeated ProtoValueUniques rems = 2;   //key -> set/array of uniques
 }
 
+message ProtoTopKRmvDownstream {
+    repeated ProtoTopKElement adds = 1;
+    repeated ProtoTopKIdVc rems = 2;
+}
+
 message ProtoValueUnique {
     required bytes value = 1;
     required uint64 unique = 2;
@@ -43,26 +51,14 @@ message ProtoValueUniques {
     repeated uint64 uniques = 2;
 }
 
-/*
-type DownstreamAddAll struct {
-	Elems map[Element]Unique
+message ProtoTopKElement {
+    required int32 id = 1;
+    required int32 score = 2;
+    required int64 ts = 3;
+    required int64 replicaID = 4;
 }
 
-type DownstreamRemoveAll struct {
-	Elems map[Element]UniqueSet
+message ProtoTopKIdVc {
+    required int32 id = 1;
+    required bytes vc = 2;
 }
-*/
-
-/*
-type NewReplicatorRequest struct {
-	SenderID    int64
-	Txns        []NewRemoteTxns
-	PartitionID int64
-	StableTs    int64
-}
-
-type NewRemoteTxns struct {
-	clocksi.Timestamp
-	Upds []*UpdateObjectParams
-}
-*/

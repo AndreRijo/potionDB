@@ -42,6 +42,8 @@ type Timestamp interface {
 	ComparePos(id int64, otherTs Timestamp) (compResult TsResult)
 	//Updates a position with the max between the current value and newValue
 	UpdatePos(id int64, newValue int64) (newTs Timestamp)
+	//Updates a position with newValue, even if newValue than the actual value. Useful for version management.
+	UpdateForcedPos(id int64, newValue int64) (newTs Timestamp)
 	//Gets the timestamp value associated to the id
 	GetPos(id int64) (value int64)
 	//Does the same as IsLowerOrEqual except that it ignores the values associated to self and id positions
@@ -312,6 +314,12 @@ func (ts ClockSiTimestamp) UpdatePos(id int64, newValue int64) (newTs Timestamp)
 	if ts.VectorClock[id] < newValue {
 		ts.VectorClock[id] = newValue
 	}
+	newTs = ts
+	return
+}
+
+func (ts ClockSiTimestamp) UpdateForcedPos(id int64, newValue int64) (newTs Timestamp) {
+	ts.VectorClock[id] = newValue
 	newTs = ts
 	return
 }
