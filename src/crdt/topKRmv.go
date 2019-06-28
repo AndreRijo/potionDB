@@ -368,7 +368,6 @@ Variants for element removed:
 	- Didn't find an element to add;
 */
 func (crdt *TopKRmvCrdt) applyRemove(op *DownstreamTopKRemove) (effect *Effect, otherDownstreamArgs DownstreamArguments) {
-	//TODO: In the pseudo-code, update < to <=
 	//Must be <= as the remove's clk is a copy without incrementing.
 	remEffect := TopKRemoveEffect{id: op.Id, notTopRemoved: make(setTopKElement)}
 	rems, hasRems := crdt.rems[op.Id]
@@ -398,7 +397,6 @@ func (crdt *TopKRmvCrdt) applyRemove(op *DownstreamTopKRemove) (effect *Effect, 
 		remEffect.remElem = elem
 		remEffect.oldMin = crdt.smallestScore
 
-		//TODO: What if there's an entry with higher clock for the same ID in notInTop?
 		if len(crdt.elems) == crdt.maxElems-1 {
 			//Top-k was full previously, need to find the next highest value to replace (possibly in different ID)
 			highestElem := TopKElement{}
@@ -431,7 +429,6 @@ func (crdt *TopKRmvCrdt) applyRemove(op *DownstreamTopKRemove) (effect *Effect, 
 				crdt.findAndUpdateMin()
 			}
 		} else if hiddenForId != nil && len(hiddenForId) > 0 {
-			//TODO: Effect and handle it
 			//There's no other element in notInTop that isn't already in top but, for the element we removed,
 			//there's other entries still left. The highest should go to top.
 			highest := TopKElement{}
@@ -450,6 +447,7 @@ func (crdt *TopKRmvCrdt) applyRemove(op *DownstreamTopKRemove) (effect *Effect, 
 				crdt.smallestScore = highest
 			}
 			//Need to pass this add now
+			//TODO: Analyze if it really needs to be downstreamed or not
 			otherDownstreamArgs = DownstreamTopKAdd{TopKElement: highest}
 		} else if elem == crdt.smallestScore {
 			//Removed element was the min, need to find new min
