@@ -10,7 +10,7 @@ type Logger interface {
 	//Initializes the logger belogging to partition partitionID. Must be called before any other method of the Logger.
 	Initialize(mat *Materializer, partitionID uint64)
 	//Send a request to the logger.
-	//Each logger implementation must support the following requests: LogCommitArgs, LogNextClkArgs, LogOldTxnArgs
+	//Each logger implementation must support the following requests: LogCommitArgs, LogNextClkArgs
 	SendLoggerRequest(request LoggerRequest)
 }
 

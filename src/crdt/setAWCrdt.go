@@ -22,7 +22,7 @@ type SetAWValueState struct {
 }
 
 type SetAWLookupState struct {
-	hasElem bool
+	HasElem bool
 }
 
 type LookupReadArguments struct {
@@ -171,7 +171,7 @@ func (crdt *SetAWCrdt) getState(updsNotYetApplied []UpdateArguments) (state Stat
 func (crdt *SetAWCrdt) lookup(elem Element, updsNotYetApplied []UpdateArguments) (state State) {
 	_, hasElem := crdt.elems[elem]
 	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
-		return SetAWLookupState{hasElem: hasElem}
+		return SetAWLookupState{HasElem: hasElem}
 	}
 	//Need to go through pending updates to decide if the element is in the state or not
 	for _, upd := range updsNotYetApplied {
@@ -198,7 +198,7 @@ func (crdt *SetAWCrdt) lookup(elem Element, updsNotYetApplied []UpdateArguments)
 			}
 		}
 	}
-	return SetAWLookupState{hasElem: hasElem}
+	return SetAWLookupState{HasElem: hasElem}
 }
 
 //TODO: Maybe one day implement add and remove with their own methods (i.e., avoid the overhead of creating/handling arrays and maps?)

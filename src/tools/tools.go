@@ -1,9 +1,11 @@
 package tools
 
 import (
+	"crdt"
 	"fmt"
 	"net"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -94,4 +96,53 @@ func fancyPrint(typeMsg string, src string, replicaID int64, msgs []interface{})
 	builder.WriteString("]")
 	builder.WriteString(typeMsg)
 	fmt.Println(&builder, msgs)
+}
+
+func StateToString(state crdt.State) (stateString string) {
+	var sb strings.Builder
+	switch typedState := state.(type) {
+	//Set
+	case crdt.SetAWValueState:
+		sb.WriteRune('[')
+		//TODO: As of now slice might be called multiple times. This shouldn't be here.
+		sort.Slice(typedState.Elems, func(i, j int) bool { return typedState.Elems[i] < typedState.Elems[j] })
+		for _, elem := range typedState.Elems {
+			sb.WriteString(string(elem) + ", ")
+		}
+		sb.WriteRune(']')
+	case crdt.SetAWLookupState:
+		if typedState.HasElem {
+			sb.WriteString("Element found.")
+		} else {
+			sb.WriteString("Element not found.")
+		}
+	//Counter
+	case crdt.CounterState:
+		sb.WriteString("Value: ")
+		sb.WriteRune(typedState.Value)
+	//TopK
+	case crdt.TopKValueState:
+		sb.WriteRune('[')
+		//TODO: As of now slice might be called multiple times. This shouldn't be here.
+		sort.Slice(typedState.Scores, func(i, j int) bool { return typedState.Scores[i].Id < typedState.Scores[j].Id })
+		for i, score := range typedState.Scores {
+			sb.WriteString(fmt.Sprintf("%d: (%d, %d), ", i+1, score.Id, score.Score))
+		}
+		sb.WriteRune(']')
+		/*
+			type SetAWValueState struct {
+				Elems []Element
+			}
+
+			type SetAWLookupState struct {
+				hasElem bool
+			}
+			type CounterState struct {
+				Value int32
+			}
+			type TopKValueState struct {
+				Scores []TopKScore
+		*/
+	}
+	return sb.String()
 }

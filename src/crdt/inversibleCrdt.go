@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"clocksi"
+	"fmt"
 )
 
 type InversibleCRDT interface {
@@ -127,6 +128,8 @@ func (crdt *genericInversibleCRDT) rebuildCRDTToVersion(targetTs clocksi.Timesta
 	for ; !canStop; i++ {
 		//If the version in history[i] is concurrent to the target version, then we should skip this operation.
 		//E.g: target is [3, 2] and we're looking at [1, 3]. Skip [1, 3]
+		//TODO: There's still a bug here with NuCRDTs.
+		fmt.Println("Going forward")
 		tsCompare := (*crdt.history[i].ts).Compare(targetTs)
 		if tsCompare == clocksi.HigherTs {
 			canStop = true
@@ -145,6 +148,7 @@ func (crdt *genericInversibleCRDT) rebuildCRDTToVersion(targetTs clocksi.Timesta
 			i--
 		}
 	}
+	fmt.Println("")
 	//"delete" (in fact, hide) the remaining history
 	crdt.history = crdt.history[:i]
 }

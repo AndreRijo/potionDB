@@ -19,12 +19,6 @@ const (
 )
 
 //docker run -d --hostname RMQ1 --name rabbitmq1 -p 5672:5672 rabbitmq:latest
-var (
-//TODO: Have this come from input or something instead of hardcoded
-//defaultIpList = []string{"localhost:5672", "localhost:5673"}
-//defaultIpList = []string{"localhost:5673"}
-//myDefaultIp = "localhost:5673"
-)
 
 //func CreateRemoteGroupStruct(myInstanceIP string, othersIPList []string, bucketsToListen []string, replicaID int64) (group *RemoteGroup, err error) {
 func CreateRemoteGroupStruct(bucketsToListen []string, replicaID int64) (group *RemoteGroup, err error) {

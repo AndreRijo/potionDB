@@ -10,8 +10,8 @@ type Replicator struct {
 	tm              *TransactionManager //to send request to downstream transactions
 	localPartitions []Logger
 	//remoteReps      []chan ReplicatorRequest
-	txnCache    map[int][]PairClockUpdates //int: partitionID
-	lastSentClk clocksi.Timestamp
+	txnCache map[int][]PairClockUpdates //int: partitionID
+	//lastSentClk clocksi.Timestamp
 	//receiveReplChan chan ReplicatorRequest
 	remoteConn *RemoteGroup
 	started    bool
@@ -53,7 +53,7 @@ func (req StableClock) getSenderID() int64 {
 	return req.SenderID
 }
 
-func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, partitionIDs []uint64, replicaID int64) {
+func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, replicaID int64) {
 	if !repl.started {
 		repl.tm = tm
 		repl.started = true
@@ -69,10 +69,15 @@ func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, par
 		ignore(err)
 		repl.remoteConn = remoteConn
 		repl.txnCache = make(map[int][]PairClockUpdates)
+		dummyTs := clocksi.NewClockSiTimestamp(replicaID)
 		for id := 0; id < int(nGoRoutines); id++ {
-			repl.txnCache[id] = make([]PairClockUpdates, 0, cacheInitialSize)
+			cacheEntry := make([]PairClockUpdates, 1, cacheInitialSize)
+			//All txns have a clock higher than this, so the first request is the equivalent of "requesting all commited txns"
+			cacheEntry[0] = PairClockUpdates{clk: &dummyTs}
+			repl.txnCache[id] = cacheEntry
+			//repl.txnCache[id] = make([]PairClockUpdates, 0, cacheInitialSize)
 		}
-		repl.lastSentClk = clocksi.NewClockSiTimestamp(replicaID)
+		//repl.lastSentClk = clocksi.NewClockSiTimestamp(replicaID)
 		//repl.receiveReplChan = make(chan ReplicatorRequest)
 		repl.replicaID = replicaID
 		go repl.receiveRemoteTxns()
@@ -99,12 +104,15 @@ func (repl *Replicator) getNewTxns() {
 	for id, part := range repl.localPartitions {
 		partEntry := repl.txnCache[id]
 		replyChans[id] = make(chan StableClkUpdatesPair)
-		var lastClk clocksi.Timestamp
-		if len(partEntry) > 0 {
-			lastClk = *partEntry[len(partEntry)-1].clk
-		} else {
-			lastClk = repl.lastSentClk
-		}
+		lastClk := *partEntry[len(partEntry)-1].clk
+		/*
+			var lastClk clocksi.Timestamp
+			if len(partEntry) > 0 {
+				lastClk = *partEntry[len(partEntry)-1].clk
+			} else {
+				lastClk = repl.lastSentClk
+			}
+		*/
 		part.SendLoggerRequest(LoggerRequest{
 			LogRequestArgs: LogTxnArgs{
 				lastClock: lastClk,
@@ -165,9 +173,9 @@ func (repl *Replicator) preparateDataToSend() (toSend []RemoteTxn) {
 			tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "appending upds. Upds:", txnUpdates)
 			toSend = append(toSend, RemoteTxn{Timestamp: minClk, Upds: &txnUpdates})
 			tools.FancyWarnPrint(tools.REPL_PRINT, repl.replicaID, "upds to send:", txnUpdates)
-		}
-		for id := range txnUpdates {
-			repl.txnCache[id] = repl.txnCache[id][1:]
+			for id := range txnUpdates {
+				repl.txnCache[id] = repl.txnCache[id][1:]
+			}
 		}
 	}
 	tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "finished prepareDataToSend")
@@ -193,6 +201,7 @@ func (repl *Replicator) sendTxns(toSend []RemoteTxn) {
 		for partId, upds := range *txn.Upds {
 			repl.remoteConn.SendPartTxn(&NewReplicatorRequest{PartitionID: int64(partId), SenderID: repl.replicaID, Timestamp: txn.Timestamp, Upds: upds})
 		}
+		//TODO: This might not even be necessary to be sent - probably it is enough to send this when there's no upds to send.
 		repl.remoteConn.SendStableClk(txn.Timestamp.GetPos(repl.replicaID))
 	}
 	tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "finished sendTxns")

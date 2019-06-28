@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"clocksi"
+	"fmt"
 	"math"
 )
 
@@ -171,6 +172,7 @@ func (crdt *TopKRmvCrdt) InitializeWithSize(startTs *clocksi.Timestamp, replicaI
 }
 
 func (crdt *TopKRmvCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
+	//TODO: Consider updsNotYetApplied
 	values := make([]TopKScore, len(crdt.elems))
 	i := 0
 	for _, elem := range crdt.elems {
@@ -212,6 +214,7 @@ func (crdt *TopKRmvCrdt) getTopKAddDownstreamArgs(addOp *TopKAdd) (args Downstre
 	} else if hasId {
 		//add_r
 		args = OptDownstreamTopKAdd{DownstreamTopKAdd: localArgs}
+		//args = localArgs
 	} else {
 		//2nd, i.e., !hasId
 		if elem.isHigher(crdt.smallestScore) {
@@ -219,6 +222,7 @@ func (crdt *TopKRmvCrdt) getTopKAddDownstreamArgs(addOp *TopKAdd) (args Downstre
 		} else {
 			//add_r
 			args = OptDownstreamTopKAdd{DownstreamTopKAdd: localArgs}
+			//args = localArgs
 		}
 	}
 	return
@@ -239,17 +243,15 @@ func (crdt *TopKRmvCrdt) getTopKRemoveDownstreamArgs(remOp *TopKRemove) (args Do
 		//inNotTop = true
 		//rmv_r
 		args = OptDownstreamTopKRemove{DownstreamTopKRemove: DownstreamTopKRemove{Id: remOp.Id, Vc: crdt.vc.Copy()}}
+		//args = DownstreamTopKRemove{Id: remOp.Id, Vc: crdt.vc.Copy()}
 	}
 	return
 }
 
-//TODO: Effects
 func (crdt *TopKRmvCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs DownstreamArguments) (otherDownstreamArgs DownstreamArguments) {
-	_, otherDownstreamArgs = crdt.applyDownstream(downstreamArgs)
-	//effect := crdt.applyDownstream(downstreamArgs)
+	effect, otherDownstreamArgs := crdt.applyDownstream(downstreamArgs)
 	//Necessary for inversibleCrdt
-	//TODO: Uncomment once effects are implemented
-	//crdt.addToHistory(&updTs, &downstreamArgs, effect)
+	crdt.addToHistory(&updTs, &downstreamArgs, effect)
 	return
 }
 
@@ -259,6 +261,11 @@ func (crdt *TopKRmvCrdt) applyDownstream(downstreamArgs UpdateArguments) (effect
 		effect, otherDownstreamArgs = crdt.applyAdd(&opType)
 	case DownstreamTopKRemove:
 		effect, otherDownstreamArgs = crdt.applyRemove(&opType)
+	//Local replicas must still apply these
+	case OptDownstreamTopKAdd:
+		effect, otherDownstreamArgs = crdt.applyAdd(&opType.DownstreamTopKAdd)
+	case OptDownstreamTopKRemove:
+		effect, otherDownstreamArgs = crdt.applyRemove(&opType.DownstreamTopKRemove)
 	}
 	return
 }
@@ -278,6 +285,15 @@ func (crdt *TopKRmvCrdt) applyAdd(op *DownstreamTopKAdd) (effect *Effect, otherD
 			if op.TopKElement.isHigher(elem) {
 				effectValue = TopKReplaceEffect{newElem: op.TopKElement, oldElem: elem, oldMin: crdt.smallestScore, oldTs: oldTs}
 				crdt.elems[op.Id] = op.TopKElement
+				//Different replicas, so we'll keep the old entry in notInTop (as it might be relevant again depending on concurrent removes)
+				if elem.ReplicaID != op.TopKElement.ReplicaID {
+					entry, hasEntry := crdt.notInTop[op.Id]
+					if !hasEntry {
+						entry = make(setTopKElement)
+						crdt.notInTop[op.Id] = entry
+					}
+					entry.add(elem)
+				}
 				//Check if min should be updated
 				if crdt.smallestScore == elem {
 					crdt.findAndUpdateMin()
@@ -285,7 +301,12 @@ func (crdt *TopKRmvCrdt) applyAdd(op *DownstreamTopKAdd) (effect *Effect, otherD
 			} else {
 				effectValue = TopKAddNotTopEffect{TopKAddEffect: TopKAddEffect{TopKElement: op.TopKElement, oldTs: oldTs}}
 				//Store in notInTop as it might be relevant later on
-				crdt.notInTop[op.Id].add(op.TopKElement)
+				entry, hasEntry := crdt.notInTop[op.Id]
+				if !hasEntry {
+					entry = make(setTopKElement)
+					crdt.notInTop[op.Id] = entry
+				}
+				entry.add(op.TopKElement)
 			}
 		} else {
 			//Check if it should belong to topK (i.e. there's space or its score is > min)
@@ -312,7 +333,8 @@ func (crdt *TopKRmvCrdt) applyAdd(op *DownstreamTopKAdd) (effect *Effect, otherD
 				crdt.elems[op.Id] = op.TopKElement
 				crdt.findAndUpdateMin()
 			} else {
-				effectValue = TopKAddEffect{TopKElement: op.TopKElement}
+				effectValue = TopKAddNotTopEffect{TopKAddEffect: TopKAddEffect{TopKElement: op.TopKElement, oldTs: oldTs}}
+				//effectValue = TopKAddEffect{TopKElement: op.TopKElement}
 				//Add to notInTop
 				entry, hasEntry := crdt.notInTop[op.Id]
 				if !hasEntry {
@@ -327,6 +349,7 @@ func (crdt *TopKRmvCrdt) applyAdd(op *DownstreamTopKAdd) (effect *Effect, otherD
 		//Must return this remove to propagate to other replicas
 		otherDownstreamArgs = DownstreamTopKRemove{Id: op.Id, Vc: remsVc}
 		effectValue = NoEffect{}
+		fmt.Println("[TOPKRMV]Apply add is returning a new remove.")
 	}
 	return &effectValue, otherDownstreamArgs
 }
@@ -345,8 +368,9 @@ Variants for element removed:
 	- Didn't find an element to add;
 */
 func (crdt *TopKRmvCrdt) applyRemove(op *DownstreamTopKRemove) (effect *Effect, otherDownstreamArgs DownstreamArguments) {
+	//TODO: In the pseudo-code, update < to <=
+	//Must be <= as the remove's clk is a copy without incrementing.
 	remEffect := TopKRemoveEffect{id: op.Id, notTopRemoved: make(setTopKElement)}
-
 	rems, hasRems := crdt.rems[op.Id]
 	if !hasRems {
 		remEffect.previousVc = nil
@@ -359,7 +383,7 @@ func (crdt *TopKRmvCrdt) applyRemove(op *DownstreamTopKRemove) (effect *Effect, 
 	//Find all adds for op.Id that are in notInTop whose ts is < clock[replicaID of the rmv] and remove them.
 	hiddenForId := crdt.notInTop[op.Id]
 	for elem := range hiddenForId {
-		if elem.Ts < op.Vc.GetPos(elem.ReplicaID) {
+		if elem.Ts <= op.Vc.GetPos(elem.ReplicaID) {
 			delete(hiddenForId, elem)
 			remEffect.notTopRemoved.add(elem)
 		}
@@ -369,11 +393,12 @@ func (crdt *TopKRmvCrdt) applyRemove(op *DownstreamTopKRemove) (effect *Effect, 
 		delete(crdt.notInTop, op.Id)
 	}
 	//Also remove from elems if the same condition is true.
-	if elem, hasElem := crdt.elems[op.Id]; hasElem && elem.Ts < op.Vc.GetPos(elem.ReplicaID) {
+	if elem, hasElem := crdt.elems[op.Id]; hasElem && elem.Ts <= op.Vc.GetPos(elem.ReplicaID) {
 		delete(crdt.elems, op.Id)
 		remEffect.remElem = elem
 		remEffect.oldMin = crdt.smallestScore
 
+		//TODO: What if there's an entry with higher clock for the same ID in notInTop?
 		if len(crdt.elems) == crdt.maxElems-1 {
 			//Top-k was full previously, need to find the next highest value to replace (possibly in different ID)
 			highestElem := TopKElement{}
@@ -405,6 +430,27 @@ func (crdt *TopKRmvCrdt) applyRemove(op *DownstreamTopKRemove) (effect *Effect, 
 				//No elem to add to top-k, however the removed element was the min. Need to find new one
 				crdt.findAndUpdateMin()
 			}
+		} else if hiddenForId != nil && len(hiddenForId) > 0 {
+			//TODO: Effect and handle it
+			//There's no other element in notInTop that isn't already in top but, for the element we removed,
+			//there's other entries still left. The highest should go to top.
+			highest := TopKElement{}
+			for elemNotTop := range hiddenForId {
+				if elemNotTop.isHigher(highest) {
+					highest = elemNotTop
+				}
+			}
+			delete(hiddenForId, highest)
+			if len(hiddenForId) == 0 {
+				delete(crdt.notInTop, highest.Id)
+			}
+			crdt.elems[highest.Id] = highest
+			if elem == crdt.smallestScore {
+				//If the removed elem was the min, the one we added now has, for sure, an even smaller value
+				crdt.smallestScore = highest
+			}
+			//Need to pass this add now
+			otherDownstreamArgs = DownstreamTopKAdd{TopKElement: highest}
 		} else if elem == crdt.smallestScore {
 			//Removed element was the min, need to find new min
 			crdt.findAndUpdateMin()
@@ -498,7 +544,7 @@ func (crdt *TopKRmvCrdt) undoAddEffect(effect *TopKAddEffect) {
 
 func (crdt *TopKRmvCrdt) undoAddNotTopEffect(effect *TopKAddNotTopEffect) {
 	crdt.vc.UpdateForcedPos(effect.ReplicaID, effect.oldTs)
-	//Element was added to notInTop because there was an entry for it in top with higher value
+	//Element was added to notInTop
 	notInTop := crdt.notInTop[effect.Id]
 	delete(notInTop, effect.TopKElement)
 	if len(notInTop) == 0 {
@@ -558,6 +604,18 @@ func (crdt *TopKRmvCrdt) undoRemoveEffect(effect *TopKRemoveEffect) {
 
 	if (effect.remElem != TopKElement{}) {
 		//An element was removed.
+		//When this remove was executed, it's possible that a concurrent add in notInTop for the same elem was promoted to the top
+		inTop, has := crdt.elems[effect.remElem.Id]
+		if has {
+			//Move that element to notInTop
+			notTop, has = crdt.notInTop[effect.id]
+			if !has {
+				notTop = make(setTopKElement)
+				crdt.notInTop[effect.id] = notTop
+			}
+			notTop.add(inTop)
+		}
+		//Add removed element back to the top
 		crdt.elems[effect.id] = effect.remElem
 		if effect.minAddedToTop {
 			//When the remove was executed, the actual min was promoted from notInTop to top. Now, we'll demote it back to notInTop

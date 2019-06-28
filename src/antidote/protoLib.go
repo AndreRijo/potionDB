@@ -468,6 +468,29 @@ func convertAntidoteStatesToProto(objectStates []crdt.State) (protobufs []*ApbRe
 	return
 }
 
+func ConvertProtoObjectToAntidoteState(proto *ApbReadObjectResp, crdtType CRDTType) (state crdt.State) {
+	switch crdtType {
+	case CRDTType_ORSET:
+		allObjsBytes := proto.GetSet().GetValue()
+		setState := crdt.SetAWValueState{Elems: make([]crdt.Element, len(allObjsBytes))}
+		//Convert byte[][] back to strings
+		for i, objBytes := range allObjsBytes {
+			setState.Elems[i] = crdt.Element(objBytes)
+		}
+		state = setState
+	case CRDTType_COUNTER:
+		state = crdt.CounterState{Value: proto.GetCounter().GetValue()}
+	case CRDTType_TOPK_RMV:
+		scores := proto.GetTopk().GetValues()
+		topKState := crdt.TopKValueState{Scores: make([]crdt.TopKScore, len(scores))}
+		for i, pair := range scores {
+			topKState.Scores[i] = crdt.TopKScore{Id: pair.GetPlayerId(), Score: pair.GetScore()}
+		}
+		state = topKState
+	}
+	return
+}
+
 /***** REPLICATOR PROTOS ******/
 
 /*
