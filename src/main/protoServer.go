@@ -316,7 +316,7 @@ func protoObjectsToAntidoteObjects(protoObjs []*antidote.ApbBoundObject) (objs [
 	return
 }
 
-//TODO: Maybe the two methods below should be moved to protoLib?
+//TODO: Maybe this method below should be moved to protoLib?
 func protoUpdateOpToAntidoteUpdate(protoUp []*antidote.ApbUpdateOp) (upParams []antidote.UpdateObjectParams) {
 	upParams = make([]antidote.UpdateObjectParams, len(protoUp))
 	var currObj *antidote.ApbBoundObject = nil
@@ -326,38 +326,8 @@ func protoUpdateOpToAntidoteUpdate(protoUp []*antidote.ApbUpdateOp) (upParams []
 		currObj, currUpOp = update.GetBoundobject(), update.GetOperation()
 		upParams[i] = antidote.UpdateObjectParams{
 			KeyParams:  antidote.CreateKeyParams(string(currObj.GetKey()), currObj.GetType(), string(currObj.GetBucket())),
-			UpdateArgs: protoUpdateOperationToAntidoteArguments(currUpOp, currObj.GetType()),
+			UpdateArgs: antidote.ConvertProtoUpdateToAntidote(currUpOp, currObj.GetType()),
 		}
-	}
-
-	return
-}
-
-//TODO: Should this be moved to the CRDT code? Or left here? Or tbh this should be moved to protoLib...
-func protoUpdateOperationToAntidoteArguments(protoOperation *antidote.ApbUpdateOperation,
-	crdtType antidote.CRDTType) (updateArgs crdt.UpdateArguments) {
-	switch crdtType {
-	case antidote.CRDTType_COUNTER:
-		updateArgs = crdt.Increment{Change: int32(protoOperation.GetCounterop().GetInc())}
-	case antidote.CRDTType_ORSET:
-		setProto := protoOperation.GetSetop()
-		if setProto.GetOptype() == antidote.ApbSetUpdate_ADD {
-			updateArgs = crdt.AddAll{Elems: crdt.ByteMatrixToElementArray(setProto.GetAdds())}
-		} else {
-			updateArgs = crdt.RemoveAll{Elems: crdt.ByteMatrixToElementArray(setProto.GetRems())}
-		}
-	case antidote.CRDTType_TOPK_RMV:
-		topkProto := protoOperation.GetTopkrmvop()
-		if adds := topkProto.GetAdds(); adds != nil {
-			add := adds[0]
-			updateArgs = crdt.TopKAdd{TopKScore: crdt.TopKScore{Id: add.GetPlayerId(), Score: add.GetScore()}}
-		} else {
-			rem := topkProto.GetRems()[0]
-			updateArgs = crdt.TopKRemove{Id: rem}
-		}
-	default:
-		//TODO: Support other types and error case, and return error to client
-		tools.CheckErr("Unsupported data type for update - we should warn the user about this one day.", nil)
 	}
 
 	return

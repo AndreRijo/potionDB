@@ -101,8 +101,19 @@ func fancyPrint(typeMsg string, src string, replicaID int64, msgs []interface{})
 func StateToString(state crdt.State) (stateString string) {
 	var sb strings.Builder
 	switch typedState := state.(type) {
+	//Counter
+	case crdt.CounterState:
+		sb.WriteString("Value: ")
+		sb.WriteString(fmt.Sprint(typedState.Value))
+
+	//Register
+	case crdt.RegisterState:
+		sb.WriteString("Value: ")
+		sb.WriteString(fmt.Sprint(typedState.Value))
+
 	//Set
 	case crdt.SetAWValueState:
+		//TODO: Test printing using fmt.Sprintln
 		sb.WriteRune('[')
 		//TODO: As of now slice might be called multiple times. This shouldn't be here.
 		sort.Slice(typedState.Elems, func(i, j int) bool { return typedState.Elems[i] < typedState.Elems[j] })
@@ -116,10 +127,20 @@ func StateToString(state crdt.State) (stateString string) {
 		} else {
 			sb.WriteString("Element not found.")
 		}
-	//Counter
-	case crdt.CounterState:
+
+	//Map
+	case crdt.MapEntryState:
+		sb.WriteString(fmt.Sprintln(typedState.Values))
+	case crdt.MapGetValueState:
 		sb.WriteString("Value: ")
-		sb.WriteRune(typedState.Value)
+		sb.WriteString(fmt.Sprint(typedState.Value))
+	case crdt.MapHasKeyState:
+		sb.WriteString("Key found: ")
+		sb.WriteString(fmt.Sprint(typedState.HasKey))
+	case crdt.MapKeysState:
+		sort.Slice(typedState.Keys, func(i, j int) bool { return typedState.Keys[i] < typedState.Keys[j] })
+		sb.WriteString(fmt.Sprintln(typedState.Keys))
+
 	//TopK
 	case crdt.TopKValueState:
 		sb.WriteRune('[')
@@ -129,20 +150,14 @@ func StateToString(state crdt.State) (stateString string) {
 			sb.WriteString(fmt.Sprintf("%d: (%d, %d), ", i+1, score.Id, score.Score))
 		}
 		sb.WriteRune(']')
-		/*
-			type SetAWValueState struct {
-				Elems []Element
-			}
 
-			type SetAWLookupState struct {
-				hasElem bool
-			}
-			type CounterState struct {
-				Value int32
-			}
-			type TopKValueState struct {
-				Scores []TopKScore
-		*/
+	//Avg
+	case crdt.AvgState:
+		sb.WriteString(fmt.Sprint(typedState.Value))
+	//MaxMin
+	case crdt.MaxMinState:
+		sb.WriteString(fmt.Sprint(typedState.Value))
 	}
+
 	return sb.String()
 }

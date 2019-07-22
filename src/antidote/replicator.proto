@@ -24,6 +24,10 @@ message ProtoDownstreamUpd {
     optional ProtoCounterDownstream counterOp = 2;
     optional ProtoSetDownstream setOp = 3;
     optional ProtoTopKRmvDownstream topkrmvOp = 4;
+    optional ProtoLWWRegisterDownstream lwwregOp = 5;
+    optional ProtoMapDownstream mapOp = 6;
+    optional ProtoAvgDownstream avgOp = 7;
+    optional ProtoMaxMinDownstream maxminOp = 8;
 }
 
 message ProtoCounterDownstream {
@@ -31,14 +35,43 @@ message ProtoCounterDownstream {
     required int32 change = 2;
 }
 
+message ProtoLWWRegisterDownstream {
+    required bytes value = 1;
+    required int64 ts = 2;
+    required int64 replicaID = 3;
+}
+
 message ProtoSetDownstream {
     repeated ProtoValueUnique adds = 1;    //key -> unique
     repeated ProtoValueUniques rems = 2;   //key -> set/array of uniques
 }
 
+message ProtoMapDownstream {
+    repeated ProtoKeyValueUnique adds = 1;  //key -> (element, unique)
+    repeated ProtoMapRemove rems = 2;
+}
+
 message ProtoTopKRmvDownstream {
     repeated ProtoTopKElement adds = 1;
     repeated ProtoTopKIdVc rems = 2;
+}
+
+message ProtoAvgDownstream {
+    required int64 sumValue = 1;
+    required int32 nAdds = 2;
+}
+
+message ProtoMaxMinDownstream {
+    optional ProtoMaxDownstream max = 1;
+    optional ProtoMinDownstream min = 2;
+}
+
+message ProtoMaxDownstream {
+    required int64 value = 1;
+}
+
+message ProtoMinDownstream {
+    required int64 value = 1;
 }
 
 message ProtoValueUnique {
@@ -49,6 +82,17 @@ message ProtoValueUnique {
 message ProtoValueUniques {
     required bytes value = 1;
     repeated uint64 uniques = 2;
+}
+
+message ProtoKeyValueUnique {
+    required bytes key = 1;
+    required bytes element = 2;
+    required uint64 unique = 3;
+}
+
+message ProtoMapRemove {
+    required bytes key = 1;
+    repeated ProtoValueUniques elems = 2;
 }
 
 message ProtoTopKElement {

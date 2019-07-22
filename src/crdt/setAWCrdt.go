@@ -120,40 +120,69 @@ func (crdt *SetAWCrdt) getState(updsNotYetApplied []UpdateArguments) (state Stat
 	rems := make(map[Element]struct{})
 
 	//Idea: go through the updates and check which elements were added/removed compared to the original state.
-	for _, upd := range updsNotYetApplied {
-		switch typedUpd := upd.(type) {
+	/*
+		for _, upd := range updsNotYetApplied {
+			switch typedUpd := upd.(type) {
+			case Add:
+				if crdt.elems[typedUpd.Element] == nil {
+					adds[typedUpd.Element] = struct{}{}
+				} else {
+					delete(rems, typedUpd.Element)
+				}
+			case AddAll:
+				for _, elem := range typedUpd.Elems {
+					if crdt.elems[elem] == nil {
+						adds[elem] = struct{}{}
+					} else {
+						delete(rems, elem)
+					}
+				}
+			case Remove:
+				if crdt.elems[typedUpd.Element] != nil {
+					rems[typedUpd.Element] = struct{}{}
+				} else {
+					delete(adds, typedUpd.Element)
+				}
+			case RemoveAll:
+				for _, elem := range typedUpd.Elems {
+					if crdt.elems[elem] != nil {
+						rems[elem] = struct{}{}
+					} else {
+						delete(adds, elem)
+					}
+				}
+			}
+		}
+	*/
+	//Idea: for each element, the latest entry is the one that matters
+	for i := len(updsNotYetApplied) - 1; i >= 0; i-- {
+		switch typedUpd := updsNotYetApplied[i].(type) {
 		case Add:
-			if crdt.elems[typedUpd.Element] == nil {
+			if _, has := rems[typedUpd.Element]; !has {
 				adds[typedUpd.Element] = struct{}{}
-			} else {
-				delete(rems, typedUpd.Element)
 			}
 		case AddAll:
 			for _, elem := range typedUpd.Elems {
-				if crdt.elems[elem] == nil {
+				if _, has := rems[elem]; !has {
 					adds[elem] = struct{}{}
-				} else {
-					delete(rems, elem)
 				}
 			}
 		case Remove:
-			if crdt.elems[typedUpd.Element] != nil {
+			if _, has := adds[typedUpd.Element]; !has {
 				rems[typedUpd.Element] = struct{}{}
-			} else {
-				delete(adds, typedUpd.Element)
 			}
 		case RemoveAll:
 			for _, elem := range typedUpd.Elems {
-				if crdt.elems[elem] != nil {
+				if _, has := adds[elem]; !has {
 					rems[elem] = struct{}{}
-				} else {
-					delete(adds, elem)
 				}
 			}
 		}
 	}
 
-	elems := make([]Element, len(crdt.elems)+len(adds)-len(rems))
+	//Can't subtract rems, as operations in updsNotYetApplied aren't processed and may refer elems never added
+	//TODO: This might be optimized if we call Update() as soon as an operation is received
+	elems := make([]Element, len(crdt.elems)+len(adds))
 	i := 0
 	for elem := range crdt.elems {
 		if _, hasRem := rems[elem]; !hasRem {
@@ -162,10 +191,12 @@ func (crdt *SetAWCrdt) getState(updsNotYetApplied []UpdateArguments) (state Stat
 		}
 	}
 	for elem := range adds {
-		elems[i] = elem
-		i++
+		if _, has := crdt.elems[elem]; !has {
+			elems[i] = elem
+			i++
+		}
 	}
-	return SetAWValueState{Elems: elems}
+	return SetAWValueState{Elems: elems[0:i]}
 }
 
 func (crdt *SetAWCrdt) lookup(elem Element, updsNotYetApplied []UpdateArguments) (state State) {
@@ -174,30 +205,58 @@ func (crdt *SetAWCrdt) lookup(elem Element, updsNotYetApplied []UpdateArguments)
 		return SetAWLookupState{HasElem: hasElem}
 	}
 	//Need to go through pending updates to decide if the element is in the state or not
-	for _, upd := range updsNotYetApplied {
-		switch typedUpd := upd.(type) {
+	/*
+		for _, upd := range updsNotYetApplied {
+			switch typedUpd := upd.(type) {
+			case Add:
+				if typedUpd.Element == elem {
+					hasElem = true
+				}
+			case AddAll:
+				for _, updElem := range typedUpd.Elems {
+					if updElem == elem {
+						hasElem = true
+					}
+				}
+			case Remove:
+				if typedUpd.Element == elem {
+					hasElem = false
+				}
+			case RemoveAll:
+				for _, updElem := range typedUpd.Elems {
+					if updElem == elem {
+						hasElem = false
+					}
+				}
+			}
+		}
+	*/
+	//Idea: only need to check the latest update of elem
+	for i := len(updsNotYetApplied) - 1; i >= 0; i-- {
+		switch typedUpd := updsNotYetApplied[i].(type) {
 		case Add:
 			if typedUpd.Element == elem {
-				hasElem = true
+				return SetAWLookupState{HasElem: true}
 			}
 		case AddAll:
 			for _, updElem := range typedUpd.Elems {
 				if updElem == elem {
-					hasElem = true
+					return SetAWLookupState{HasElem: true}
 				}
 			}
 		case Remove:
 			if typedUpd.Element == elem {
-				hasElem = false
+				return SetAWLookupState{HasElem: false}
 			}
 		case RemoveAll:
 			for _, updElem := range typedUpd.Elems {
 				if updElem == elem {
-					hasElem = false
+					return SetAWLookupState{HasElem: false}
 				}
 			}
 		}
 	}
+	//Element wasn't referred in upsNotYetApplied
 	return SetAWLookupState{HasElem: hasElem}
 }
 
@@ -233,9 +292,16 @@ func (crdt *SetAWCrdt) getRemoveAllDownstreamArgs(elems []Element) (downstreamAr
 	uniqueMap := make(map[Element]UniqueSet)
 	for _, key := range elems {
 		//Maps are in fact references, so doing "uniqueMap[key] = crdt.elems[key]" wouldn't actually copy the uniqueSet's (which is a map) contents to a new uniqueSet.
-		uniqueMap[key] = crdt.elems[key].copy()
+		if elem, has := crdt.elems[key]; has {
+			uniqueMap[key] = elem.copy()
+		}
 	}
-	downstreamArgs = DownstreamRemoveAll{Elems: uniqueMap}
+	if len(uniqueMap) == 0 {
+		//Nothing to effectivelly remove, saving an operation
+		downstreamArgs = NoOp{}
+	} else {
+		downstreamArgs = DownstreamRemoveAll{Elems: uniqueMap}
+	}
 	//fmt.Println("[SETAWCRDT]Remove all downstream generated:", downstreamArgs)
 	return
 }

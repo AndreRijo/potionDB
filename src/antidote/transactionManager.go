@@ -379,7 +379,7 @@ func (tm *TransactionManager) handleStaticTMRead(request TransactionManagerReque
 		close(currReadChan)
 	}
 
-	fmt.Println("[TM]Static read with clk: ", tsToUse)
+	//fmt.Println("[TM]Static read with clk: ", tsToUse)
 	readArgs.ReplyChan <- TMStaticReadReply{
 		States:    states,
 		Timestamp: tsToUse,
@@ -837,10 +837,8 @@ func (tm *TransactionManager) handleDownstreamGeneratedOps() {
 					ops := opsForTxn[clkKey]
 					//Only create a txn if there's actually new ops
 					if len(ops) > 0 {
-						fmt.Println("[NUCRDT TM]Received reply from all partitions, need to commit for timestamp", typedReq.Timestamp.ToString())
+						//fmt.Println("[NUCRDT TM]Received reply from all partitions, need to commit for timestamp", typedReq.Timestamp.ToString())
 						go tm.commitOpsForRemote(ops)
-					} else {
-						fmt.Println("[NUCRDT TM]Received reply from all partitions, don't need to commit for timestamp", typedReq.Timestamp.ToString())
 					}
 					delete(opsForTxn, clkKey)
 					delete(partitionsLeft, clkKey)
@@ -867,10 +865,8 @@ func (tm *TransactionManager) handleDownstreamGeneratedOps() {
 				ops := opsForTxn[clkKey]
 				//Only create a txn if there's actually new ops
 				if len(ops) > 0 {
-					fmt.Println("[NUCRDT TM]Received reply from all partitions, need to commit for timestamp", typedReq.Timestamp.ToString())
+					//fmt.Println("[NUCRDT TM]Received reply from all partitions, need to commit for timestamp", typedReq.Timestamp.ToString())
 					go tm.commitOpsForRemote(ops)
-				} else {
-					fmt.Println("[NUCRDT TM]Received reply from all partitions, don't need to commit for timestamp", typedReq.Timestamp.ToString())
 				}
 				delete(opsForTxn, clkKey)
 				delete(partitionsLeft, clkKey)

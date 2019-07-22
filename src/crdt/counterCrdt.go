@@ -42,7 +42,6 @@ func (crdt *CounterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int64)
 	return
 }
 
-//TODO: Implement proper read
 func (crdt *CounterCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
 	if updsNotYetApplied == nil || len(updsNotYetApplied) > 0 {
 		return crdt.GetValue()
@@ -60,13 +59,11 @@ func (crdt *CounterCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArgu
 }
 
 func (crdt *CounterCrdt) GetValue() (state State) {
-	state = CounterState{Value: crdt.value}
-	return
+	return CounterState{Value: crdt.value}
 }
 
 func (crdt *CounterCrdt) Update(args UpdateArguments) (downstreamArgs DownstreamArguments) {
-	downstreamArgs = args.(DownstreamArguments)
-	return
+	return args.(DownstreamArguments)
 }
 
 func (crdt *CounterCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs DownstreamArguments) (otherDownstreamArgs DownstreamArguments) {

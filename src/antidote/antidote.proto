@@ -16,8 +16,9 @@ enum CRDT_type {
     FLAG_DW = 14;
     TOPK = 1;
     TOPK_RMV = 2;
-    AVERAGE = 7;
+    AVG = 7;
     LEADERBOARD = 9;
+    MAXMIN = 0;
 }
 
 // Riak Error response
@@ -182,13 +183,26 @@ message ApbGetLeaderboardResp {
 // Average
 
 message ApbAverageUpdate {
-	required int32 value = 1;
+	required int64 value = 1;
 	optional int32 nValues = 2;
 }
 
 message ApbGetAverageResp {
-	required float avg = 1;
+	required double avg = 1;
 }
+
+//--------------------
+// MaxMin
+
+message ApbMaxMinUpdate {
+    required int64 value = 1;
+    required bool isMax = 2;
+}
+
+message ApbGetMaxMinResp {
+    required int64 value = 1;
+}
+
 
 //--------------------------------------------------------------
 
@@ -224,6 +238,7 @@ message ApbUpdateOperation { // TODO use this above
     optional ApbMapUpdate mapop = 5;
     optional ApbCrdtReset resetop = 6;
     optional ApbFlagUpdate flagop = 7;
+    optional ApbMaxMinUpdate maxminop = 11;
     optional ApbTopkRmvUpdate topkrmvop = 12;
     optional ApbTopkUpdate topkop = 13;
     optional ApbLeaderboardUpdate leaderboardop = 14;
@@ -279,9 +294,11 @@ message ApbReadObjectResp {
     optional ApbGetMVRegResp mvreg = 4;
     optional ApbGetMapResp map = 6;
     optional ApbGetFlagResp flag = 7;
+    optional ApbGetMaxMinResp maxmin = 12;
     optional ApbGetTopkResp topk = 13;
     optional ApbGetLeaderboardResp leadb = 14;
     optional ApbGetAverageResp avg = 15;
+
 }
 
 message ApbReadObjectsResp {

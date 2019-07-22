@@ -2,6 +2,18 @@ package crdt
 
 type Unique uint64
 
+/*
+type USetElemPair struct {
+	Element
+	UniqueSet
+}
+*/
+
+type UniqueElemPair struct {
+	Element
+	Unique
+}
+
 //Standard map operations also work on this datatype
 type UniqueSet map[Unique]struct{}
 

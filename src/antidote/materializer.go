@@ -419,10 +419,10 @@ func applyReadAndReply(readArgs *MatReadCommonArgs, readLatest bool, readTs cloc
 		pendingObjOps = getObjectPendingOps(readArgs.KeyParams, pendingOps)
 	}
 	if readLatest {
-		fmt.Println("[MAT]Reading latest version", readTs)
+		//fmt.Println("[MAT]Reading latest version", readTs)
 		state = obj.ReadLatest(readArgs.ReadArgs, pendingObjOps)
 	} else {
-		fmt.Println("[MAT]Reading old version", readTs)
+		//fmt.Println("[MAT]Reading old version", readTs)
 		state = obj.ReadOld(readArgs.ReadArgs, readTs, pendingObjOps)
 	}
 
@@ -841,11 +841,19 @@ func handleMatClkPosUpd(request MaterializerRequest, partitionData *partitionDat
 func initializeCrdt(crdtType CRDTType, partitionData *partitionData) (newCrdt crdt.CRDT) {
 	switch crdtType {
 	case CRDTType_COUNTER:
-		newCrdt = (&crdt.CounterCrdt{}).Initialize(nil, -1)
+		newCrdt = (&crdt.CounterCrdt{}).Initialize(nil, partitionData.replicaID)
+	case CRDTType_LWWREG:
+		newCrdt = (&crdt.LwwRegisterCrdt{}).Initialize(nil, partitionData.replicaID)
 	case CRDTType_ORSET:
-		newCrdt = (&crdt.SetAWCrdt{}).Initialize(nil, -1)
+		newCrdt = (&crdt.SetAWCrdt{}).Initialize(nil, partitionData.replicaID)
+	case CRDTType_RRMAP:
+		newCrdt = (&crdt.ORMapCrdt{}).Initialize(nil, partitionData.replicaID)
 	case CRDTType_TOPK_RMV:
 		newCrdt = (&crdt.TopKRmvCrdt{}).Initialize(nil, partitionData.replicaID)
+	case CRDTType_AVG:
+		newCrdt = (&crdt.AvgCrdt{}).Initialize(nil, partitionData.replicaID)
+	case CRDTType_MAXMIN:
+		newCrdt = (&crdt.MaxMinCrdt{}).Initialize(nil, partitionData.replicaID)
 	default:
 		newCrdt = nil
 	}
