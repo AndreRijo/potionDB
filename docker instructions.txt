@@ -1,0 +1,15 @@
+Single server on port 8087 (default):
+
+docker build -t "potiondb" .
+docker run -d -p 8087:8087 -p 5672:5672 --name potiondb8087 potiondb
+
+
+
+
+More than one server:
+
+docker network create potiondb-net
+docker build -t "potiondb1" -f Dockerfile_s1 .
+docker build -t "potiondb2" -f Dockerfile_s2 .
+docker run -d -p 8087:8087 -p 5674:5672 --network potiondb-net --name potiondb8087 potiondb1
+docker run -d -p 8088:8088 -p 5673:5672 --network potiondb-net --name potiondb8088 potiondb2
