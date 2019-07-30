@@ -1,6 +1,7 @@
 package antidote
 
 import (
+	fmt "fmt"
 	"strings"
 	"tools"
 )
@@ -27,10 +28,13 @@ func CreateRemoteGroupStruct(bucketsToListen []string, replicaID int64) (group *
 
 	group = &RemoteGroup{conns: make([]*RemoteConn, len(othersIPList)+1), groupChan: make(chan ReplicatorMsg, defaultListenerSize*len(othersIPList)+1)}
 	for i, ip := range othersIPList {
+		fmt.Println("Connecting to", ip)
 		group.conns[i], err = CreateRemoteConnStruct(ip, bucketsToListen, replicaID)
 		if err != nil {
+			fmt.Println("Error while connecting to RabbitMQ:", err)
 			return nil, err
 		}
+		fmt.Println("Connected to", ip)
 	}
 	group.ourConn, err = CreateRemoteConnStruct(myInstanceIP, bucketsToListen, replicaID)
 	if err != nil {

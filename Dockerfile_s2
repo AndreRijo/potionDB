@@ -28,4 +28,4 @@ EXPOSE 8087
 EXPOSE 5672
 
 # Run the protoserver
-CMD ["bash", "go/bin/start.sh", "-config=/go/bin/configs/default"]
+CMD ["bash", "go/bin/start.sh", "-config=/go/bin/configs/server2"]

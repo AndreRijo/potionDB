@@ -37,6 +37,7 @@ var (
 			PROTOLIB_PRINT: {},
 		}
 	*/
+
 	disabledDebugs    = map[string]struct{}{}
 	allOutputDisabled = true
 )

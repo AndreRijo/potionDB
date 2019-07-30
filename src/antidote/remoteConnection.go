@@ -29,7 +29,8 @@ type HoldOperations struct {
 const (
 	protocol = "amqp://"
 	//ip                  = "guest:guest@localhost:"
-	prefix = "guest:guest@"
+	//prefix = "guest:guest@"
+	prefix = "test:test@"
 	//port         = "5672/"
 	exchangeName = "objRepl"
 	exchangeType = "topic"
