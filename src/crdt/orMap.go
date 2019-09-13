@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+const CRDTType_ORMAP CRDTType = 15
+
 type ORMapCrdt struct {
 	*genericInversibleCRDT
 	entries map[string]map[Element]UniqueSet
@@ -62,7 +64,7 @@ type MapRemoveAll struct {
 	Keys []string
 }
 
-//Doownstream operations
+//Downstream operations
 
 type DownstreamORMapAddAll struct {
 	Adds map[string]UniqueElemPair
@@ -83,6 +85,26 @@ type ORMapAddAllEffect struct {
 type ORMapRemoveAllEffect struct {
 	Rems map[string]map[Element]UniqueSet
 }
+
+func (args MapAdd) GetCRDTType() CRDTType { return CRDTType_ORMAP }
+
+func (args MapRemove) GetCRDTType() CRDTType { return CRDTType_ORMAP }
+
+func (args MapAddAll) GetCRDTType() CRDTType { return CRDTType_ORMAP }
+
+func (args MapRemoveAll) GetCRDTType() CRDTType { return CRDTType_ORMAP }
+
+func (args DownstreamORMapAddAll) GetCRDTType() CRDTType { return CRDTType_ORMAP }
+
+func (args DownstreamORMapRemoveAll) GetCRDTType() CRDTType { return CRDTType_ORMAP }
+
+func (args MapEntryState) GetCRDTType() CRDTType { return CRDTType_ORMAP }
+
+func (args MapGetValueState) GetCRDTType() CRDTType { return CRDTType_ORMAP }
+
+func (args MapHasKeyState) GetCRDTType() CRDTType { return CRDTType_ORMAP }
+
+func (args MapKeysState) GetCRDTType() CRDTType { return CRDTType_ORMAP }
 
 func (args DownstreamORMapAddAll) MustReplicate() bool { return true }
 
@@ -244,10 +266,8 @@ func (crdt *ORMapCrdt) getValue(updsNotYetApplied []UpdateArguments, key string)
 			}
 
 		case MapAddAll:
-			for k, e := range typedUpd.Values {
-				if k == key {
-					return MapGetValueState{Value: e}
-				}
+			if e, has := typedUpd.Values[key]; has {
+				return MapGetValueState{Value: e}
 			}
 		case MapRemoveAll:
 			for _, k := range typedUpd.Keys {
@@ -328,11 +348,7 @@ func (crdt *ORMapCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effe
 	switch opType := downstreamArgs.(type) {
 	case DownstreamORMapAddAll:
 		tmpEffect = crdt.applyAddAll(opType.Adds, opType.Rems)
-	case *DownstreamORMapAddAll:
-		tmpEffect = crdt.applyAddAll(opType.Adds, opType.Rems)
 	case DownstreamORMapRemoveAll:
-		tmpEffect = crdt.applyRemoveAll(opType.Rems)
-	case *DownstreamORMapRemoveAll:
 		tmpEffect = crdt.applyRemoveAll(opType.Rems)
 	}
 	return &tmpEffect
@@ -421,7 +437,7 @@ func (crdt *ORMapCrdt) Copy() (copyCRDT InversibleCRDT) {
 }
 
 func (crdt *ORMapCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
-	crdt.genericInversibleCRDT.rebuildCRDTToVersion(targetTs, crdt.undoEffect, crdt.reapplyOp)
+	crdt.genericInversibleCRDT.rebuildCRDTToVersion(targetTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete)
 }
 
 func (crdt *ORMapCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
@@ -473,3 +489,5 @@ func (crdt *ORMapCrdt) undoRemoveAllEffect(rems map[string]map[Element]UniqueSet
 		}
 	}
 }
+
+func (crdt *ORMapCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}

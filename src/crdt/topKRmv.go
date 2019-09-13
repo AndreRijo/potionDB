@@ -6,6 +6,8 @@ import (
 	"math"
 )
 
+const CRDTType_TOPK_RMV CRDTType = 2
+
 type TopKRmvCrdt struct {
 	*genericInversibleCRDT
 	vc        clocksi.Timestamp
@@ -139,6 +141,20 @@ func (elem TopKElement) isHigher(other TopKElement) bool {
 func (elem TopKElement) isSmaller(other TopKElement) bool {
 	return other != TopKElement{} && other.isHigher(elem)
 }
+
+func (args TopKAdd) GetCRDTType() CRDTType { return CRDTType_TOPK_RMV }
+
+func (args TopKRemove) GetCRDTType() CRDTType { return CRDTType_TOPK_RMV }
+
+func (args DownstreamTopKAdd) GetCRDTType() CRDTType { return CRDTType_TOPK_RMV }
+
+func (args DownstreamTopKRemove) GetCRDTType() CRDTType { return CRDTType_TOPK_RMV }
+
+func (args OptDownstreamTopKAdd) GetCRDTType() CRDTType { return CRDTType_TOPK_RMV }
+
+func (args OptDownstreamTopKRemove) GetCRDTType() CRDTType { return CRDTType_TOPK_RMV }
+
+func (args TopKValueState) GetCRDTType() CRDTType { return CRDTType_TOPK_RMV }
 
 func (args DownstreamTopKAdd) MustReplicate() bool { return true }
 
@@ -504,7 +520,7 @@ func (crdt *TopKRmvCrdt) Copy() (copyCRDT InversibleCRDT) {
 }
 
 func (crdt *TopKRmvCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
-	crdt.genericInversibleCRDT.rebuildCRDTToVersion(targetTs, crdt.undoEffect, crdt.reapplyOp)
+	crdt.genericInversibleCRDT.rebuildCRDTToVersion(targetTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete)
 }
 
 func (crdt *TopKRmvCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
@@ -629,6 +645,8 @@ func (crdt *TopKRmvCrdt) undoRemoveEffect(effect *TopKRemoveEffect) {
 		crdt.smallestScore = effect.oldMin
 	}
 }
+
+func (crdt *TopKRmvCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
 
 /*
 func (crdt *TopKRmvCrdt) applyRemove(op *DownstreamTopKRemove) (effect *Effect, otherDownstreamArgs DownstreamArguments) {

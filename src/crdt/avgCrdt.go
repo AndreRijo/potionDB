@@ -2,6 +2,8 @@ package crdt
 
 import "clocksi"
 
+const CRDTType_AVG CRDTType = 7
+
 type AvgCrdt struct {
 	*genericInversibleCRDT
 	sum   int64
@@ -22,6 +24,12 @@ type AddMultipleValue struct {
 }
 
 type AddMultipleValueEffect AddMultipleValue
+
+func (args AddValue) GetCRDTType() CRDTType { return CRDTType_AVG }
+
+func (args AddMultipleValue) GetCRDTType() CRDTType { return CRDTType_AVG }
+
+func (args AvgState) GetCRDTType() CRDTType { return CRDTType_AVG }
 
 func (args AddMultipleValue) MustReplicate() bool { return true }
 
@@ -96,7 +104,7 @@ func (crdt *AvgCrdt) Copy() (copyCRDT InversibleCRDT) {
 
 func (crdt *AvgCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	//TODO: Might be worth to check if there's a better way of doing this for avg
-	crdt.genericInversibleCRDT.rebuildCRDTToVersion(targetTs, crdt.undoEffect, crdt.reapplyOp)
+	crdt.genericInversibleCRDT.rebuildCRDTToVersion(targetTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete)
 }
 
 func (crdt *AvgCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
@@ -108,3 +116,5 @@ func (crdt *AvgCrdt) undoEffect(effect *Effect) {
 	crdt.sum -= typedEffect.SumValue
 	crdt.nAdds -= typedEffect.NAdds
 }
+
+func (crdt *AvgCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}

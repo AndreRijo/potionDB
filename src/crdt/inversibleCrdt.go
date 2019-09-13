@@ -2,7 +2,6 @@ package crdt
 
 import (
 	"clocksi"
-	"fmt"
 )
 
 type InversibleCRDT interface {
@@ -15,6 +14,24 @@ type InversibleCRDT interface {
 	undoEffect(effect *Effect)
 
 	reapplyOp(updArgs DownstreamArguments) (effect *Effect)
+
+	//Used to notify that rebuilt is done.
+	//Most CRDTs can ignore this, but it's useful for CRDTs with other embedded CRDTs and possibly for other optimizations
+	//(e.g: some CRDT that can recalculate some field more efficiently when done on the end instead of multiple times)
+	notifyRebuiltComplete(currTs *clocksi.Timestamp)
+}
+
+//Extra methods needed for embedded inversible CRDTs, for efficiency.
+//Theorically could also be done by using RebuildCRDTToVersion, albeit it would imply
+//adding targetTs to both undoEffect and reapplyOp. Also it would be less efficient.
+//Or could also possibly use directly UndoEffect and ReapplyOp, but it would require
+//storing effects and ops in the embMap CRDT.
+type EmbInversibleCRDT interface {
+	InversibleCRDT
+
+	RedoLast()
+
+	UndoLast()
 }
 
 type genericInversibleCRDT struct {
@@ -97,9 +114,10 @@ func (crdt *genericInversibleCRDT) addToHistory(ts *clocksi.Timestamp, updArgs *
 }
 
 //Rebuilds the CRDT to match the CRDT's state in the version received as argument.
-//Note that both undoEffectFunc and downstreamFunc should be provided by each wrapping CRDT.
+//Note that undoEffectFunc, downstreamFunc and notifyFunc should be provided by each wrapping CRDT.
 func (crdt *genericInversibleCRDT) rebuildCRDTToVersion(targetTs clocksi.Timestamp,
-	undoEffectFunc func(*Effect), reapplyOpFunc func(DownstreamArguments) *Effect) {
+	undoEffectFunc func(*Effect), reapplyOpFunc func(DownstreamArguments) *Effect,
+	notifyFunc func(*clocksi.Timestamp)) {
 	//No history, the CRDT is already in the empty/initial state
 	if len(crdt.history) == 0 {
 		return
@@ -148,7 +166,26 @@ func (crdt *genericInversibleCRDT) rebuildCRDTToVersion(targetTs clocksi.Timesta
 			i--
 		}
 	}
-	fmt.Println("")
+	//fmt.Println("")
 	//"delete" (in fact, hide) the remaining history
 	crdt.history = crdt.history[:i]
+	notifyFunc(&targetTs)
 }
+
+/*
+//Undoes only the last operation. Intended to be used in CRDTs with other embedded CRDTs
+func (crdt *genericInversibleCRDT) undoLast(undoEffectFunc func(*Effect)) {
+	previousEffect := crdt.history[len(crdt.history)-1].effects
+	effectIndex := len(previousEffect) - 1
+	undoEffectFunc(previousEffect[effectIndex])
+	//If there's multiple effects for the same clock, we only hide that clock from history after all effects are undone
+	if effectIndex == 0 {
+		crdt.history = crdt.history[:len(crdt.history)-1]
+	}
+}
+
+//Redoes only the last operation. Intended to be used in CRDTs with other embedded CRDTs
+func (crdt *genericInversibleCRDT) redoLast(reapplyOpFunc func(DownstreamArguments)) {
+
+}
+*/

@@ -1,6 +1,7 @@
 package antidote
 
 import (
+	fmt "fmt"
 	"reflect"
 	"strconv"
 	"tools"
@@ -29,8 +30,8 @@ type HoldOperations struct {
 const (
 	protocol = "amqp://"
 	//ip                  = "guest:guest@localhost:"
-	//prefix = "guest:guest@"
-	prefix = "test:test@"
+	prefix = "guest:guest@"
+	//prefix = "test:test@"
 	//port         = "5672/"
 	exchangeName = "objRepl"
 	exchangeType = "topic"
@@ -136,6 +137,13 @@ func (remote *RemoteConn) SendPartTxn(request *NewReplicatorRequest) {
 		data, err := proto.Marshal(protobuf)
 		if err != nil {
 			tools.FancyErrPrint(tools.REMOTE_PRINT, remote.replicaID, "Failed to generate bytes of partTxn request to send. Error:", err)
+			fmt.Println(protobuf)
+			fmt.Println(upds)
+			fmt.Println("Timestamp:", request.Timestamp)
+			downUpdsProtos := protobuf.GetTxn().GetUpds()
+			for _, proto := range downUpdsProtos {
+				fmt.Println("Upd proto:", proto)
+			}
 		}
 		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Sending bucket ops to topic:", strconv.FormatInt(request.PartitionID, 10)+"."+bucket)
 		remote.sendCh.Publish(exchangeName, strconv.FormatInt(request.PartitionID, 10)+"."+bucket, false, false, amqp.Publishing{Body: data})

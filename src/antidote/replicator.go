@@ -172,7 +172,7 @@ func (repl *Replicator) preparateDataToSend() (toSend []RemoteTxn) {
 			//Safe to include the actual txn's clock in the list to send. We can remove entry from cache
 			tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "appending upds. Upds:", txnUpdates)
 			toSend = append(toSend, RemoteTxn{Timestamp: minClk, Upds: &txnUpdates})
-			tools.FancyWarnPrint(tools.REPL_PRINT, repl.replicaID, "upds to send:", txnUpdates)
+			tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "upds to send:", txnUpdates)
 			for id := range txnUpdates {
 				repl.txnCache[id] = repl.txnCache[id][1:]
 			}

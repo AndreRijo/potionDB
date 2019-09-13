@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+const CRDTType_GMAP CRDTType = 8
+
 /*
 	Grow-only map, based on the GSet.
 	Add conflicts are solved using timestamps
@@ -35,6 +37,8 @@ type GMapAddAllEffect struct {
 	Ts              int64               //Ts before this effect
 	ReplicaID       int64               //ReplicaID of the Ts before this effect
 }
+
+func (args DownstreamGMapAddAll) GetCRDTType() CRDTType { return CRDTType_GMAP }
 
 func (args DownstreamGMapAddAll) MustReplicate() bool { return true }
 
@@ -244,7 +248,7 @@ func (crdt *GMapCrdt) Copy() (copyCRDT InversibleCRDT) {
 }
 
 func (crdt *GMapCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
-	crdt.genericInversibleCRDT.rebuildCRDTToVersion(targetTs, crdt.undoEffect, crdt.reapplyOp)
+	crdt.genericInversibleCRDT.rebuildCRDTToVersion(targetTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete)
 }
 
 func (crdt *GMapCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
@@ -274,3 +278,5 @@ func (crdt *GMapCrdt) undoAddAllEffect(effect *AddAllEffect) {
 	}
 }
 */
+
+func (crdt *GMapCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}

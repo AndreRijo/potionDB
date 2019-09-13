@@ -62,6 +62,32 @@ func (set UniqueSet) copy() (copySet UniqueSet) {
 	return
 }
 
+/***** CRDT INITIALIZATION *****/
+
+func InitializeCrdt(crdtType CRDTType, replicaID int64) (newCrdt CRDT) {
+	switch crdtType {
+	case CRDTType_COUNTER:
+		newCrdt = (&CounterCrdt{}).Initialize(nil, replicaID)
+	case CRDTType_LWWREG:
+		newCrdt = (&LwwRegisterCrdt{}).Initialize(nil, replicaID)
+	case CRDTType_ORSET:
+		newCrdt = (&SetAWCrdt{}).Initialize(nil, replicaID)
+	case CRDTType_ORMAP:
+		newCrdt = (&ORMapCrdt{}).Initialize(nil, replicaID)
+	case CRDTType_TOPK_RMV:
+		newCrdt = (&TopKRmvCrdt{}).Initialize(nil, replicaID)
+	case CRDTType_AVG:
+		newCrdt = (&AvgCrdt{}).Initialize(nil, replicaID)
+	case CRDTType_MAXMIN:
+		newCrdt = (&MaxMinCrdt{}).Initialize(nil, replicaID)
+	case CRDTType_RRMAP:
+		newCrdt = (&RWEmbMapCrdt{}).Initialize(nil, replicaID)
+	default:
+		newCrdt = nil
+	}
+	return
+}
+
 /***** CONVERSION STUFF *****/
 
 func ElementArrayToByteMatrix(elements []Element) (converted [][]byte) {
@@ -96,4 +122,20 @@ func UniqueSetToUInt64Array(uniqueSet UniqueSet) (uniques []uint64) {
 		j++
 	}
 	return
+}
+
+/***** MISCELLANEOUS *****/
+
+func min(f int, s int) int {
+	if f < s {
+		return f
+	}
+	return s
+}
+
+func max(f int, s int) int {
+	if f > s {
+		return f
+	}
+	return s
 }

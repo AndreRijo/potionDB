@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+const CRDTType_ORSET CRDTType = 4
+
 type Element string
 
 //Note: Implements both CRDT and InversibleCRDT
@@ -76,6 +78,22 @@ type AddAllEffect struct {
 type RemoveAllEffect struct {
 	RemovedMap map[Element]UniqueSet
 }
+
+func (args Add) GetCRDTType() CRDTType { return CRDTType_ORSET }
+
+func (args Remove) GetCRDTType() CRDTType { return CRDTType_ORSET }
+
+func (args AddAll) GetCRDTType() CRDTType { return CRDTType_ORSET }
+
+func (args RemoveAll) GetCRDTType() CRDTType { return CRDTType_ORSET }
+
+func (args DownstreamAddAll) GetCRDTType() CRDTType { return CRDTType_ORSET }
+
+func (args DownstreamRemoveAll) GetCRDTType() CRDTType { return CRDTType_ORSET }
+
+func (args SetAWValueState) GetCRDTType() CRDTType { return CRDTType_ORSET }
+
+func (args SetAWLookupState) GetCRDTType() CRDTType { return CRDTType_ORSET }
 
 func (args DownstreamAddAll) MustReplicate() bool { return true }
 
@@ -318,11 +336,7 @@ func (crdt *SetAWCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effe
 	switch opType := downstreamArgs.(type) {
 	case DownstreamAddAll:
 		effect = crdt.applyAddAll(opType.Elems)
-	case *DownstreamAddAll:
-		effect = crdt.applyAddAll(opType.Elems)
 	case DownstreamRemoveAll:
-		effect = crdt.applyRemoveAll(opType.Elems)
-	case *DownstreamRemoveAll:
 		effect = crdt.applyRemoveAll(opType.Elems)
 	}
 	//fmt.Println("[SETAWCRDT]State after downstream: ", crdt.getState(nil))
@@ -382,7 +396,7 @@ func (crdt *SetAWCrdt) Copy() (copyCRDT InversibleCRDT) {
 }
 
 func (crdt *SetAWCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
-	crdt.genericInversibleCRDT.rebuildCRDTToVersion(targetTs, crdt.undoEffect, crdt.reapplyOp)
+	crdt.genericInversibleCRDT.rebuildCRDTToVersion(targetTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete)
 }
 
 func (crdt *SetAWCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
@@ -420,3 +434,5 @@ func (crdt *SetAWCrdt) undoRemoveAllEffect(effect *RemoveAllEffect) {
 		}
 	}
 }
+
+func (crdt *SetAWCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}

@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+const CRDTType_LWWREG CRDTType = 5
+
 //Note: Implements both CRDT and InversibleCRDT
 type LwwRegisterCrdt struct {
 	*genericInversibleCRDT
@@ -36,6 +38,12 @@ type SetValueEffect struct {
 	ReplicaID int64
 }
 
+func (args SetValue) GetCRDTType() CRDTType { return CRDTType_LWWREG }
+
+func (args DownstreamSetValue) GetCRDTType() CRDTType { return CRDTType_LWWREG }
+
+func (args RegisterState) GetCRDTType() CRDTType { return CRDTType_LWWREG }
+
 func (args DownstreamSetValue) MustReplicate() bool { return true }
 
 //Note: crdt can (and most often will be) nil
@@ -56,7 +64,7 @@ func (crdt *LwwRegisterCrdt) Read(args ReadArguments, updsNotYetApplied []Update
 		return crdt.GetValue()
 	}
 	//Correct value is always the one in the last update
-	return RegisterState{Value: updsNotYetApplied[len(updsNotYetApplied)-1].(RegisterState).Value}
+	return RegisterState{Value: updsNotYetApplied[len(updsNotYetApplied)-1].(SetValue).NewValue}
 }
 
 func (crdt *LwwRegisterCrdt) GetValue() (state State) {
@@ -105,7 +113,7 @@ func (crdt *LwwRegisterCrdt) Copy() (copyCRDT InversibleCRDT) {
 
 func (crdt *LwwRegisterCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	//TODO: Might be worth it to make one specific for registers
-	crdt.genericInversibleCRDT.rebuildCRDTToVersion(targetTs, crdt.undoEffect, crdt.reapplyOp)
+	crdt.genericInversibleCRDT.rebuildCRDTToVersion(targetTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete)
 }
 
 func (crdt *LwwRegisterCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
@@ -119,3 +127,5 @@ func (crdt *LwwRegisterCrdt) undoEffect(effect *Effect) {
 		crdt.value, crdt.ts, crdt.replicaID = typedEffect.NewValue, typedEffect.Ts, typedEffect.ReplicaID
 	}
 }
+
+func (crdt *LwwRegisterCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}

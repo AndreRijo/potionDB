@@ -2,6 +2,8 @@ package crdt
 
 import "clocksi"
 
+const CRDTType_COUNTER CRDTType = 3
+
 //Note: Implements both CRDT and InversibleCRDT
 type CounterCrdt struct {
 	*genericInversibleCRDT
@@ -27,6 +29,12 @@ type IncrementEffect struct {
 type DecrementEffect struct {
 	Change int32
 }
+
+func (args Increment) GetCRDTType() CRDTType { return CRDTType_COUNTER }
+
+func (args Decrement) GetCRDTType() CRDTType { return CRDTType_COUNTER }
+
+func (args CounterState) GetCRDTType() CRDTType { return CRDTType_COUNTER }
 
 func (args Increment) MustReplicate() bool { return true }
 
@@ -102,7 +110,7 @@ func (crdt *CounterCrdt) Copy() (copyCRDT InversibleCRDT) {
 
 func (crdt *CounterCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	//TODO: Optimize and make one specific for counters (no need to redo operations!)
-	crdt.genericInversibleCRDT.rebuildCRDTToVersion(targetTs, crdt.undoEffect, crdt.reapplyOp)
+	crdt.genericInversibleCRDT.rebuildCRDTToVersion(targetTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete)
 }
 
 func (crdt *CounterCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
@@ -117,3 +125,5 @@ func (crdt *CounterCrdt) undoEffect(effect *Effect) {
 		crdt.value += typedEffect.Change
 	}
 }
+
+func (crdt *CounterCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}

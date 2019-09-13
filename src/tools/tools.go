@@ -26,20 +26,23 @@ const (
 )
 
 var (
-	/*
-		disabledDebugs = map[string]struct{}{
-			PROTO_PRINT:    {},
-			MAT_PRINT:      {},
-			TM_PRINT:       {},
-			LOG_PRINT:      {},
-			REPL_PRINT:     {},
-			REMOTE_PRINT:   {},
-			PROTOLIB_PRINT: {},
-		}
-	*/
+	disabledDebugs = map[string]struct{}{
+		PROTO_PRINT:  {},
+		MAT_PRINT:    {},
+		TM_PRINT:     {},
+		LOG_PRINT:    {},
+		REPL_PRINT:   {},
+		REMOTE_PRINT: {},
+		//PROTOLIB_PRINT: {},
+	}
+	disabledInfos = map[string]struct{}{
+		REMOTE_PRINT: {},
+	}
+	disabledWarnings = map[string]struct{}{}
 
-	disabledDebugs    = map[string]struct{}{}
+	//disabledDebugs    = map[string]struct{}{}
 	allOutputDisabled = true
+	//allOutputDisabled = false
 )
 
 func CheckErr(msg string, err error) {
@@ -71,22 +74,26 @@ func FancyDebugPrint(src string, replicaID int64, msgs ...interface{}) {
 //Prints a msg to stdout with a prefix of who generated the message and the indication that it is an info message
 func FancyInfoPrint(src string, replicaID int64, msgs ...interface{}) {
 	if !allOutputDisabled {
-		fancyPrint(INFO, src, replicaID, msgs)
+		if _, has := disabledInfos[src]; !has {
+			fancyPrint(INFO, src, replicaID, msgs)
+		}
 	}
 }
 
 //Prints a msg to stdout with a prefix of who generated the message and the indication that it is a warning message
 func FancyWarnPrint(src string, replicaID int64, msgs ...interface{}) {
 	if !allOutputDisabled {
-		fancyPrint(WARNING, src, replicaID, msgs)
+		if _, has := disabledWarnings[src]; !has {
+			fancyPrint(WARNING, src, replicaID, msgs)
+		}
 	}
 }
 
 //Prints a msg to stdout with a prefix of who generated the message and the indication that it is an error message
 func FancyErrPrint(src string, replicaID int64, msgs ...interface{}) {
-	if !allOutputDisabled {
-		fancyPrint(ERROR, src, replicaID, msgs)
-	}
+	//if !allOutputDisabled {
+	fancyPrint(ERROR, src, replicaID, msgs)
+	//}
 }
 
 func fancyPrint(typeMsg string, src string, replicaID int64, msgs []interface{}) {
@@ -139,6 +146,33 @@ func StateToString(state crdt.State) (stateString string) {
 		sb.WriteString("Key found: ")
 		sb.WriteString(fmt.Sprint(typedState.HasKey))
 	case crdt.MapKeysState:
+		sort.Slice(typedState.Keys, func(i, j int) bool { return typedState.Keys[i] < typedState.Keys[j] })
+		sb.WriteString(fmt.Sprintln(typedState.Keys))
+
+	//EmbMap
+	case crdt.EmbMapEntryState:
+		keys := make([]string, len(typedState.States))
+		i := 0
+		for key := range typedState.States {
+			keys[i] = key
+			i++
+		}
+		sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+		sb.WriteRune('{')
+		for _, key := range keys {
+			sb.WriteString(key)
+			sb.WriteRune(':')
+			sb.WriteString(StateToString(typedState.States[key]))
+			sb.WriteString(", ")
+		}
+		sb.WriteRune('}')
+	case crdt.EmbMapGetValueState:
+		sb.WriteString("Value: ")
+		sb.WriteString(StateToString(typedState.State))
+	case crdt.EmbMapHasKeyState:
+		sb.WriteString("Key found: ")
+		sb.WriteString(fmt.Sprint(typedState.HasKey))
+	case crdt.EmbMapKeysState:
 		sort.Slice(typedState.Keys, func(i, j int) bool { return typedState.Keys[i] < typedState.Keys[j] })
 		sb.WriteString(fmt.Sprintln(typedState.Keys))
 

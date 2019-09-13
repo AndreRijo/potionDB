@@ -21,13 +21,18 @@ message ProtoRemoteTxn {
 
 message ProtoDownstreamUpd {
     required ApbBoundObject keyParams = 1;
-    optional ProtoCounterDownstream counterOp = 2;
-    optional ProtoSetDownstream setOp = 3;
-    optional ProtoTopKRmvDownstream topkrmvOp = 4;
-    optional ProtoLWWRegisterDownstream lwwregOp = 5;
-    optional ProtoMapDownstream mapOp = 6;
-    optional ProtoAvgDownstream avgOp = 7;
-    optional ProtoMaxMinDownstream maxminOp = 8;
+    required ProtoOpDownstream op = 2;
+}
+
+message ProtoOpDownstream {
+    optional ProtoCounterDownstream counterOp = 1;
+    optional ProtoSetDownstream setOp = 2;
+    optional ProtoTopKRmvDownstream topkrmvOp = 3;
+    optional ProtoLWWRegisterDownstream lwwregOp = 4;
+    optional ProtoORMapDownstream ormapOp = 5;
+    optional ProtoAvgDownstream avgOp = 6;
+    optional ProtoMaxMinDownstream maxminOp = 7;
+    optional ProtoRWEmbMapDownstream rwembmapOp = 8;
 }
 
 message ProtoCounterDownstream {
@@ -46,9 +51,9 @@ message ProtoSetDownstream {
     repeated ProtoValueUniques rems = 2;   //key -> set/array of uniques
 }
 
-message ProtoMapDownstream {
+message ProtoORMapDownstream {
     repeated ProtoKeyValueUnique adds = 1;  //key -> (element, unique)
-    repeated ProtoMapRemove rems = 2;
+    repeated ProtoORMapRemove rems = 2;
 }
 
 message ProtoTopKRmvDownstream {
@@ -90,7 +95,7 @@ message ProtoKeyValueUnique {
     required uint64 unique = 3;
 }
 
-message ProtoMapRemove {
+message ProtoORMapRemove {
     required bytes key = 1;
     repeated ProtoValueUniques elems = 2;
 }
@@ -105,4 +110,27 @@ message ProtoTopKElement {
 message ProtoTopKIdVc {
     required int32 id = 1;
     required bytes vc = 2;
+}
+
+message ProtoRWEmbMapDownstream {
+    optional ProtoRWEmbMapUpdates adds = 1;
+    optional ProtoRWEmbMapRemoves rems = 2;
+}
+
+message ProtoRWEmbMapUpdates {
+    repeated ProtoEmbMapUpd upds = 1;
+    repeated ProtoStableClock vc = 2;
+    required int64 replicaID = 3;
+}
+
+message ProtoRWEmbMapRemoves {
+    repeated string keys = 1;
+    required int64 ts = 2;
+    required int64 replicaID = 3;
+}
+
+message ProtoEmbMapUpd {
+    required bytes key = 1;
+    required CRDT_type type = 2;
+    required ProtoOpDownstream upd = 3;
 }

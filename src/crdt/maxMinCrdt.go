@@ -8,6 +8,8 @@ import (
 	"math"
 )
 
+const CRDTType_MAXMIN CRDTType = 0
+
 type MaxMinCrdt struct {
 	*genericInversibleCRDT
 	topValue int64
@@ -33,6 +35,12 @@ const (
 	IS_MAX = true
 	IS_MIN = false
 )
+
+func (args MaxAddValue) GetCRDTType() CRDTType { return CRDTType_MAXMIN }
+
+func (args MinAddValue) GetCRDTType() CRDTType { return CRDTType_MAXMIN }
+
+func (args MaxMinState) GetCRDTType() CRDTType { return CRDTType_MAXMIN }
 
 func (args MaxAddValue) MustReplicate() bool { return true }
 
@@ -69,6 +77,9 @@ func (crdt *MaxMinCrdt) GetValue() (state State) {
 }
 
 func (crdt *MaxMinCrdt) Update(args UpdateArguments) (downstreamArgs DownstreamArguments) {
+	if crdt.topValue == math.MaxInt64 {
+		return args.(DownstreamArguments)
+	}
 	//The update might be irrelevant (e.g: MaxAddValue whose value is < crdt.TopValue)
 	//This optimization will need to be removed if we support removes later on
 	switch typedUpd := args.(type) {
@@ -143,7 +154,7 @@ func (crdt *MaxMinCrdt) Copy() (copyCRDT InversibleCRDT) {
 
 func (crdt *MaxMinCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	//TODO: Might be worth to check if there's a better way of doing this for avg
-	crdt.genericInversibleCRDT.rebuildCRDTToVersion(targetTs, crdt.undoEffect, crdt.reapplyOp)
+	crdt.genericInversibleCRDT.rebuildCRDTToVersion(targetTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete)
 }
 
 func (crdt *MaxMinCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
@@ -157,3 +168,5 @@ func (crdt *MaxMinCrdt) undoEffect(effect *Effect) {
 		crdt.topValue = typedEffect.PreviousValue
 	}
 }
+
+func (crdt *MaxMinCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}

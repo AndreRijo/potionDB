@@ -19,6 +19,7 @@ enum CRDT_type {
     AVG = 7;
     LEADERBOARD = 9;
     MAXMIN = 0;
+    ORMAP = 15;
 }
 
 // Riak Error response
