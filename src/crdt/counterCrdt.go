@@ -50,13 +50,13 @@ func (crdt *CounterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int64)
 	return
 }
 
-func (crdt *CounterCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
+func (crdt *CounterCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateArguments) (state State) {
 	if updsNotYetApplied == nil || len(updsNotYetApplied) > 0 {
 		return crdt.GetValue()
 	}
 	counterState := crdt.GetValue().(CounterState)
 	for _, upd := range updsNotYetApplied {
-		switch typedUpd := upd.(type) {
+		switch typedUpd := (*upd).(type) {
 		case Increment:
 			counterState.Value += typedUpd.Change
 		case Decrement:

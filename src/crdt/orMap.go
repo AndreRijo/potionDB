@@ -120,7 +120,7 @@ func (crdt *ORMapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int64) (
 	return
 }
 
-func (crdt *ORMapCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
+func (crdt *ORMapCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateArguments) (state State) {
 	switch typedArg := args.(type) {
 	case StateReadArguments:
 		return crdt.getState(updsNotYetApplied)
@@ -134,7 +134,7 @@ func (crdt *ORMapCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArgume
 	return nil
 }
 
-func (crdt *ORMapCrdt) getState(updsNotYetApplied []UpdateArguments) (state MapEntryState) {
+func (crdt *ORMapCrdt) getState(updsNotYetApplied []*UpdateArguments) (state MapEntryState) {
 	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
 		values := make(map[string]Element)
 		for key, elemMap := range crdt.entries {
@@ -148,7 +148,7 @@ func (crdt *ORMapCrdt) getState(updsNotYetApplied []UpdateArguments) (state MapE
 
 	//Key idea: for each key, the latest update is the only one that matters, hence start at the end.
 	for i := len(updsNotYetApplied) - 1; i >= 0; i-- {
-		switch typedUpd := updsNotYetApplied[i].(type) {
+		switch typedUpd := (*updsNotYetApplied[i]).(type) {
 		case MapAdd:
 			if _, has := rems[typedUpd.Key]; !has {
 				adds[typedUpd.Key] = typedUpd.Value
@@ -186,7 +186,7 @@ func (crdt *ORMapCrdt) getState(updsNotYetApplied []UpdateArguments) (state MapE
 	return MapEntryState{Values: values}
 }
 
-func (crdt *ORMapCrdt) getKeys(updsNotYetApplied []UpdateArguments) (state MapKeysState) {
+func (crdt *ORMapCrdt) getKeys(updsNotYetApplied []*UpdateArguments) (state MapKeysState) {
 	//Basically the same as getState, but only storing the keys. Yay, code repetition!
 	//It's more efficient than calling getState and then removing the values though...
 
@@ -205,7 +205,7 @@ func (crdt *ORMapCrdt) getKeys(updsNotYetApplied []UpdateArguments) (state MapKe
 
 	//Key idea: for each key, the latest update is the only one that matters, hence start at the end.
 	for i := len(updsNotYetApplied) - 1; i >= 0; i-- {
-		switch typedUpd := updsNotYetApplied[i].(type) {
+		switch typedUpd := (*updsNotYetApplied[i]).(type) {
 		case MapAdd:
 			if _, has := rems[typedUpd.Key]; !has {
 				adds[typedUpd.Key] = struct{}{}
@@ -248,14 +248,14 @@ func (crdt *ORMapCrdt) getKeys(updsNotYetApplied []UpdateArguments) (state MapKe
 	return MapKeysState{Keys: keys}
 }
 
-func (crdt *ORMapCrdt) getValue(updsNotYetApplied []UpdateArguments, key string) (state MapGetValueState) {
+func (crdt *ORMapCrdt) getValue(updsNotYetApplied []*UpdateArguments, key string) (state MapGetValueState) {
 	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
 		//Return right away
 		return MapGetValueState{Value: crdt.getMinElem(crdt.entries[key])}
 	}
 	//Idea: search for the element from the end - the last local upd for a given key is always the one that decides
 	for i := len(updsNotYetApplied) - 1; i >= 0; i-- {
-		switch typedUpd := updsNotYetApplied[i].(type) {
+		switch typedUpd := (*updsNotYetApplied[i]).(type) {
 		case MapAdd:
 			if typedUpd.Key == key {
 				return MapGetValueState{Value: typedUpd.Value}
@@ -280,7 +280,7 @@ func (crdt *ORMapCrdt) getValue(updsNotYetApplied []UpdateArguments, key string)
 	return MapGetValueState{Value: crdt.getMinElem(crdt.entries[key])}
 }
 
-func (crdt *ORMapCrdt) hasKey(updsNotYetApplied []UpdateArguments, key string) (state MapHasKeyState) {
+func (crdt *ORMapCrdt) hasKey(updsNotYetApplied []*UpdateArguments, key string) (state MapHasKeyState) {
 	value := crdt.getValue(updsNotYetApplied, key)
 	if (value != MapGetValueState{}) {
 		return MapHasKeyState{HasKey: true}

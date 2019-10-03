@@ -59,12 +59,12 @@ func (crdt *LwwRegisterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID in
 	return
 }
 
-func (crdt *LwwRegisterCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
+func (crdt *LwwRegisterCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateArguments) (state State) {
 	if updsNotYetApplied == nil || len(updsNotYetApplied) > 0 {
 		return crdt.GetValue()
 	}
 	//Correct value is always the one in the last update
-	return RegisterState{Value: updsNotYetApplied[len(updsNotYetApplied)-1].(SetValue).NewValue}
+	return RegisterState{Value: (*updsNotYetApplied[len(updsNotYetApplied)-1]).(SetValue).NewValue}
 }
 
 func (crdt *LwwRegisterCrdt) GetValue() (state State) {

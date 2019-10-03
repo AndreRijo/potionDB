@@ -7,7 +7,7 @@ const CRDTType_AVG CRDTType = 7
 type AvgCrdt struct {
 	*genericInversibleCRDT
 	sum   int64
-	nAdds int32
+	nAdds int64
 }
 
 type AvgState struct {
@@ -20,7 +20,7 @@ type AddValue struct {
 
 type AddMultipleValue struct {
 	SumValue int64
-	NAdds    int32
+	NAdds    int64
 }
 
 type AddMultipleValueEffect AddMultipleValue
@@ -44,14 +44,15 @@ func (crdt *AvgCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int64) (ne
 	return
 }
 
-func (crdt *AvgCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
+func (crdt *AvgCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateArguments) (state State) {
 	if updsNotYetApplied == nil || len(updsNotYetApplied) > 0 {
 		return crdt.GetValue()
 	}
-	var sum int64 = crdt.sum
-	var nAdds int32 = crdt.nAdds
+	//var sum int64 = crdt.sum
+	//var nAdds int64 = crdt.nAdds
+	sum, nAdds := crdt.sum, crdt.nAdds
 	for _, upd := range updsNotYetApplied {
-		typedUpd := upd.(AddMultipleValue)
+		typedUpd := (*upd).(AddMultipleValue)
 		sum += typedUpd.SumValue
 		nAdds += typedUpd.NAdds
 	}

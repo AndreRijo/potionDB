@@ -63,7 +63,7 @@ message ProtoTopKRmvDownstream {
 
 message ProtoAvgDownstream {
     required int64 sumValue = 1;
-    required int32 nAdds = 2;
+    required int64 nAdds = 2;
 }
 
 message ProtoMaxMinDownstream {

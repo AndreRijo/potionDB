@@ -10,12 +10,16 @@ import (
 	"github.com/streadway/amqp"
 )
 
+//NOTE: Each replica still receives its own messages - it just ignores them before processing
+//This might be a waste.
+
 type RemoteConn struct {
 	conn             *amqp.Connection
 	sendCh           *amqp.Channel
 	recCh            <-chan amqp.Delivery
 	listenerChan     chan ReplicatorMsg
 	replicaID        int64
+	replicaString    string //Used for rabbitMQ headers in order to signal from who the msg is
 	holdOperations   map[int64]*HoldOperations
 	nBucketsToListen int
 }
@@ -97,6 +101,7 @@ func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int64
 		//listenerChan:     make(chan ReplicatorMsg, defaultListenerSize),
 		listenerChan:     make(chan ReplicatorMsg),
 		replicaID:        replicaID,
+		replicaString:    fmt.Sprint(replicaID),
 		holdOperations:   make(map[int64]*HoldOperations),
 		nBucketsToListen: len(bucketsToListen),
 	}
@@ -114,17 +119,14 @@ func (remote *RemoteConn) SendPartTxn(request *NewReplicatorRequest) {
 	tools.FancyDebugPrint(tools.REMOTE_PRINT, remote.replicaID, "Sending remote request:", *request)
 	if len(request.Upds) > 0 {
 		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Actually sending txns to other replicas. Sending ops:", request.Upds)
-		for _, upd := range request.Upds {
-			tools.FancyWarnPrint(tools.REMOTE_PRINT, remote.replicaID, "Downstream args:", upd, "type:", reflect.TypeOf(upd.UpdateArgs))
-		}
 	}
 
 	//We need to send one message per bucket. Note that we're sending operations out of order here - this might be relevant later on!
-	bucketOps := make(map[string][]UpdateObjectParams)
+	bucketOps := make(map[string][]*UpdateObjectParams)
 	for _, upd := range request.Upds {
 		entry, hasEntry := bucketOps[upd.KeyParams.Bucket]
 		if !hasEntry {
-			entry = make([]UpdateObjectParams, 0, len(request.Upds))
+			entry = make([]*UpdateObjectParams, 0, len(request.Upds))
 		}
 		entry = append(entry, upd)
 		bucketOps[upd.KeyParams.Bucket] = entry
@@ -135,6 +137,7 @@ func (remote *RemoteConn) SendPartTxn(request *NewReplicatorRequest) {
 	for bucket, upds := range bucketOps {
 		protobuf := createProtoReplicatePart(request.SenderID, request.PartitionID, request.Timestamp, upds)
 		data, err := proto.Marshal(protobuf)
+		//_, err := proto.Marshal(protobuf)
 		if err != nil {
 			tools.FancyErrPrint(tools.REMOTE_PRINT, remote.replicaID, "Failed to generate bytes of partTxn request to send. Error:", err)
 			fmt.Println(protobuf)
@@ -146,7 +149,7 @@ func (remote *RemoteConn) SendPartTxn(request *NewReplicatorRequest) {
 			}
 		}
 		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Sending bucket ops to topic:", strconv.FormatInt(request.PartitionID, 10)+"."+bucket)
-		remote.sendCh.Publish(exchangeName, strconv.FormatInt(request.PartitionID, 10)+"."+bucket, false, false, amqp.Publishing{Body: data})
+		remote.sendCh.Publish(exchangeName, strconv.FormatInt(request.PartitionID, 10)+"."+bucket, false, false, amqp.Publishing{UserId: remote.replicaString, Body: data})
 		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Finished sending bucket ops to topic:", strconv.FormatInt(request.PartitionID, 10)+"."+bucket)
 	}
 }
@@ -155,10 +158,11 @@ func (remote *RemoteConn) SendStableClk(ts int64) {
 	tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Sending stable clk:", ts)
 	protobuf := createProtoStableClock(remote.replicaID, ts)
 	data, err := proto.Marshal(protobuf)
+	//_, err := proto.Marshal(protobuf)
 	if err != nil {
 		tools.FancyErrPrint(tools.REMOTE_PRINT, remote.replicaID, "Failed to generate bytes of stableClk request to send. Error:", err)
 	}
-	remote.sendCh.Publish(exchangeName, clockTopic, false, false, amqp.Publishing{Body: data})
+	remote.sendCh.Publish(exchangeName, clockTopic, false, false, amqp.Publishing{UserId: remote.replicaString, Body: data})
 }
 
 /*
@@ -181,10 +185,14 @@ func (remote *RemoteConn) startReceiver() {
 	for data := range remote.recCh {
 		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Received something!")
 		//TODO: Maybe analyze data.routingKey to avoid decoding the protobuf if it was sent by this own replica? RoutingKey no longer has information about the sender though...
-		if data.RoutingKey == clockTopic {
-			remote.handleReceivedStableClock(data.Body)
+		if data.UserId == remote.replicaString {
+			tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Ignored received request as it was sent by myself")
 		} else {
-			remote.handleReceivedOps(data.Body)
+			if data.RoutingKey == clockTopic {
+				remote.handleReceivedStableClock(data.Body)
+			} else {
+				remote.handleReceivedOps(data.Body)
+			}
 		}
 	}
 }
@@ -224,6 +232,7 @@ func (remote *RemoteConn) handleReceivedOps(data []byte) {
 			remote.listenerChan <- reqToSend
 		}
 	} else {
+		fmt.Println("NOT SUPPOSED TO HAPPEN NOW!")
 		tools.FancyDebugPrint(tools.REMOTE_PRINT, remote.replicaID, "Ignored request from self.")
 	}
 	//tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "My replicaID:", remote.replicaID, "senderID:", request.SenderID)
@@ -239,6 +248,7 @@ func (remote *RemoteConn) handleReceivedStableClock(data []byte) {
 	tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Received remote stableClock:", *clkReq)
 	//TODO: Avoid receiving own messages?
 	if clkReq.SenderID == remote.replicaID {
+		fmt.Println("NOT SUPPOSED TO HAPPEN NOW!")
 		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Ignored received stableClock as it was sent by myself.")
 	} else {
 		//We also need to send a request with the last partition ops, if there's any
@@ -262,7 +272,7 @@ func (remote *RemoteConn) getMergedReplicatorRequest(holdOps *HoldOperations, re
 		PartitionID: holdOps.partitionID,
 		SenderID:    replicaID,
 		Timestamp:   holdOps.lastRecUpds[0].Timestamp,
-		Upds:        make([]UpdateObjectParams, 0, holdOps.nOpsSoFar),
+		Upds:        make([]*UpdateObjectParams, 0, holdOps.nOpsSoFar),
 	}
 	for _, reqs := range holdOps.lastRecUpds {
 		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Merging upds:", reqs.Upds)

@@ -55,7 +55,7 @@ func (crdt *GMapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int64) (n
 	return
 }
 
-func (crdt *GMapCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
+func (crdt *GMapCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateArguments) (state State) {
 	switch typedArg := args.(type) {
 	case StateReadArguments:
 		return crdt.getState(updsNotYetApplied)
@@ -69,7 +69,7 @@ func (crdt *GMapCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArgumen
 	return nil
 }
 
-func (crdt *GMapCrdt) getState(updsNotYetApplied []UpdateArguments) (state MapEntryState) {
+func (crdt *GMapCrdt) getState(updsNotYetApplied []*UpdateArguments) (state MapEntryState) {
 	copyMap := make(map[string]Element)
 	//Copy the existing values to the new map
 	for key, value := range crdt.values {
@@ -84,7 +84,7 @@ func (crdt *GMapCrdt) getState(updsNotYetApplied []UpdateArguments) (state MapEn
 	//Go through all adds in updsNotYetApplied and, for each key, keep the most recent one
 	//For each key, the latest add is always the latest upd in updsNotYetApplied that refers to that key
 	for _, upd := range updsNotYetApplied {
-		updAdds := upd.(DownstreamGMapAddAll)
+		updAdds := (*upd).(DownstreamGMapAddAll)
 		for key, value := range updAdds.Values {
 			copyMap[key] = value
 		}
@@ -93,7 +93,7 @@ func (crdt *GMapCrdt) getState(updsNotYetApplied []UpdateArguments) (state MapEn
 	return MapEntryState{Values: copyMap}
 }
 
-func (crdt *GMapCrdt) getKeys(updsNotYetApplied []UpdateArguments) (state MapKeysState) {
+func (crdt *GMapCrdt) getKeys(updsNotYetApplied []*UpdateArguments) (state MapKeysState) {
 	//Literally the same as getState, but only storing the keys. Yay, code repetition!
 	//It's more efficient than calling getState and then removing the values though...
 
@@ -117,7 +117,7 @@ func (crdt *GMapCrdt) getKeys(updsNotYetApplied []UpdateArguments) (state MapKey
 	}
 
 	for _, upd := range updsNotYetApplied {
-		updAdds := upd.(DownstreamGMapAddAll)
+		updAdds := (*upd).(DownstreamGMapAddAll)
 		for key := range updAdds.Values {
 			if _, has := crdt.values[key]; !has {
 				keys[i] = key
@@ -129,7 +129,7 @@ func (crdt *GMapCrdt) getKeys(updsNotYetApplied []UpdateArguments) (state MapKey
 	return MapKeysState{Keys: keys}
 }
 
-func (crdt *GMapCrdt) getValue(args GetValueArguments, updsNotYetApplied []UpdateArguments) (state MapGetValueState) {
+func (crdt *GMapCrdt) getValue(args GetValueArguments, updsNotYetApplied []*UpdateArguments) (state MapGetValueState) {
 	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
 		//Return right away
 		return MapGetValueState{Value: crdt.values[args.Key]}
@@ -137,7 +137,7 @@ func (crdt *GMapCrdt) getValue(args GetValueArguments, updsNotYetApplied []Updat
 	value := crdt.values[args.Key]
 	//Search if there is a more recent value
 	for _, upd := range updsNotYetApplied {
-		updAdds := upd.(DownstreamGMapAddAll)
+		updAdds := (*upd).(DownstreamGMapAddAll)
 		if newValue, newHas := updAdds.Values[args.Key]; newHas {
 			value = newValue
 		}
@@ -146,7 +146,7 @@ func (crdt *GMapCrdt) getValue(args GetValueArguments, updsNotYetApplied []Updat
 	return MapGetValueState{Value: value}
 }
 
-func (crdt *GMapCrdt) hasKey(args HasKeyArguments, updsNotYetApplied []UpdateArguments) (state MapHasKeyState) {
+func (crdt *GMapCrdt) hasKey(args HasKeyArguments, updsNotYetApplied []*UpdateArguments) (state MapHasKeyState) {
 	_, hasKey := crdt.values[args.Key]
 	if hasKey || updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
 		//Return right away. Remember that this CRDT doesn't support removes, so once an add is found there's no need to search further.
@@ -155,7 +155,7 @@ func (crdt *GMapCrdt) hasKey(args HasKeyArguments, updsNotYetApplied []UpdateArg
 
 	//Search if it was added in updsNotYetApplied
 	for _, upd := range updsNotYetApplied {
-		updAdds := upd.(DownstreamGMapAddAll)
+		updAdds := (*upd).(DownstreamGMapAddAll)
 		if _, hasKey = updAdds.Values[args.Key]; hasKey {
 			//Found it, no need to look further
 			return MapHasKeyState{HasKey: true}

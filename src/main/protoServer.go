@@ -5,6 +5,9 @@ package main
 //To run in vscode: ctrl+option+N. This *should* work when it actually updates $GOPATH
 //From terminal: go to main folder and then: go run protoServer.go simpleClient.go
 
+//profiling: https://github.com/google/pprof/blob/master/doc/README.md
+//go tool pprof -http=localhost:36234 ../../profiles/8087/mem.prof
+
 //TODO: Reuse of canals? Creating a new canal for each read/write seems like a waste... Should I ask the teachers?
 
 import (
@@ -17,8 +20,12 @@ import (
 	rand "math/rand"
 	"net"
 	"os"
+	"os/signal"
+	"runtime"
+	"runtime/pprof"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"tools"
 
@@ -26,15 +33,30 @@ import (
 )
 
 var (
-	in = bufio.NewReader(os.Stdin)
+	in         = bufio.NewReader(os.Stdin)
+	profileCPU bool
+	profileMem bool
+)
+
+const (
+	//Keys for configs
+	PORT_KEY        = "protoPort"
+	CPU_PROFILE_KEY = "withCPUProfile"
+	MEM_PROFILE_KEY = "withMemProfile"
+	CPU_FILE_KEY    = "cpuProfileFile"
+	MEM_FILE_KEY    = "memProfileFile"
 )
 
 func main() {
+
+	//debug.SetGCPercent(-1)
 
 	configFolder := flag.String("config", "default", "sub-folder in configs folder that contains the configuration files to be used.")
 	flag.Parse()
 	configs := &tools.ConfigLoader{}
 	configs.LoadConfigs(*configFolder)
+
+	startProfiling(configs)
 
 	/*
 		fmt.Println("Port?")
@@ -44,7 +66,7 @@ func main() {
 		id, _ := strconv.ParseInt(portString, 0, 64)
 	*/
 
-	portString := configs.GetConfig("protoPort")
+	portString := configs.GetConfig(PORT_KEY)
 	rand.Seed(time.Now().UTC().UnixNano())
 	id, _ := strconv.ParseInt(portString, 0, 64)
 
@@ -74,6 +96,9 @@ func main() {
 
 	//Stop listening to port on shutdown
 	defer server.Close()
+
+	//go debugMemory()
+	stopProfiling(configs)
 
 	for {
 		conn, err := server.Accept()
@@ -317,14 +342,14 @@ func protoObjectsToAntidoteObjects(protoObjs []*antidote.ApbBoundObject) (objs [
 }
 
 //TODO: Maybe this method below should be moved to protoLib?
-func protoUpdateOpToAntidoteUpdate(protoUp []*antidote.ApbUpdateOp) (upParams []antidote.UpdateObjectParams) {
-	upParams = make([]antidote.UpdateObjectParams, len(protoUp))
+func protoUpdateOpToAntidoteUpdate(protoUp []*antidote.ApbUpdateOp) (upParams []*antidote.UpdateObjectParams) {
+	upParams = make([]*antidote.UpdateObjectParams, len(protoUp))
 	var currObj *antidote.ApbBoundObject = nil
 	var currUpOp *antidote.ApbUpdateOperation = nil
 
 	for i, update := range protoUp {
 		currObj, currUpOp = update.GetBoundobject(), update.GetOperation()
-		upParams[i] = antidote.UpdateObjectParams{
+		upParams[i] = &antidote.UpdateObjectParams{
 			KeyParams:  antidote.CreateKeyParams(string(currObj.GetKey()), currObj.GetType(), string(currObj.GetBucket())),
 			UpdateArgs: antidote.ConvertProtoUpdateToAntidote(currUpOp, currObj.GetType()),
 		}
@@ -339,6 +364,46 @@ func createTMRequest(args antidote.TMRequestArgs, txnId antidote.TransactionId,
 		Args:          args,
 		TransactionId: txnId,
 		Timestamp:     clientClock,
+	}
+}
+
+func startProfiling(configs *tools.ConfigLoader) {
+	if profileCPUString, has := configs.GetAndHasConfig(CPU_PROFILE_KEY); has {
+		profileCPU, _ = strconv.ParseBool(profileCPUString)
+		if profileCPU {
+			file, err := os.Create(configs.GetConfig(CPU_FILE_KEY))
+			tools.CheckErr("Failed to create CPU profile file: ", err)
+			pprof.StartCPUProfile(file)
+			fmt.Println("Started CPU profiling")
+		}
+	}
+	if profileMemString, has := configs.GetAndHasConfig(MEM_PROFILE_KEY); has {
+		profileMem, _ = strconv.ParseBool(profileMemString)
+		if profileMem {
+			fmt.Println("Started mem profiling")
+		}
+	}
+}
+
+func stopProfiling(configs *tools.ConfigLoader) {
+	if profileCPU || profileMem {
+		sigs := make(chan os.Signal, 10)
+		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+		go func() {
+			<-sigs
+			fmt.Println("Saving profiles...")
+			if profileCPU {
+				pprof.StopCPUProfile()
+			}
+			if profileMem {
+				file, err := os.Create(configs.GetConfig(MEM_FILE_KEY))
+				defer file.Close()
+				tools.CheckErr("Failed to create Memory profile file: ", err)
+				pprof.WriteHeapProfile(file)
+			}
+			fmt.Println("Profiles saved, closing...")
+			os.Exit(0)
+		}()
 	}
 }
 
@@ -380,4 +445,42 @@ func notSupported(protobuf proto.Message) {
 //This unused variables mark stuff that isn't being processed yet.
 func ignore(any interface{}) {
 
+}
+
+func debugMemory() {
+	memStats := runtime.MemStats{}
+	var maxAlloc uint64 = 0
+	//Go routine that pools memStats.Alloc frequently and stores the highest observed value
+	go func() {
+		for {
+			currAlloc := memStats.Alloc
+			if currAlloc > maxAlloc {
+				maxAlloc = currAlloc
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}()
+
+	const MB = 1048576
+	count := 0
+	for {
+		runtime.ReadMemStats(&memStats)
+		fmt.Printf("Total mem stolen from OS: %d MB\n", memStats.Sys/MB)
+		fmt.Printf("Max alloced: %d MB\n", maxAlloc/MB)
+		fmt.Printf("Currently alloced: %d MB\n", memStats.Alloc/MB)
+		fmt.Printf("Mem that could be returned to OS: %d MB\n", (memStats.HeapIdle-memStats.HeapReleased)/MB)
+		fmt.Printf("Number of objs still malloced: %d\n", memStats.HeapObjects)
+		fmt.Printf("Largest heap size: %d MB\n", memStats.HeapSys/MB)
+		fmt.Printf("Stack size stolen from OS: %d MB\n", memStats.StackSys/MB)
+		fmt.Printf("Stack size in use: %d MB\n", memStats.StackInuse/MB)
+		fmt.Printf("Number of goroutines: %d\n", runtime.NumGoroutine())
+		fmt.Printf("Number of GC cycles: %d\n", memStats.NumGC)
+		fmt.Println()
+		count++
+		if count%20 == 0 {
+			fmt.Println("Calling GC")
+			runtime.GC()
+		}
+		time.Sleep(1000 * time.Millisecond)
+	}
 }

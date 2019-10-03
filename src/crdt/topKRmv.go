@@ -187,7 +187,7 @@ func (crdt *TopKRmvCrdt) InitializeWithSize(startTs *clocksi.Timestamp, replicaI
 	return
 }
 
-func (crdt *TopKRmvCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
+func (crdt *TopKRmvCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateArguments) (state State) {
 	//TODO: Consider updsNotYetApplied
 	values := make([]TopKScore, len(crdt.elems))
 	i := 0
@@ -289,6 +289,7 @@ func (crdt *TopKRmvCrdt) applyDownstream(downstreamArgs UpdateArguments) (effect
 //Effect addToTop (include previousMin and previousEntry, if any)?
 //Effect addToNotTop
 func (crdt *TopKRmvCrdt) applyAdd(op *DownstreamTopKAdd) (effect *Effect, otherDownstreamArgs DownstreamArguments) {
+	//fmt.Println("Applying topK add")
 	var effectValue Effect
 	oldTs := crdt.vc.GetPos(op.ReplicaID)
 

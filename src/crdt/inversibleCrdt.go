@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"clocksi"
+	"shared"
 )
 
 type InversibleCRDT interface {
@@ -56,13 +57,30 @@ type History struct {
 	effects  []*Effect
 }
 
+//TODO: Maybe some way of setting these up depending on the CRDT?
+//This takes A LOT of space for TPC-H even with SF = 0.01.
+//Likelly due to the LWWRegisters, which we have... a lot
+//Obviously we can set this to as low as 1. But that likelly will have considerable impact in performance.
+//Might be worth testing and thinking on what is an ideal value.
+//Original values were 100/5. 10/5 already gave a decent result.
+//Effect can likelly be 1 safely, as it only is more than 1 when there's 2 txns with the same clk and both upd the same obj.
+
 const (
-	initialHistSize    = 100
-	initialEffectsSize = 5
+	initialHistSize    = 1
+	initialEffectsSize = 1
+)
+
+var (
+	//This is mostly for now that we're testing memory impact.
+	//When Version Management is disabled, share a single instance of genericInversibleCRDT
+	disabledVMCrdt = &genericInversibleCRDT{}
 )
 
 //TODO: This startTs is not even used anymore... delete?
 func (crdt *genericInversibleCRDT) initialize(startTs *clocksi.Timestamp) (newCrdt *genericInversibleCRDT) {
+	if shared.IsVMDisabled {
+		return disabledVMCrdt
+	}
 	newCrdt = &genericInversibleCRDT{
 		genericCRDT: genericCRDT{}.initialize(),
 		//history:     make([]*History, 1, initialHistSize),
@@ -75,6 +93,9 @@ func (crdt *genericInversibleCRDT) initialize(startTs *clocksi.Timestamp) (newCr
 
 //Note that this only copies the generic part
 func (crdt *genericInversibleCRDT) copy() (copyCrdt *genericInversibleCRDT) {
+	if shared.IsVMDisabled {
+		return crdt
+	}
 	/*
 		copyCrdt = genericInversibleCRDT{
 			genericCRDT: crdt.genericCRDT.copy(),
@@ -98,6 +119,9 @@ func (crdt *genericInversibleCRDT) copy() (copyCrdt *genericInversibleCRDT) {
 
 //Adds an operation to the history
 func (crdt *genericInversibleCRDT) addToHistory(ts *clocksi.Timestamp, updArgs *DownstreamArguments, effect *Effect) {
+	if shared.IsVMDisabled {
+		return
+	}
 	var hist *History
 	if len(crdt.history) == 0 || !(*crdt.history[len(crdt.history)-1].ts).IsEqual(*ts) {
 		hist = &History{
@@ -118,6 +142,9 @@ func (crdt *genericInversibleCRDT) addToHistory(ts *clocksi.Timestamp, updArgs *
 func (crdt *genericInversibleCRDT) rebuildCRDTToVersion(targetTs clocksi.Timestamp,
 	undoEffectFunc func(*Effect), reapplyOpFunc func(DownstreamArguments) *Effect,
 	notifyFunc func(*clocksi.Timestamp)) {
+	if shared.IsVMDisabled {
+		return
+	}
 	//No history, the CRDT is already in the empty/initial state
 	if len(crdt.history) == 0 {
 		return

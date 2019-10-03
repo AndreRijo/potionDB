@@ -2,6 +2,8 @@ package antidote
 
 import (
 	"clocksi"
+	"shared"
+	"sync"
 )
 
 /*****Logging interface*****/
@@ -24,7 +26,7 @@ type LogRequestArgs interface {
 
 type LogCommitArgs struct {
 	TxnClk *clocksi.Timestamp
-	Upds   *[]UpdateObjectParams //Should be downstream arguments
+	Upds   []*UpdateObjectParams //Should be downstream arguments
 }
 
 type LogTxnArgs struct {
@@ -64,22 +66,38 @@ type MemLogger struct {
 	started    bool
 	log        []PairClockUpdates
 	currLogPos int
-	sendChan   chan LoggerRequest
+	matChan    chan LoggerRequest
+	replChan   chan LoggerRequest
 	partId     uint64
 	mat        *Materializer //Used to send the safeClk request
+	//Protects log. While we want to process materializer/replicator requests concurrently
+	//(in order to avoid each one waiting for the other and, thus, block forever), we want
+	//to isolate access to the log.
+	logLock sync.Mutex
 }
 
 type PairClockUpdates struct {
 	clk  *clocksi.Timestamp
-	upds *[]UpdateObjectParams
+	upds []*UpdateObjectParams
 }
 
 const (
 	initLogCapacity = 100
 )
 
+/*
 func (logger *MemLogger) SendLoggerRequest(request LoggerRequest) {
 	logger.sendChan <- request
+}
+*/
+
+func (logger *MemLogger) SendLoggerRequest(request LoggerRequest) {
+	switch request.GetRequestType() {
+	case CommitLogRequest:
+		logger.matChan <- request
+	case TxnLogRequest:
+		logger.replChan <- request
+	}
 }
 
 //Starts goroutine that listens to requests
@@ -87,14 +105,17 @@ func (logger *MemLogger) Initialize(mat *Materializer, partId uint64) {
 	if !logger.started {
 		logger.log = make([]PairClockUpdates, 0, initLogCapacity)
 		logger.currLogPos = 0
-		logger.sendChan = make(chan LoggerRequest)
+		logger.matChan = make(chan LoggerRequest)
+		logger.replChan = make(chan LoggerRequest)
 		logger.started = true
 		logger.partId = partId
 		logger.mat = mat
-		go logger.handleRequests()
+		go logger.handleMatRequests()
+		go logger.handleReplicatorRequests()
 	}
 }
 
+/*
 func (logger *MemLogger) handleRequests() {
 	for {
 		request := <-logger.sendChan
@@ -106,22 +127,47 @@ func (logger *MemLogger) handleRequests() {
 		}
 	}
 }
+*/
+func (logger *MemLogger) handleMatRequests() {
+	for {
+		if shared.IsLogDisabled {
+			<-logger.matChan
+		} else {
+			request := <-logger.matChan
+			logger.handleCommitLogRequest(request.LogRequestArgs.(LogCommitArgs))
+		}
+	}
+}
+
+func (logger *MemLogger) handleReplicatorRequests() {
+	for {
+		request := <-logger.replChan
+		logger.handleTxnLogRequest(request.LogRequestArgs.(LogTxnArgs))
+	}
+}
 
 func (logger *MemLogger) handleCommitLogRequest(request LogCommitArgs) {
+	logger.logLock.Lock()
 	logger.log = append(logger.log, PairClockUpdates{clk: request.TxnClk, upds: request.Upds})
+	logger.logLock.Unlock()
 }
 
 func (logger *MemLogger) handleTxnLogRequest(request LogTxnArgs) {
+	if shared.IsLogDisabled {
+		request.ReplyChan <- StableClkUpdatesPair{stableClock: clocksi.NewClockSiTimestamp(0), upds: []PairClockUpdates{}}
+		return
+	}
 	var txns []PairClockUpdates
+	logger.logLock.Lock()
 	if logger.currLogPos == len(logger.log) {
 		txns = nil
 	} else {
 		txns = logger.log[logger.currLogPos:]
 		logger.currLogPos = len(logger.log)
 	}
+	logger.logLock.Unlock()
 	replyChan := make(chan clocksi.Timestamp)
 	logger.mat.SendRequestToChannel(MaterializerRequest{MatRequestArgs: MatSafeClkArgs{ReplyChan: replyChan}}, uint64(logger.partId))
 	stableClk := <-replyChan
 	request.ReplyChan <- StableClkUpdatesPair{stableClock: stableClk, upds: txns}
-
 }

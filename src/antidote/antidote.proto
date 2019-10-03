@@ -185,7 +185,7 @@ message ApbGetLeaderboardResp {
 
 message ApbAverageUpdate {
 	required int64 value = 1;
-	optional int32 nValues = 2;
+	optional int64 nValues = 2;
 }
 
 message ApbGetAverageResp {

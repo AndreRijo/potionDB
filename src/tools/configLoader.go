@@ -43,6 +43,11 @@ func (config *ConfigLoader) GetConfig(key string) (value string) {
 	return config.configs[key]
 }
 
+func (config *ConfigLoader) GetAndHasConfig(key string) (value string, has bool) {
+	value, has = config.configs[key]
+	return
+}
+
 func (config *ConfigLoader) getConfigFiles() (fileNames []string) {
 	files, _ := ioutil.ReadDir(config.folder)
 	fileNames = make([]string, 0, 10)

@@ -109,7 +109,7 @@ func (crdt *SetAWCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int64) (
 	return
 }
 
-func (crdt *SetAWCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
+func (crdt *SetAWCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateArguments) (state State) {
 	switch typedArg := args.(type) {
 	case StateReadArguments:
 		return crdt.getState(updsNotYetApplied)
@@ -119,7 +119,7 @@ func (crdt *SetAWCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArgume
 	return nil
 }
 
-func (crdt *SetAWCrdt) getState(updsNotYetApplied []UpdateArguments) (state State) {
+func (crdt *SetAWCrdt) getState(updsNotYetApplied []*UpdateArguments) (state State) {
 	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
 		//go doesn't have a set structure nor a way to get keys from map.
 		//Using an auxiliary array in the state with the elements isn't a good option either - remove would have to search for the element
@@ -137,44 +137,9 @@ func (crdt *SetAWCrdt) getState(updsNotYetApplied []UpdateArguments) (state Stat
 	adds := make(map[Element]struct{})
 	rems := make(map[Element]struct{})
 
-	//Idea: go through the updates and check which elements were added/removed compared to the original state.
-	/*
-		for _, upd := range updsNotYetApplied {
-			switch typedUpd := upd.(type) {
-			case Add:
-				if crdt.elems[typedUpd.Element] == nil {
-					adds[typedUpd.Element] = struct{}{}
-				} else {
-					delete(rems, typedUpd.Element)
-				}
-			case AddAll:
-				for _, elem := range typedUpd.Elems {
-					if crdt.elems[elem] == nil {
-						adds[elem] = struct{}{}
-					} else {
-						delete(rems, elem)
-					}
-				}
-			case Remove:
-				if crdt.elems[typedUpd.Element] != nil {
-					rems[typedUpd.Element] = struct{}{}
-				} else {
-					delete(adds, typedUpd.Element)
-				}
-			case RemoveAll:
-				for _, elem := range typedUpd.Elems {
-					if crdt.elems[elem] != nil {
-						rems[elem] = struct{}{}
-					} else {
-						delete(adds, elem)
-					}
-				}
-			}
-		}
-	*/
 	//Idea: for each element, the latest entry is the one that matters
 	for i := len(updsNotYetApplied) - 1; i >= 0; i-- {
-		switch typedUpd := updsNotYetApplied[i].(type) {
+		switch typedUpd := (*updsNotYetApplied[i]).(type) {
 		case Add:
 			if _, has := rems[typedUpd.Element]; !has {
 				adds[typedUpd.Element] = struct{}{}
@@ -217,41 +182,15 @@ func (crdt *SetAWCrdt) getState(updsNotYetApplied []UpdateArguments) (state Stat
 	return SetAWValueState{Elems: elems[0:i]}
 }
 
-func (crdt *SetAWCrdt) lookup(elem Element, updsNotYetApplied []UpdateArguments) (state State) {
+func (crdt *SetAWCrdt) lookup(elem Element, updsNotYetApplied []*UpdateArguments) (state State) {
 	_, hasElem := crdt.elems[elem]
 	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
 		return SetAWLookupState{HasElem: hasElem}
 	}
-	//Need to go through pending updates to decide if the element is in the state or not
-	/*
-		for _, upd := range updsNotYetApplied {
-			switch typedUpd := upd.(type) {
-			case Add:
-				if typedUpd.Element == elem {
-					hasElem = true
-				}
-			case AddAll:
-				for _, updElem := range typedUpd.Elems {
-					if updElem == elem {
-						hasElem = true
-					}
-				}
-			case Remove:
-				if typedUpd.Element == elem {
-					hasElem = false
-				}
-			case RemoveAll:
-				for _, updElem := range typedUpd.Elems {
-					if updElem == elem {
-						hasElem = false
-					}
-				}
-			}
-		}
-	*/
+
 	//Idea: only need to check the latest update of elem
 	for i := len(updsNotYetApplied) - 1; i >= 0; i-- {
-		switch typedUpd := updsNotYetApplied[i].(type) {
+		switch typedUpd := (*updsNotYetApplied[i]).(type) {
 		case Add:
 			if typedUpd.Element == elem {
 				return SetAWLookupState{HasElem: true}

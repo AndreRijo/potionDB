@@ -6,7 +6,7 @@ type CRDT interface {
 	//Note: replicaID may not be required by every CRDT - for those, any value can be passed.
 	Initialize(startTs *clocksi.Timestamp, replicaID int64) (newCrdt CRDT)
 
-	Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State)
+	Read(args ReadArguments, updsNotYetApplied []*UpdateArguments) (state State)
 
 	Update(args UpdateArguments) (downstreamArgs DownstreamArguments)
 

@@ -2,6 +2,7 @@ package antidote
 
 import (
 	"clocksi"
+	"shared"
 	"time"
 	"tools"
 )
@@ -24,7 +25,7 @@ type ReplicatorMsg interface {
 
 type NewReplicatorRequest struct {
 	clocksi.Timestamp
-	Upds        []UpdateObjectParams
+	Upds        []*UpdateObjectParams
 	SenderID    int64
 	PartitionID int64
 }
@@ -36,11 +37,11 @@ type StableClock struct {
 
 type RemoteTxn struct {
 	clocksi.Timestamp
-	Upds *map[int][]UpdateObjectParams
+	Upds map[int][]*UpdateObjectParams
 }
 
 const (
-	tsSendDelay       time.Duration = 2000 //milliseconds
+	tsSendDelay       time.Duration = 200 //milliseconds
 	cacheInitialSize                = 100
 	toSendInitialSize               = 10
 )
@@ -54,42 +55,46 @@ func (req StableClock) getSenderID() int64 {
 }
 
 func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, replicaID int64) {
-	if !repl.started {
-		repl.tm = tm
-		repl.started = true
-		//nGoRoutines: number of partitions (defined in Materializer)
-		repl.localPartitions = loggers
-		//TODO: Actually choose which buckets are to be listen to
-		//remoteConn, err := CreateRemoteConnStruct(partitionIDs, replicaID)
-		bucketsToListen := make([]string, 1)
-		bucketsToListen[0] = "*"
-		//remoteConn, err := CreateRemoteGroupStruct(myDefaultIp, defaultIpList, bucketsToListen, replicaID)
-		remoteConn, err := CreateRemoteGroupStruct(bucketsToListen, replicaID)
-		//TODO: Not ignore err
-		ignore(err)
-		repl.remoteConn = remoteConn
-		repl.txnCache = make(map[int][]PairClockUpdates)
-		dummyTs := clocksi.NewClockSiTimestamp(replicaID)
-		for id := 0; id < int(nGoRoutines); id++ {
-			cacheEntry := make([]PairClockUpdates, 1, cacheInitialSize)
-			//All txns have a clock higher than this, so the first request is the equivalent of "requesting all commited txns"
-			cacheEntry[0] = PairClockUpdates{clk: &dummyTs}
-			repl.txnCache[id] = cacheEntry
-			//repl.txnCache[id] = make([]PairClockUpdates, 0, cacheInitialSize)
+	if !shared.IsReplDisabled {
+		if !repl.started {
+			repl.tm = tm
+			repl.started = true
+			//nGoRoutines: number of partitions (defined in Materializer)
+			repl.localPartitions = loggers
+			//TODO: Actually choose which buckets are to be listen to
+			//remoteConn, err := CreateRemoteConnStruct(partitionIDs, replicaID)
+			bucketsToListen := make([]string, 1)
+			bucketsToListen[0] = "*"
+			//remoteConn, err := CreateRemoteGroupStruct(myDefaultIp, defaultIpList, bucketsToListen, replicaID)
+			remoteConn, err := CreateRemoteGroupStruct(bucketsToListen, replicaID)
+			//TODO: Not ignore err
+			ignore(err)
+			repl.remoteConn = remoteConn
+			repl.txnCache = make(map[int][]PairClockUpdates)
+			dummyTs := clocksi.NewClockSiTimestamp(replicaID)
+			for id := 0; id < int(nGoRoutines); id++ {
+				cacheEntry := make([]PairClockUpdates, 1, cacheInitialSize)
+				//All txns have a clock higher than this, so the first request is the equivalent of "requesting all commited txns"
+				cacheEntry[0] = PairClockUpdates{clk: &dummyTs}
+				repl.txnCache[id] = cacheEntry
+				//repl.txnCache[id] = make([]PairClockUpdates, 0, cacheInitialSize)
+			}
+			//repl.lastSentClk = clocksi.NewClockSiTimestamp(replicaID)
+			//repl.receiveReplChan = make(chan ReplicatorRequest)
+			repl.replicaID = replicaID
+			go repl.receiveRemoteTxns()
+			go repl.replicateCycle()
 		}
-		//repl.lastSentClk = clocksi.NewClockSiTimestamp(replicaID)
-		//repl.receiveReplChan = make(chan ReplicatorRequest)
-		repl.replicaID = replicaID
-		go repl.receiveRemoteTxns()
-		go repl.replicateCycle()
 	}
 }
 
 func (repl *Replicator) replicateCycle() {
+	hold := make([][]RemoteTxn, 0, 0)
 	for {
 		tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "starting replicateCycle")
 		repl.getNewTxns()
 		toSend := repl.preparateDataToSend()
+		hold = append(hold, toSend)
 		repl.sendTxns(toSend)
 		tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "finishing replicateCycle")
 		time.Sleep(tsSendDelay * time.Millisecond)
@@ -131,7 +136,7 @@ func (repl *Replicator) getNewTxns() {
 			cacheEntry = cacheEntry[:len(cacheEntry)-1]
 		}
 		cacheEntry = append(cacheEntry, reply.upds...)
-		repl.txnCache[id] = append(cacheEntry, PairClockUpdates{clk: &reply.stableClock, upds: &[]UpdateObjectParams{}})
+		repl.txnCache[id] = append(cacheEntry, PairClockUpdates{clk: &reply.stableClock, upds: []*UpdateObjectParams{}})
 	}
 	tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "getNewTxns() finish")
 }
@@ -142,7 +147,7 @@ func (repl *Replicator) preparateDataToSend() (toSend []RemoteTxn) {
 	foundStableClk := false
 	for !foundStableClk {
 		minClk := *repl.txnCache[0][0].clk //Using first entry of first partition as initial value
-		var txnUpdates map[int][]UpdateObjectParams = make(map[int][]UpdateObjectParams)
+		var txnUpdates map[int][]*UpdateObjectParams = make(map[int][]*UpdateObjectParams)
 		//tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "nPartitions:", len(repl.localPartitions))
 		for id := 0; id < len(repl.localPartitions); id++ {
 			partCache := repl.txnCache[id]
@@ -152,18 +157,18 @@ func (repl *Replicator) preparateDataToSend() (toSend []RemoteTxn) {
 			clkCompare := (*firstEntry.clk).Compare(minClk)
 			if clkCompare == clocksi.LowerTs {
 				//Clock update, this partition has no further transactions. If no smaller clk is found, then this must be the last iteration
-				if len(*firstEntry.upds) == 0 {
+				if len(firstEntry.upds) == 0 {
 					foundStableClk = true
 				} else {
 					foundStableClk = false
 				}
 				minClk = *firstEntry.clk
 				txnUpdates = nil
-				txnUpdates = make(map[int][]UpdateObjectParams)
-				txnUpdates[id] = *firstEntry.upds
+				txnUpdates = make(map[int][]*UpdateObjectParams)
+				txnUpdates[id] = firstEntry.upds
 			} else if clkCompare == clocksi.EqualTs {
-				txnUpdates[id] = *firstEntry.upds
-				if len(*firstEntry.upds) == 0 {
+				txnUpdates[id] = firstEntry.upds
+				if len(firstEntry.upds) == 0 {
 					foundStableClk = true
 				}
 			}
@@ -171,7 +176,7 @@ func (repl *Replicator) preparateDataToSend() (toSend []RemoteTxn) {
 		if !foundStableClk {
 			//Safe to include the actual txn's clock in the list to send. We can remove entry from cache
 			tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "appending upds. Upds:", txnUpdates)
-			toSend = append(toSend, RemoteTxn{Timestamp: minClk, Upds: &txnUpdates})
+			toSend = append(toSend, RemoteTxn{Timestamp: minClk, Upds: txnUpdates})
 			tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "upds to send:", txnUpdates)
 			for id := range txnUpdates {
 				repl.txnCache[id] = repl.txnCache[id][1:]
@@ -198,7 +203,7 @@ func (repl *Replicator) sendTxns(toSend []RemoteTxn) {
 	//Separate each txn into partitions
 	//TODO: Batch of transactions for the same partition? Not simple due to clock updates.
 	for _, txn := range toSend {
-		for partId, upds := range *txn.Upds {
+		for partId, upds := range txn.Upds {
 			repl.remoteConn.SendPartTxn(&NewReplicatorRequest{PartitionID: int64(partId), SenderID: repl.replicaID, Timestamp: txn.Timestamp, Upds: upds})
 		}
 		//TODO: This might not even be necessary to be sent - probably it is enough to send this when there's no upds to send.
@@ -210,8 +215,8 @@ func (repl *Replicator) sendTxns(toSend []RemoteTxn) {
 func (repl *Replicator) receiveRemoteTxns() {
 	for {
 		tools.FancyInfoPrint(tools.REPL_PRINT, repl.replicaID, "iterating receiveRemoteTxns")
-		//remoteReq := <-repl.receiveReplChan
 		remoteReq := repl.remoteConn.GetNextRemoteRequest()
+
 		switch typedReq := remoteReq.(type) {
 		case *StableClock:
 			repl.tm.SendRemoteMsg(TMRemoteClk{
@@ -229,6 +234,7 @@ func (repl *Replicator) receiveRemoteTxns() {
 			tools.FancyErrPrint(tools.REPL_PRINT, repl.replicaID, "failed to process remoteConnection message - unknown msg type.")
 		}
 
+		//time.Sleep(5000 * time.Millisecond)
 		tools.FancyInfoPrint(tools.REPL_PRINT, repl.replicaID, "receiveRemoteTxns finished processing request")
 	}
 }

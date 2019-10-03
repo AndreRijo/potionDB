@@ -4,7 +4,6 @@ import (
 	"clocksi"
 	"crdt"
 	"encoding/binary"
-	fmt "fmt"
 	"io"
 	"math/rand"
 	"tools"
@@ -172,10 +171,10 @@ func CreateReadObjs(transId []byte, key string, crdtType CRDTType,
 	return
 }
 
-//TODO: Use a struct different from the one in transactionManager. Also, support receiving transId
-func CreateStaticReadObjs(readParams []ReadObjectParams) (protobuf *ApbStaticReadObjects) {
+//TODO: Use a struct different from the one in transactionManager.
+func CreateStaticReadObjs(transId []byte, readParams []ReadObjectParams) (protobuf *ApbStaticReadObjects) {
 	protobuf = &ApbStaticReadObjects{
-		Transaction: CreateStartTransaction(nil),
+		Transaction: CreateStartTransaction(transId),
 		Objects:     createBoundObjectsArray(readParams),
 	}
 	return
@@ -228,7 +227,7 @@ func createUpdateOps(updates []UpdateObjectParams) (protobufs []*ApbUpdateOp) {
 	for i, upd := range updates {
 		protobufs[i] = &ApbUpdateOp{
 			Boundobject: createBoundObject(upd.Key, upd.CrdtType, upd.Bucket),
-			Operation:   createUpdateOperation(upd.UpdateArgs, upd.CrdtType),
+			Operation:   createUpdateOperation(*upd.UpdateArgs, upd.CrdtType),
 		}
 	}
 	return
@@ -358,7 +357,7 @@ func CreateORMapUpdate(isAdd bool, adds map[string]crdt.Element, rems map[string
 	return
 }
 
-func CreatedMapUpdate(isAdd bool, adds map[string]crdt.UpdateArguments, rems map[string]struct{}) (protoBuf *ApbMapUpdate) {
+func CreateMapUpdate(isAdd bool, adds map[string]crdt.UpdateArguments, rems map[string]struct{}) (protoBuf *ApbMapUpdate) {
 	protoBuf = &ApbMapUpdate{}
 	i := 0
 	if isAdd {
@@ -423,12 +422,11 @@ func CreateTopKRmvUpdate(isAdd bool, playerId int, score int) (protoBuf *ApbTopk
 	return
 }
 
-func CreateAvgUpdate(sumValue int64, nAdds int32) (protoBuf *ApbAverageUpdate) {
-	return &ApbAverageUpdate{Value: proto.Int64(sumValue), NValues: proto.Int32(nAdds)}
+func CreateAvgUpdate(sumValue int64, nAdds int64) (protoBuf *ApbAverageUpdate) {
+	return &ApbAverageUpdate{Value: proto.Int64(sumValue), NValues: proto.Int64(nAdds)}
 }
 
 func CreateMaxMinUpdate(value int64, isMax bool) (protoBuf *ApbMaxMinUpdate) {
-	fmt.Println("Creating MaxMin upd with value", value, "and it is a max:", isMax)
 	return &ApbMaxMinUpdate{Value: proto.Int64(value), IsMax: proto.Bool(isMax)}
 }
 
@@ -623,11 +621,11 @@ func createUpdateOperation(updateArgs crdt.UpdateArguments, crdtType CRDTType) (
 		switch convertedArgs := updateArgs.(type) {
 		case crdt.AddValue:
 			protobuf = &ApbUpdateOperation{Avgop: &ApbAverageUpdate{
-				Value: proto.Int64(convertedArgs.Value), NValues: proto.Int32(1),
+				Value: proto.Int64(convertedArgs.Value), NValues: proto.Int64(1),
 			}}
 		case crdt.AddMultipleValue:
 			protobuf = &ApbUpdateOperation{Avgop: &ApbAverageUpdate{
-				Value: proto.Int64(convertedArgs.SumValue), NValues: proto.Int32(convertedArgs.NAdds),
+				Value: proto.Int64(convertedArgs.SumValue), NValues: proto.Int64(convertedArgs.NAdds),
 			}}
 		}
 	case CRDTType_MAXMIN:
@@ -648,18 +646,19 @@ func createUpdateOperation(updateArgs crdt.UpdateArguments, crdtType CRDTType) (
 }
 
 func ConvertProtoUpdateToAntidote(op *ApbUpdateOperation,
-	crdtType CRDTType) (updateArgs crdt.UpdateArguments) {
+	crdtType CRDTType) (updateArgs *crdt.UpdateArguments) {
+	var tmpUpd crdt.UpdateArguments = crdt.NoOp{}
 	switch crdtType {
 	case CRDTType_COUNTER:
-		updateArgs = crdt.Increment{Change: int32(op.GetCounterop().GetInc())}
+		tmpUpd = crdt.Increment{Change: int32(op.GetCounterop().GetInc())}
 	case CRDTType_LWWREG:
-		updateArgs = crdt.SetValue{NewValue: string(op.GetRegop().GetValue())}
+		tmpUpd = crdt.SetValue{NewValue: string(op.GetRegop().GetValue())}
 	case CRDTType_ORSET:
 		setProto := op.GetSetop()
 		if setProto.GetOptype() == ApbSetUpdate_ADD {
-			updateArgs = crdt.AddAll{Elems: crdt.ByteMatrixToElementArray(setProto.GetAdds())}
+			tmpUpd = crdt.AddAll{Elems: crdt.ByteMatrixToElementArray(setProto.GetAdds())}
 		} else {
-			updateArgs = crdt.RemoveAll{Elems: crdt.ByteMatrixToElementArray(setProto.GetRems())}
+			tmpUpd = crdt.RemoveAll{Elems: crdt.ByteMatrixToElementArray(setProto.GetRems())}
 		}
 	case CRDTType_ORMAP:
 		mapProto := op.GetMapop()
@@ -669,7 +668,7 @@ func ConvertProtoUpdateToAntidote(op *ApbUpdateOperation,
 				updAdds[string(mapUpd.GetKey().GetKey())] =
 					crdt.Element(mapUpd.GetUpdate().GetRegop().GetValue())
 			}
-			updateArgs = crdt.MapAddAll{Values: updAdds}
+			tmpUpd = crdt.MapAddAll{Values: updAdds}
 		} else {
 			rems := mapProto.GetRemovedKeys()
 			updRems := make([]string, len(rems))
@@ -678,7 +677,7 @@ func ConvertProtoUpdateToAntidote(op *ApbUpdateOperation,
 				updRems[i] = string(mapUpd.GetKey())
 				i++
 			}
-			updateArgs = crdt.MapRemoveAll{Keys: updRems}
+			tmpUpd = crdt.MapRemoveAll{Keys: updRems}
 		}
 	case CRDTType_RRMAP:
 		mapProto := op.GetMapop()
@@ -687,9 +686,9 @@ func ConvertProtoUpdateToAntidote(op *ApbUpdateOperation,
 			for _, mapUpd := range adds {
 				protoKey := mapUpd.GetKey()
 				updAdds[string(protoKey.GetKey())] =
-					ConvertProtoUpdateToAntidote(mapUpd.GetUpdate(), protoKey.GetType())
+					*ConvertProtoUpdateToAntidote(mapUpd.GetUpdate(), protoKey.GetType())
 			}
-			updateArgs = crdt.EmbMapUpdateAll{Upds: updAdds}
+			tmpUpd = crdt.EmbMapUpdateAll{Upds: updAdds}
 		} else {
 			rems := mapProto.GetRemovedKeys()
 			updRems := make([]string, len(rems))
@@ -698,34 +697,34 @@ func ConvertProtoUpdateToAntidote(op *ApbUpdateOperation,
 				updRems[i] = string(mapUpd.GetKey())
 				i++
 			}
-			updateArgs = crdt.MapRemoveAll{Keys: updRems}
+			tmpUpd = crdt.MapRemoveAll{Keys: updRems}
 		}
 
 	case CRDTType_TOPK_RMV:
 		topkProto := op.GetTopkrmvop()
 		if adds := topkProto.GetAdds(); adds != nil {
 			add := adds[0]
-			updateArgs = crdt.TopKAdd{TopKScore: crdt.TopKScore{Id: add.GetPlayerId(), Score: add.GetScore()}}
+			tmpUpd = crdt.TopKAdd{TopKScore: crdt.TopKScore{Id: add.GetPlayerId(), Score: add.GetScore()}}
 		} else {
 			rem := topkProto.GetRems()[0]
-			updateArgs = crdt.TopKRemove{Id: rem}
+			tmpUpd = crdt.TopKRemove{Id: rem}
 		}
 	case CRDTType_AVG:
 		avgProto := op.GetAvgop()
-		updateArgs = crdt.AddMultipleValue{SumValue: avgProto.GetValue(), NAdds: avgProto.GetNValues()}
+		tmpUpd = crdt.AddMultipleValue{SumValue: avgProto.GetValue(), NAdds: avgProto.GetNValues()}
 	case CRDTType_MAXMIN:
 		maxMinProto := op.GetMaxminop()
 		if maxMinProto.GetIsMax() {
-			updateArgs = crdt.MaxAddValue{Value: maxMinProto.GetValue()}
+			tmpUpd = crdt.MaxAddValue{Value: maxMinProto.GetValue()}
 		} else {
-			updateArgs = crdt.MinAddValue{Value: maxMinProto.GetValue()}
+			tmpUpd = crdt.MinAddValue{Value: maxMinProto.GetValue()}
 		}
 	default:
 		//TODO: Support other types and error case, and return error to client
 		tools.CheckErr("Unsupported data type for update - we should warn the user about this one day.", nil)
 	}
 
-	return
+	return &tmpUpd
 }
 
 func convertAntidoteStatesToProto(objectStates []crdt.State) (protobufs []*ApbReadObjectResp) {
@@ -836,6 +835,7 @@ func createMapNestedOps(upds map[string]crdt.UpdateArguments) (converted []*ApbM
 			Key:    &ApbMapKey{Key: []byte(key), Type: &crdtType},
 			Update: createUpdateOperation(upd, crdtType),
 		}
+		i++
 	}
 	return
 }
@@ -870,7 +870,7 @@ func createProtoStableClock(replicaID int64, ts int64) (protobuf *ProtoStableClo
 	return &ProtoStableClock{SenderID: &replicaID, ReplicaTs: &ts}
 }
 
-func createProtoReplicatePart(replicaID int64, partitionID int64, timestamp clocksi.Timestamp, upds []UpdateObjectParams) (protobuf *ProtoReplicatePart) {
+func createProtoReplicatePart(replicaID int64, partitionID int64, timestamp clocksi.Timestamp, upds []*UpdateObjectParams) (protobuf *ProtoReplicatePart) {
 	return &ProtoReplicatePart{
 		SenderID:    &replicaID,
 		PartitionID: &partitionID,
@@ -881,12 +881,12 @@ func createProtoReplicatePart(replicaID int64, partitionID int64, timestamp cloc
 	}
 }
 
-func createProtoDownstreamUpds(upds []UpdateObjectParams) (protobufs []*ProtoDownstreamUpd) {
+func createProtoDownstreamUpds(upds []*UpdateObjectParams) (protobufs []*ProtoDownstreamUpd) {
 	protobufs = make([]*ProtoDownstreamUpd, len(upds))
 	for i, upd := range upds {
 		protobufs[i] = &ProtoDownstreamUpd{
 			KeyParams: createBoundObject(upd.Key, upd.CrdtType, upd.Bucket),
-			Op:        createProtoOpDownstream(&upd.UpdateArgs),
+			Op:        createProtoOpDownstream(upd.UpdateArgs),
 		}
 	}
 	return protobufs
@@ -1034,9 +1034,9 @@ func createProtoTopkRmvDownstream(upd *crdt.UpdateArguments) (protobuf *ProtoTop
 func createProtoAvgDownstream(upd *crdt.UpdateArguments) (protobuf *ProtoAvgDownstream) {
 	switch convUpd := (*upd).(type) {
 	case crdt.AddValue:
-		protobuf = &ProtoAvgDownstream{SumValue: proto.Int64(convUpd.Value), NAdds: proto.Int32(1)}
+		protobuf = &ProtoAvgDownstream{SumValue: proto.Int64(convUpd.Value), NAdds: proto.Int64(1)}
 	case crdt.AddMultipleValue:
-		protobuf = &ProtoAvgDownstream{SumValue: proto.Int64(convUpd.SumValue), NAdds: proto.Int32(convUpd.NAdds)}
+		protobuf = &ProtoAvgDownstream{SumValue: proto.Int64(convUpd.SumValue), NAdds: proto.Int64(convUpd.NAdds)}
 	}
 	return
 }
@@ -1064,15 +1064,16 @@ func protoToReplicatorRequest(protobuf *ProtoReplicatePart) (request *NewReplica
 	}
 }
 
-func protoToDownstreamUpds(protobufs []*ProtoDownstreamUpd) (upds []UpdateObjectParams) {
-	upds = make([]UpdateObjectParams, len(protobufs))
+func protoToDownstreamUpds(protobufs []*ProtoDownstreamUpd) (upds []*UpdateObjectParams) {
+	upds = make([]*UpdateObjectParams, len(protobufs))
 	for i, proto := range protobufs {
 		keyProto := proto.GetKeyParams()
 		upd := &UpdateObjectParams{
 			KeyParams: CreateKeyParams(string(keyProto.GetKey()), keyProto.GetType(), string(keyProto.GetBucket())),
 		}
-		upd.UpdateArgs = protoToUpdateArgs(upd.CrdtType, proto.GetOp())
-		upds[i] = *upd
+		tmpArgs := protoToUpdateArgs(upd.CrdtType, proto.GetOp())
+		upd.UpdateArgs = &tmpArgs
+		upds[i] = upd
 	}
 	return upds
 }

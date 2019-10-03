@@ -1,5 +1,7 @@
 package crdt
 
+import "shared"
+
 type Unique uint64
 
 /*
@@ -65,6 +67,9 @@ func (set UniqueSet) copy() (copySet UniqueSet) {
 /***** CRDT INITIALIZATION *****/
 
 func InitializeCrdt(crdtType CRDTType, replicaID int64) (newCrdt CRDT) {
+	if shared.IsCRDTDisabled {
+		return (&EmptyCrdt{})
+	}
 	switch crdtType {
 	case CRDTType_COUNTER:
 		newCrdt = (&CounterCrdt{}).Initialize(nil, replicaID)

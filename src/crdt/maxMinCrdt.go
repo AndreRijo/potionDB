@@ -56,13 +56,13 @@ func (crdt *MaxMinCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int64) 
 	return
 }
 
-func (crdt *MaxMinCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
+func (crdt *MaxMinCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateArguments) (state State) {
 	if updsNotYetApplied == nil || len(updsNotYetApplied) > 0 {
 		return crdt.GetValue()
 	}
 	result := crdt.GetValue().(MaxMinState)
 	for _, upd := range updsNotYetApplied {
-		switch typedUpd := upd.(type) {
+		switch typedUpd := (*upd).(type) {
 		case MaxAddValue:
 			result.Value = crdt.max(result.Value, typedUpd.Value)
 		case MinAddValue:
