@@ -6,7 +6,13 @@ import (
 	"time"
 )
 
-const CRDTType_ORMAP CRDTType = 15
+const (
+	CRDTType_ORMAP     CRDTType = 15
+	READType_LOOKUP    READType = 1
+	READType_GET_VALUE READType = 2
+	READType_HAS_KEY   READType = 3
+	READType_GET_KEYS  READType = 4
+)
 
 type ORMapCrdt struct {
 	*genericInversibleCRDT
@@ -44,6 +50,10 @@ type HasKeyArguments struct {
 }
 
 type GetKeysArguments struct{}
+
+type GetValuesArguments struct {
+	Keys []string
+}
 
 //Operations
 
@@ -86,6 +96,7 @@ type ORMapRemoveAllEffect struct {
 	Rems map[string]map[Element]UniqueSet
 }
 
+//Upds
 func (args MapAdd) GetCRDTType() CRDTType { return CRDTType_ORMAP }
 
 func (args MapRemove) GetCRDTType() CRDTType { return CRDTType_ORMAP }
@@ -94,21 +105,29 @@ func (args MapAddAll) GetCRDTType() CRDTType { return CRDTType_ORMAP }
 
 func (args MapRemoveAll) GetCRDTType() CRDTType { return CRDTType_ORMAP }
 
+//Downstreams
 func (args DownstreamORMapAddAll) GetCRDTType() CRDTType { return CRDTType_ORMAP }
 
 func (args DownstreamORMapRemoveAll) GetCRDTType() CRDTType { return CRDTType_ORMAP }
 
+func (args DownstreamORMapAddAll) MustReplicate() bool { return true }
+
+func (args DownstreamORMapRemoveAll) MustReplicate() bool { return true }
+
+//States
 func (args MapEntryState) GetCRDTType() CRDTType { return CRDTType_ORMAP }
 
 func (args MapGetValueState) GetCRDTType() CRDTType { return CRDTType_ORMAP }
 
+func (args MapGetValueState) GetREADType() READType { return READType_GET_VALUE }
+
 func (args MapHasKeyState) GetCRDTType() CRDTType { return CRDTType_ORMAP }
+
+func (args MapHasKeyState) GetREADType() READType { return READType_HAS_KEY }
 
 func (args MapKeysState) GetCRDTType() CRDTType { return CRDTType_ORMAP }
 
-func (args DownstreamORMapAddAll) MustReplicate() bool { return true }
-
-func (args DownstreamORMapRemoveAll) MustReplicate() bool { return true }
+func (args MapKeysState) GetREADType() READType { return READType_GET_KEYS }
 
 //Note: crdt can (and most often will be) nil
 func (crdt *ORMapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int64) (newCrdt CRDT) {
@@ -130,6 +149,8 @@ func (crdt *ORMapCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateArgum
 		return crdt.getValue(updsNotYetApplied, typedArg.Key)
 	case HasKeyArguments:
 		return crdt.hasKey(updsNotYetApplied, typedArg.Key)
+	case GetValuesArguments:
+		return crdt.getValues(updsNotYetApplied, typedArg.Keys)
 	}
 	return nil
 }
@@ -182,6 +203,64 @@ func (crdt *ORMapCrdt) getState(updsNotYetApplied []*UpdateArguments) (state Map
 	}
 	for key, elem := range adds {
 		values[key] = elem
+	}
+	return MapEntryState{Values: values}
+}
+
+func (crdt *ORMapCrdt) getValues(updsNotYetApplied []*UpdateArguments, keys []string) (state MapEntryState) {
+	//The same as getState, but only for some keys. Gotta love code repetition!
+	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+		values := make(map[string]Element)
+		for _, key := range keys {
+			elemMap, has := crdt.entries[key]
+			if has {
+				values[key] = crdt.getMinElem(elemMap)
+			}
+
+		}
+		return MapEntryState{Values: values}
+	}
+
+	adds := make(map[string]Element)
+	rems := make(map[string]struct{})
+
+	//Key idea: for each key, the latest update is the only one that matters, hence start at the end.
+	for i := len(updsNotYetApplied) - 1; i >= 0; i-- {
+		switch typedUpd := (*updsNotYetApplied[i]).(type) {
+		case MapAdd:
+			if _, has := rems[typedUpd.Key]; !has {
+				adds[typedUpd.Key] = typedUpd.Value
+			}
+		case MapRemove:
+			if _, has := adds[typedUpd.Key]; !has {
+				rems[typedUpd.Key] = struct{}{}
+			}
+		case MapAddAll:
+			for key, elem := range typedUpd.Values {
+				if _, has := rems[key]; !has {
+					adds[key] = elem
+				}
+			}
+
+		case MapRemoveAll:
+			for _, key := range typedUpd.Keys {
+				if _, has := adds[key]; !has {
+					rems[key] = struct{}{}
+				}
+			}
+		}
+	}
+
+	//Build state
+	values := make(map[string]Element)
+	for _, key := range keys {
+		if _, has := rems[key]; !has {
+			if elemMap, has := crdt.entries[key]; has {
+				values[key] = crdt.getMinElem(elemMap)
+			} else if elem, has := adds[key]; has {
+				values[key] = elem
+			}
+		}
 	}
 	return MapEntryState{Values: values}
 }

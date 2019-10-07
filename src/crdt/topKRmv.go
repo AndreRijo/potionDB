@@ -4,6 +4,7 @@ import (
 	"clocksi"
 	"fmt"
 	"math"
+	"sort"
 )
 
 const CRDTType_TOPK_RMV CRDTType = 2
@@ -48,14 +49,23 @@ type DownstreamTopKRemove struct {
 	Vc clocksi.Timestamp
 }
 
-//A topkadd that doesn't necessarely need to be replicated for other than fault-tolerance purposes
+//A topkadd that doesn't necessarily need to be replicated for other than fault-tolerance purposes
 type OptDownstreamTopKAdd struct {
 	DownstreamTopKAdd
 }
 
-//A topkrmv that doesn't necessarely need to be replicated for other than fault-tolerance purposes
+//A topkrmv that doesn't necessarily need to be replicated for other than fault-tolerance purposes
 type OptDownstreamTopKRemove struct {
 	DownstreamTopKRemove
+}
+
+//Queries
+type GetTopNArguments struct {
+	NumberEntries int32
+}
+
+type GetTopKAboveValueArguments struct {
+	MinValue int32
 }
 
 type TopKScore struct {
@@ -188,15 +198,55 @@ func (crdt *TopKRmvCrdt) InitializeWithSize(startTs *clocksi.Timestamp, replicaI
 }
 
 func (crdt *TopKRmvCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateArguments) (state State) {
-	//TODO: Consider updsNotYetApplied
+	//TODO: Consider updsNotYetApplied in all of these
+	switch typedArgs := args.(type) {
+	case StateReadArguments:
+		return crdt.getState(updsNotYetApplied)
+	case GetTopNArguments:
+		return crdt.getTopN(typedArgs.NumberEntries, updsNotYetApplied)
+	case GetTopKAboveValueArguments:
+		return crdt.getTopKAboveValue(typedArgs.MinValue, updsNotYetApplied)
+	}
+	return nil
+}
+
+func (crdt *TopKRmvCrdt) getState(updsNotYetApplied []*UpdateArguments) (state State) {
 	values := make([]TopKScore, len(crdt.elems))
 	i := 0
 	for _, elem := range crdt.elems {
 		values[i] = TopKScore{Id: elem.Id, Score: elem.Score}
 		i++
 	}
-	//TODO: Handle updsNotYetApplied
 	return TopKValueState{Scores: values}
+}
+
+func (crdt *TopKRmvCrdt) getTopN(numberEntries int32, updsNotYetApplied []*UpdateArguments) (state State) {
+	//TODO: Think of a way to make this more optimized
+	allValues := crdt.getState(updsNotYetApplied).(TopKValueState).Scores
+	sort.Slice(allValues, func(i, j int) bool { return allValues[i].Score > allValues[j].Score })
+	if numberEntries >= int32(len(allValues)) {
+		return TopKValueState{Scores: allValues}
+	}
+
+	//Include extra values until allValues[curr] < allValues[numberEntries - 1]
+	min := allValues[numberEntries-1]
+	//Include extra values until allValues[numberEntries - 1] < min
+	for ; numberEntries < int32(len(allValues)) && allValues[numberEntries] == min; numberEntries++ {
+
+	}
+	return TopKValueState{Scores: allValues[:numberEntries]}
+}
+
+func (crdt *TopKRmvCrdt) getTopKAboveValue(minValue int32, updsNotYetApplied []*UpdateArguments) (state State) {
+	values := make([]TopKScore, len(crdt.elems))
+	actuallyAdded := 0
+	for _, elem := range crdt.elems {
+		if elem.Score >= minValue {
+			values[actuallyAdded] = TopKScore{Id: elem.Id, Score: elem.Score}
+			actuallyAdded++
+		}
+	}
+	return TopKValueState{Scores: values[:actuallyAdded]}
 }
 
 func (crdt *TopKRmvCrdt) Update(args UpdateArguments) (downstreamArgs DownstreamArguments) {

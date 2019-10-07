@@ -10,6 +10,8 @@ package main
 
 //TODO: Reuse of canals? Creating a new canal for each read/write seems like a waste... Should I ask the teachers?
 
+//TODO: ApbErrorResp
+
 import (
 	"antidote"
 	"bufio"
@@ -217,7 +219,6 @@ func handleStaticReadObjects(proto *antidote.ApbStaticReadObjects,
 	return
 }
 
-//TODO: Error cases in which it should return ApbErrorResp
 func handleStaticUpdateObjects(proto *antidote.ApbStaticUpdateObjects,
 	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *antidote.ApbCommitResp) {
 
@@ -240,11 +241,26 @@ func handleStaticUpdateObjects(proto *antidote.ApbStaticUpdateObjects,
 func handleReadObjects(proto *antidote.ApbReadObjects,
 	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *antidote.ApbReadObjectsResp) {
 
-	//didn't test, but this one should definitelly return ApbReadObjectsResp. Success should also be always true unless there is a type error?
-
 	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransactionDescriptor())
 
 	objs := protoObjectsToAntidoteObjects(proto.GetBoundobjects())
+	replyChan := make(chan []crdt.State)
+
+	tmChan <- createTMRequest(antidote.TMReadArgs{ReadParams: objs, ReplyChan: replyChan}, txnId, clientClock)
+
+	reply := <-replyChan
+	close(replyChan)
+
+	respProto = antidote.CreateReadObjectsResp(reply)
+	return
+}
+
+func handleRead(proto *antidote.ApbRead,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *antidote.ApbReadObjectsResp) {
+
+	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransactionDescriptor())
+
+	objs := protoReadToAntidoteObjects(proto.GetFullreads(), proto.GetPartialreads())
 	replyChan := make(chan []crdt.State)
 
 	tmChan <- createTMRequest(antidote.TMReadArgs{ReadParams: objs, ReplyChan: replyChan}, txnId, clientClock)
@@ -335,7 +351,29 @@ func protoObjectsToAntidoteObjects(protoObjs []*antidote.ApbBoundObject) (objs [
 	for i, currObj := range protoObjs {
 		objs[i] = antidote.ReadObjectParams{
 			KeyParams: antidote.CreateKeyParams(string(currObj.GetKey()), currObj.GetType(), string(currObj.GetBucket())),
-			ReadArgs:  crdt.StateReadArguments{}, //TODO: Implement partial read in proto side
+			ReadArgs:  crdt.StateReadArguments{},
+		}
+	}
+	return
+}
+
+func protoReadToAntidoteObjects(fullReads []*antidote.ApbBoundObject, partialReads []*antidote.ApbPartialRead) (objs []antidote.ReadObjectParams) {
+
+	objs = make([]antidote.ReadObjectParams, len(fullReads)+len(partialReads))
+
+	for i, currObj := range fullReads {
+		objs[i] = antidote.ReadObjectParams{
+			KeyParams: antidote.CreateKeyParams(string(currObj.GetKey()), currObj.GetType(), string(currObj.GetBucket())),
+			ReadArgs:  crdt.StateReadArguments{},
+		}
+	}
+
+	var boundObj *antidote.ApbBoundObject
+	for i, currObj := range partialReads {
+		boundObj = currObj.GetObject()
+		objs[i+len(fullReads)] = antidote.ReadObjectParams{
+			KeyParams: antidote.CreateKeyParams(string(boundObj.GetKey()), boundObj.GetType(), string(boundObj.GetBucket())),
+			ReadArgs:  antidote.ConvertProtoPartialReadToAntidoteRead(currObj.GetArgs(), boundObj.GetType(), currObj.GetReadtype()),
 		}
 	}
 	return

@@ -24,9 +24,14 @@ type genericCRDT struct {
 
 //Copy of antidote.pb.go to avoid import cycles
 type CRDTType int32
+type READType int32
 
 type State interface {
 	GetCRDTType() CRDTType
+}
+
+type PartialState interface {
+	GetREADType() READType
 }
 
 //Represents the update arguments specific to each CRDT.

@@ -226,6 +226,7 @@ message ApbReadObjects {
     required bytes transaction_descriptor = 2;
 }
 
+
 // An Object to be updated with specified operation
 message ApbUpdateOp {
     required ApbBoundObject boundobject = 1;
@@ -299,7 +300,7 @@ message ApbReadObjectResp {
     optional ApbGetTopkResp topk = 13;
     optional ApbGetLeaderboardResp leadb = 14;
     optional ApbGetAverageResp avg = 15;
-
+	optional ApbPartialReadResp partread = 8;	//Generic for non-full state reads from any CRDT
 }
 
 message ApbReadObjectsResp {
@@ -329,4 +330,145 @@ message ApbConnectReplica {
 
 message ApbConnectReplicaResp {
     repeated int64 knownIDs = 1;
+}
+
+
+
+//Partial reading
+
+enum READ_type {
+    FULL = 0;
+	//Set
+	LOOKUP = 1;
+	//Maps
+	GET_VALUE = 2;
+	HAS_KEY = 3;
+	GET_KEYS = 4;
+	GET_VALUES = 5;	//Return value for a given set of keys
+	//TopK
+	GET_N = 6;
+	GET_ABOVE_VALUE = 7;	//TODO: Both this and GET_N still need to be implemented in the topK.
+}
+
+//Allows both "full state reads" (ApbReadObjects) and "partial reads"
+message ApbRead {
+	repeated ApbBoundObject fullreads = 1;
+	repeated ApbPartialRead partialreads = 2;
+	required bytes transaction_descriptor = 3;
+}
+
+message ApbStaticRead {
+	repeated ApbBoundObject fullreads = 1;
+	repeated ApbPartialRead partialreads = 2;
+	required ApbStartTransaction transaction = 3;
+}
+
+message ApbPartialRead {
+	required ApbBoundObject object = 1;
+	required READ_type readtype = 2;
+	required ApbPartialReadArgs args = 3; 
+}
+
+message ApbPartialReadArgs {
+	optional ApbSetPartialRead set = 1;
+	optional ApbMapPartialRead map = 2;
+	optional ApbTopkPartialRead topk = 3;
+}
+
+message ApbSetPartialRead {
+	optional ApbSetLookupRead lookup = 1;
+}
+
+message ApbMapPartialRead {
+	optional ApbMapGetValueRead getvalue = 1;
+	optional ApbMapHasKeyRead haskey = 2;
+	optional ApbMapGetKeysRead getkeys = 3;
+	optional ApbMapGetValuesRead getvalues = 4;
+}
+
+message ApbTopkPartialRead {
+	optional ApbTopkGetNRead getn = 1;
+	optional ApbTopkAboveValueRead getabovevalue = 2;
+}
+
+//SET
+message ApbSetLookupRead {
+	required bytes element = 1;
+}
+
+//MAP
+message ApbMapGetValueRead {
+    required bytes key = 1;
+    optional ApbMapEmbPartialArgs args = 2;
+}
+
+message ApbMapHasKeyRead {
+	required bytes key = 1;
+}
+
+message ApbMapGetKeysRead {
+	
+}
+
+//Note: The 2nd argument is optional.
+//However, if it's present, then its len must be equal to keys'
+message ApbMapGetValuesRead {
+	repeated bytes keys = 1;
+	repeated ApbMapEmbPartialArgs args = 2;
+}
+
+//Helper for identifying a partial read of an embedded CRDT
+message ApbMapEmbPartialArgs {
+    required CRDT_type type = 1;
+    required READ_type readtype = 2;
+    required ApbPartialReadArgs args = 3;
+}
+
+//TOPK
+message ApbTopkGetNRead {
+	required int32 amount = 1;
+}
+
+message ApbTopkAboveValueRead {
+	required int32 minValue = 1;
+}
+
+//RESP
+message ApbPartialReadResp {
+	optional ApbSetPartialReadResp set = 1;
+	optional ApbMapPartialReadResp map = 2;
+	optional ApbTopkPartialReadResp topk = 3;
+}
+
+message ApbSetPartialReadResp {
+	optional ApbSetLookupReadResp lookup = 1;
+}
+
+message ApbMapPartialReadResp {
+	optional ApbMapGetValueResp getvalue = 1;	//Used for both mapGetValue and mapGetPartial
+	//TODO: We might need a proto for getting partial reads of all embedded CRDTs
+	optional ApbMapHasKeyReadResp haskey = 2;
+	optional ApbMapGetKeysReadResp getkeys = 3;
+}
+
+message ApbTopkPartialReadResp {
+	required ApbGetTopkResp pairs = 1;
+}
+
+message ApbSetLookupReadResp {
+	required bool has = 1;
+}
+
+message ApbMapGetValueResp {
+    required ApbReadObjectResp value = 1;
+    optional CRDT_type crdttype = 2;
+    optional READ_type parttype = 3;
+}
+
+message ApbMapHasKeyReadResp {
+	required bool has = 1;
+}
+
+message ApbMapGetKeysReadResp {
+	repeated string keys = 1;
 }

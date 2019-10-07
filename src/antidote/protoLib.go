@@ -15,6 +15,8 @@ const (
 	//Requests
 	ConnectReplica   = 10
 	ReadObjs         = 116
+	Read             = 90
+	StaticRead       = 91
 	UpdateObjs       = 118
 	StartTrans       = 119
 	AbortTrans       = 120
@@ -96,6 +98,8 @@ func unmarshallProto(code byte, msgBuf []byte) (protobuf proto.Message) {
 		protobuf = &ApbStartTransaction{}
 	case ReadObjs:
 		protobuf = &ApbReadObjects{}
+	case Read:
+		protobuf = &ApbRead{}
 	case UpdateObjs:
 		protobuf = &ApbUpdateObjects{}
 	case AbortTrans:
@@ -155,6 +159,22 @@ func CreateAbortTransaction(transId []byte) (protoBuf *ApbAbortTransaction) {
 	return
 }
 
+func CreateRead(transId []byte, fullReads []ReadObjectParams, partialReads []ReadObjectParams) (protobuf *ApbRead) {
+	return &ApbRead{
+		Fullreads:             createBoundObjectsArray(fullReads),
+		Partialreads:          createPartialReads(partialReads),
+		TransactionDescriptor: transId,
+	}
+}
+
+func CreateStaticRead(transId []byte, fullReads []ReadObjectParams, partialReads []ReadObjectParams) (protobuf *ApbStaticRead) {
+	return &ApbStaticRead{
+		Fullreads:    createBoundObjectsArray(fullReads),
+		Partialreads: createPartialReads(partialReads),
+		Transaction:  CreateStartTransaction(transId),
+	}
+}
+
 func CreateReadObjs(transId []byte, key string, crdtType CRDTType,
 	bucket string) (protoBuf *ApbReadObjects) {
 	boundObj := &ApbBoundObject{
@@ -202,6 +222,76 @@ func createBoundObject(key string, crdtType CRDTType, bucket string) (protobuf *
 		Type:   &crdtType,
 		Bucket: []byte(bucket),
 	}
+	return
+}
+
+func createPartialReads(readParams []ReadObjectParams) (protobufs []*ApbPartialRead) {
+	protobufs = make([]*ApbPartialRead, len(readParams))
+	for i, param := range readParams {
+		protobufs[i] = createPartialRead(param.Key, param.CrdtType, param.Bucket, param.ReadArgs)
+	}
+	return
+}
+
+//Note: Theorically doesn't need crdtType
+func createPartialRead(key string, crdtType CRDTType, bucket string, readArgs crdt.ReadArguments) (protobuf *ApbPartialRead) {
+	_, readType, partialReadArgs := CreatePartialReadArgs(readArgs)
+	return &ApbPartialRead{Object: createBoundObject(key, crdtType, bucket), Readtype: &readType, Args: partialReadArgs}
+}
+
+func createMapGetValuesRead(readArgs crdt.ReadArguments) (protobuf *ApbMapEmbPartialArgs) {
+	crdtType, readType, partProto := CreatePartialReadArgs(readArgs)
+	return &ApbMapEmbPartialArgs{Type: &crdtType, Readtype: &readType, Args: partProto}
+}
+
+func CreatePartialReadArgs(readArgs crdt.ReadArguments) (crdtType CRDTType, readType READType, protobuf *ApbPartialReadArgs) {
+	switch typedArgs := readArgs.(type) {
+	//Set
+	case crdt.LookupReadArguments:
+		return CRDTType_ORSET, READType_LOOKUP, &ApbPartialReadArgs{Set: &ApbSetPartialRead{Lookup: &ApbSetLookupRead{Element: []byte(typedArgs.Elem)}}}
+
+	//Map
+	case crdt.GetValueArguments:
+		return CRDTType_ORMAP, READType_GET_VALUE, &ApbPartialReadArgs{Map: &ApbMapPartialRead{Getvalue: &ApbMapGetValueRead{Key: []byte(typedArgs.Key)}}}
+	case crdt.HasKeyArguments:
+		return CRDTType_ORMAP, READType_HAS_KEY, &ApbPartialReadArgs{Map: &ApbMapPartialRead{Haskey: &ApbMapHasKeyRead{Key: []byte(typedArgs.Key)}}}
+	case crdt.GetKeysArguments:
+		return CRDTType_ORMAP, READType_GET_KEYS, &ApbPartialReadArgs{Map: &ApbMapPartialRead{Getkeys: &ApbMapGetKeysRead{}}}
+	case crdt.GetValuesArguments:
+		keys := make([][]byte, len(typedArgs.Keys))
+		for i, key := range typedArgs.Keys {
+			keys[i] = []byte(key)
+		}
+		return CRDTType_ORMAP, READType_GET_VALUES, &ApbPartialReadArgs{Map: &ApbMapPartialRead{Getvalues: &ApbMapGetValuesRead{Keys: keys}}}
+	//EmbMap
+	case crdt.EmbMapGetValueArguments:
+		if (typedArgs.Args != crdt.StateReadArguments{}) {
+			return CRDTType_RRMAP, READType_GET_VALUE, &ApbPartialReadArgs{Map: &ApbMapPartialRead{Getvalue: &ApbMapGetValueRead{Key: []byte(typedArgs.Key)}}}
+		} else {
+			readArgs := createMapGetValuesRead(typedArgs.Args)
+			return CRDTType_RRMAP, READType_GET_VALUE, &ApbPartialReadArgs{Map: &ApbMapPartialRead{Getvalue: &ApbMapGetValueRead{
+				Key:  []byte(typedArgs.Key),
+				Args: readArgs,
+			}}}
+		}
+	case crdt.EmbMapPartialArguments:
+		keys := make([][]byte, len(typedArgs.Args))
+		args := make([]*ApbMapEmbPartialArgs, len(keys))
+		i := 0
+		for key, arg := range typedArgs.Args {
+			keys[i] = []byte(key)
+			args[i] = createMapGetValuesRead(arg)
+			i++
+		}
+		return CRDTType_RRMAP, READType_GET_VALUES, &ApbPartialReadArgs{Map: &ApbMapPartialRead{Getvalues: &ApbMapGetValuesRead{Keys: keys, Args: args}}}
+
+	//TopK
+	case crdt.GetTopNArguments:
+		return CRDTType_TOPK_RMV, READType_GET_N, &ApbPartialReadArgs{Topk: &ApbTopkPartialRead{Getn: &ApbTopkGetNRead{Amount: proto.Int32(typedArgs.NumberEntries)}}}
+	case crdt.GetTopKAboveValueArguments:
+		return CRDTType_TOPK_RMV, READType_GET_ABOVE_VALUE, &ApbPartialReadArgs{Topk: &ApbTopkPartialRead{Getabovevalue: &ApbTopkAboveValueRead{MinValue: proto.Int32(typedArgs.MinValue)}}}
+	}
+
 	return
 }
 
@@ -754,12 +844,45 @@ func convertAntidoteStateToProto(objectState crdt.State) (protobuf *ApbReadObjec
 	case crdt.MaxMinState:
 		protobuf = createMaxMinReadResp(convertedState.Value)
 	default:
-		tools.CheckErr("Unsupported data type in convertAntidoteStatesToProto", nil)
+		//Partial state
+		protobuf = createPartialReadResp(objectState)
 	}
 	return
 }
 
-func ConvertProtoObjectToAntidoteState(proto *ApbReadObjectResp, crdtType CRDTType) (state crdt.State) {
+//Note: topK partial replies end up in the topK part of readResp, as they use the same state type
+func createPartialReadResp(objectState crdt.State) (protobuf *ApbReadObjectResp) {
+	partRespProto := &ApbPartialReadResp{}
+	switch convertedState := objectState.(type) {
+	//Set
+	case crdt.SetAWLookupState:
+		partRespProto.Set = &ApbSetPartialReadResp{Lookup: &ApbSetLookupReadResp{Has: proto.Bool(convertedState.HasElem)}}
+	//Map
+	case crdt.MapGetValueState:
+		partRespProto.Map = &ApbMapPartialReadResp{Getvalue: &ApbMapGetValueResp{
+			Value: createLWWRegisterReadResp(convertedState.Value),
+		}}
+	case crdt.EmbMapGetValueState:
+		partRespProto.Map = &ApbMapPartialReadResp{Getvalue: &ApbMapGetValueResp{
+			Value: convertAntidoteStateToProto(convertedState.State),
+		}}
+	case crdt.MapHasKeyState:
+		partRespProto.Map = &ApbMapPartialReadResp{Haskey: &ApbMapHasKeyReadResp{Has: proto.Bool(convertedState.HasKey)}}
+	case crdt.EmbMapHasKeyState:
+		partRespProto.Map = &ApbMapPartialReadResp{Haskey: &ApbMapHasKeyReadResp{Has: proto.Bool(convertedState.HasKey)}}
+	case crdt.MapKeysState:
+		partRespProto.Map = &ApbMapPartialReadResp{Getkeys: &ApbMapGetKeysReadResp{Keys: convertedState.Keys}}
+	case crdt.EmbMapKeysState:
+		partRespProto.Map = &ApbMapPartialReadResp{Getkeys: &ApbMapGetKeysReadResp{Keys: convertedState.Keys}}
+	}
+
+	return &ApbReadObjectResp{Partread: partRespProto}
+}
+
+func ConvertProtoObjectToAntidoteState(proto *ApbReadObjectResp, crdtType CRDTType, partReadType READType) (state crdt.State) {
+	if partReadType != READType_FULL {
+		return convertProtoPartialReadRespToAntidoteState(proto.GetPartread(), crdtType, partReadType)
+	}
 	switch crdtType {
 	case CRDTType_COUNTER:
 		state = crdt.CounterState{Value: proto.GetCounter().GetValue()}
@@ -785,7 +908,8 @@ func ConvertProtoObjectToAntidoteState(proto *ApbReadObjectResp, crdtType CRDTTy
 		mapState := crdt.EmbMapEntryState{States: make(map[string]crdt.State)}
 		for _, entry := range entries {
 			protoKey := entry.GetKey()
-			mapState.States[string(protoKey.GetKey())] = ConvertProtoObjectToAntidoteState(entry.GetValue(), protoKey.GetType())
+			//In this case the inner reads are also full read for sure. Might be worth changing this in the future though.
+			mapState.States[string(protoKey.GetKey())] = ConvertProtoObjectToAntidoteState(entry.GetValue(), protoKey.GetType(), READType_FULL)
 		}
 		state = mapState
 	case CRDTType_TOPK_RMV:
@@ -799,6 +923,110 @@ func ConvertProtoObjectToAntidoteState(proto *ApbReadObjectResp, crdtType CRDTTy
 		state = crdt.AvgState{Value: proto.GetAvg().GetAvg()}
 	case CRDTType_MAXMIN:
 		state = crdt.MaxMinState{Value: proto.GetMaxmin().GetValue()}
+	}
+	return
+}
+
+func convertProtoPartialReadRespToAntidoteState(proto *ApbPartialReadResp, crdtType CRDTType, partReadType READType) (state crdt.State) {
+	switch partReadType {
+	//Sets
+	case READType_LOOKUP:
+		state = crdt.SetAWLookupState{HasElem: proto.GetSet().GetLookup().GetHas()}
+
+	//Maps
+	case READType_HAS_KEY:
+		if crdtType == CRDTType_ORMAP {
+			state = crdt.MapHasKeyState{HasKey: proto.GetMap().GetHaskey().GetHas()}
+		} else {
+			state = crdt.EmbMapHasKeyState{HasKey: proto.GetMap().GetHaskey().GetHas()}
+		}
+	case READType_GET_KEYS:
+		if crdtType == CRDTType_ORMAP {
+			state = crdt.MapKeysState{Keys: proto.GetMap().GetGetkeys().GetKeys()}
+		} else {
+			state = crdt.EmbMapKeysState{Keys: proto.GetMap().GetGetkeys().GetKeys()}
+		}
+	case READType_GET_VALUE:
+		if crdtType == CRDTType_ORMAP {
+			state = crdt.MapGetValueState{Value: crdt.Element(proto.GetMap().GetGetvalue().GetValue().GetReg().GetValue())}
+		} else {
+			//Embedded map
+			mapProto := proto.GetMap().GetGetvalue()
+			innerCrdtType := mapProto.GetCrdttype()
+			innerPartReadType := mapProto.GetParttype()
+			state = crdt.EmbMapGetValueState{State: ConvertProtoObjectToAntidoteState(mapProto.GetValue(), innerCrdtType, innerPartReadType)}
+		}
+
+	//Topk
+	case READType_GET_N, READType_GET_ABOVE_VALUE:
+		protoValues := proto.GetTopk().GetPairs().GetValues()
+		scores := make([]crdt.TopKScore, len(protoValues))
+		for i, pair := range protoValues {
+			scores[i] = crdt.TopKScore{Id: pair.GetPlayerId(), Score: pair.GetScore()}
+		}
+		state = crdt.TopKValueState{Scores: scores}
+	}
+	return
+}
+
+func ConvertProtoPartialReadToAntidoteRead(proto *ApbPartialReadArgs, crdtType CRDTType, readType READType) (args crdt.ReadArguments) {
+	if readType == READType_FULL {
+		return crdt.StateReadArguments{}
+	}
+
+	switch readType {
+	//SET
+	case READType_LOOKUP:
+		return crdt.LookupReadArguments{Elem: crdt.Element(proto.GetSet().GetLookup().GetElement())}
+
+	//MAP
+	case READType_GET_VALUE:
+		if crdtType == CRDTType_ORMAP {
+			return crdt.GetValueArguments{Key: string(proto.GetMap().GetGetvalue().GetKey())}
+		} else {
+			getValueProto := proto.GetMap().GetGetvalue()
+			if getValueProto.GetArgs() != nil {
+				return crdt.EmbMapGetValueArguments{Key: string(getValueProto.GetKey()), Args: crdt.StateReadArguments{}}
+			} else {
+				protoArgs := getValueProto.GetArgs()
+				return crdt.EmbMapGetValueArguments{
+					Key:  string(getValueProto.GetKey()),
+					Args: ConvertProtoPartialReadToAntidoteRead(protoArgs.GetArgs(), protoArgs.GetType(), protoArgs.GetReadtype()),
+				}
+			}
+		}
+	case READType_HAS_KEY:
+		return crdt.HasKeyArguments{Key: string(proto.GetMap().GetHaskey().GetKey())}
+	case READType_GET_KEYS:
+		return crdt.GetKeysArguments{}
+	case READType_GET_VALUES:
+		mapProto := proto.GetMap().GetGetvalues()
+		byteKeys := mapProto.GetKeys()
+		keys := make([]string, len(byteKeys))
+		for i, byteKey := range byteKeys {
+			keys[i] = string(byteKey)
+		}
+		if crdtType == CRDTType_ORMAP {
+			return crdt.GetValuesArguments{Keys: keys}
+		} else if crdtType == CRDTType_RRMAP {
+			protoArgs := mapProto.GetArgs()
+			args := make(map[string]crdt.ReadArguments)
+			if len(protoArgs) == 0 {
+				for _, key := range keys {
+					args[key] = crdt.StateReadArguments{}
+				}
+			} else {
+				for i, protoArg := range protoArgs {
+					args[keys[i]] = ConvertProtoPartialReadToAntidoteRead(protoArg.GetArgs(), protoArg.GetType(), protoArg.GetReadtype())
+				}
+			}
+			return crdt.EmbMapPartialArguments{Args: args}
+		}
+	//TOPK
+	case READType_GET_N:
+
+	case READType_GET_ABOVE_VALUE:
+
 	}
 	return
 }
