@@ -6,6 +6,8 @@ import (
 	"math"
 	"proto"
 	"sort"
+
+	pb "github.com/golang/protobuf/proto"
 )
 
 type TopKRmvCrdt struct {
@@ -778,3 +780,92 @@ func (crdt *TopKRmvCrdt) applyRemove(op *DownstreamTopKRemove) (effect *Effect, 
 	return &eff, otherDownstreamArgs
 }
 */
+
+//Protobuf functions
+func (crdtOp TopKAdd) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
+	add := protobuf.GetTopkrmvop().GetAdds()[0]
+	crdtOp.TopKScore = TopKScore{Id: add.GetPlayerId(), Score: add.GetScore()}
+	return crdtOp
+}
+
+func (crdtOp TopKAdd) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
+	return &proto.ApbUpdateOperation{Topkrmvop: &proto.ApbTopkRmvUpdate{
+		Adds: []*proto.ApbIntPair{&proto.ApbIntPair{PlayerId: pb.Int32(crdtOp.Id), Score: pb.Int32(crdtOp.Score)}},
+	}}
+}
+
+func (crdtOp TopKRemove) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
+	crdtOp.Id = protobuf.GetTopkrmvop().GetRems()[0]
+	return crdtOp
+}
+
+func (crdtOp TopKRemove) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
+	return &proto.ApbUpdateOperation{Topkrmvop: &proto.ApbTopkRmvUpdate{Rems: []int32{crdtOp.Id}}}
+}
+
+func (crdtState TopKValueState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
+	protoScores := protobuf.GetTopk().GetValues()
+	if protoScores == nil {
+		//Partial read
+		protoScores = protobuf.GetPartread().GetTopk().GetPairs().GetValues()
+	}
+	crdtState.Scores = make([]TopKScore, len(protoScores))
+	for i, pair := range protoScores {
+		crdtState.Scores[i] = TopKScore{Id: pair.GetPlayerId(), Score: pair.GetScore()}
+	}
+	return crdtState
+}
+
+func (crdtState TopKValueState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+	protos := make([]*proto.ApbIntPair, len(crdtState.Scores))
+	for i, score := range crdtState.Scores {
+		protos[i] = &proto.ApbIntPair{PlayerId: pb.Int32(score.Id), Score: pb.Int32(score.Score)}
+	}
+	return &proto.ApbReadObjectResp{Topk: &proto.ApbGetTopkResp{Values: protos}}
+}
+
+func (args GetTopNArguments) FromPartialRead(protobuf *proto.ApbPartialReadArgs) (readArgs ReadArguments) {
+	args.NumberEntries = protobuf.GetTopk().GetGetn().GetAmount()
+	return args
+}
+
+func (args GetTopKAboveValueArguments) FromPartialRead(protobuf *proto.ApbPartialReadArgs) (readArgs ReadArguments) {
+	args.MinValue = protobuf.GetTopk().GetGetabovevalue().GetMinValue()
+	return args
+}
+
+func (args GetTopNArguments) ToPartialRead() (protobuf *proto.ApbPartialReadArgs) {
+	return &proto.ApbPartialReadArgs{Topk: &proto.ApbTopkPartialRead{Getn: &proto.ApbTopkGetNRead{
+		Amount: pb.Int32(args.NumberEntries),
+	}}}
+}
+
+func (args GetTopKAboveValueArguments) ToPartialRead() (protobuf *proto.ApbPartialReadArgs) {
+	return &proto.ApbPartialReadArgs{Topk: &proto.ApbTopkPartialRead{Getabovevalue: &proto.ApbTopkAboveValueRead{
+		MinValue: pb.Int32(args.MinValue),
+	}}}
+}
+
+func (downOp DownstreamTopKAdd) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
+	addProto := protobuf.GetTopkrmvOp().GetAdds()[0]
+	downOp.Id, downOp.Score, downOp.Ts, downOp.ReplicaID = addProto.GetId(), addProto.GetScore(), addProto.GetTs(), int16(addProto.GetReplicaID())
+	return downOp
+}
+
+func (downOp DownstreamTopKRemove) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
+	remProto := protobuf.GetTopkrmvOp().GetRems()[0]
+	downOp.Id, downOp.Vc = remProto.GetId(), clocksi.ClockSiTimestamp{}.FromBytes(remProto.GetVc())
+	return downOp
+}
+
+func (downOp DownstreamTopKAdd) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
+	return &proto.ProtoOpDownstream{TopkrmvOp: &proto.ProtoTopKRmvDownstream{Adds: []*proto.ProtoTopKElement{&proto.ProtoTopKElement{
+		Id: pb.Int32(downOp.Id), Score: pb.Int32(downOp.Score), Ts: pb.Int64(downOp.Ts), ReplicaID: pb.Int32(int32(downOp.ReplicaID)),
+	}}}}
+}
+
+func (downOp DownstreamTopKRemove) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
+	return &proto.ProtoOpDownstream{TopkrmvOp: &proto.ProtoTopKRmvDownstream{Rems: []*proto.ProtoTopKIdVc{&proto.ProtoTopKIdVc{
+		Id: pb.Int32(downOp.Id), Vc: downOp.Vc.ToBytes(),
+	}}}}
+}

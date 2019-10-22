@@ -5,6 +5,8 @@ import (
 	rand "math/rand"
 	"proto"
 	"time"
+
+	pb "github.com/golang/protobuf/proto"
 )
 
 type ORMapCrdt struct {
@@ -582,3 +584,191 @@ func (crdt *ORMapCrdt) undoRemoveAllEffect(rems map[string]map[Element]UniqueSet
 }
 
 func (crdt *ORMapCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+
+//Protobuf functions
+
+func (crdtOp MapAddAll) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
+	crdtOp.Values = make(map[string]Element)
+	protoAdds := protobuf.GetMapop().GetUpdates()
+	for _, mapUpd := range protoAdds {
+		crdtOp.Values[string(mapUpd.GetKey().GetKey())] =
+			Element(mapUpd.GetUpdate().GetRegop().GetValue())
+	}
+	return crdtOp
+}
+
+func (crdtOp MapAddAll) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
+	return &proto.ApbUpdateOperation{Mapop: &proto.ApbMapUpdate{
+		Updates:     mapEntriesToProto(crdtOp.Values),
+		RemovedKeys: []*proto.ApbMapKey{},
+	}}
+}
+
+func (crdtOp MapRemoveAll) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
+	protoRems := protobuf.GetMapop().GetRemovedKeys()
+	crdtOp.Keys = make([]string, len(protoRems))
+	i := 0
+	for _, mapKey := range protoRems {
+		crdtOp.Keys[i] = string(mapKey.GetKey())
+		i++
+	}
+	return crdtOp
+}
+
+func (crdtOp MapRemoveAll) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
+	return &proto.ApbUpdateOperation{Mapop: &proto.ApbMapUpdate{
+		Updates:     []*proto.ApbMapNestedUpdate{},
+		RemovedKeys: stringArrayToMapKeyArray(crdtOp.Keys),
+	}}
+}
+
+func (crdtOp MapAdd) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
+	protoAdd := protobuf.GetMapop().GetUpdates()[0]
+	crdtOp.Key, crdtOp.Value = string(protoAdd.GetKey().GetKey()), Element(protoAdd.GetUpdate().GetRegop().GetValue())
+	return crdtOp
+}
+
+func (crdtOp MapAdd) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
+	return &proto.ApbUpdateOperation{Mapop: &proto.ApbMapUpdate{
+		Updates:     mapEntriesToProto(map[string]Element{crdtOp.Key: crdtOp.Value}),
+		RemovedKeys: []*proto.ApbMapKey{},
+	}}
+}
+
+func (crdtOp MapRemove) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
+	crdtOp.Key = string(protobuf.GetMapop().GetRemovedKeys()[0].GetKey())
+	return crdtOp
+}
+
+func (crdtOp MapRemove) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
+	return &proto.ApbUpdateOperation{Mapop: &proto.ApbMapUpdate{
+		Updates:     []*proto.ApbMapNestedUpdate{},
+		RemovedKeys: stringArrayToMapKeyArray([]string{crdtOp.Key}),
+	}}
+}
+
+func (crdtState MapEntryState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
+	crdtState.Values = make(map[string]Element)
+	if entries := protobuf.GetMap().GetEntries(); entries != nil {
+		for _, entry := range entries {
+			crdtState.Values[string(entry.GetKey().GetKey())] = Element(entry.GetValue().GetReg().GetValue())
+		}
+	} else {
+		//Partial read
+		protoResp := protobuf.GetPartread().GetMap().GetGetvalues()
+		protoKeys, protoValues := protoResp.GetKeys(), protoResp.GetValues()
+		for i, value := range protoValues {
+			crdtState.Values[string(protoKeys[i])] = Element(value.GetValue().GetReg().GetValue())
+		}
+	}
+
+	return crdtState
+}
+
+func (crdtState MapEntryState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+	return &proto.ApbReadObjectResp{Map: &proto.ApbGetMapResp{Entries: entriesToApbMapEntries(crdtState.Values)}}
+}
+
+func (crdtState MapHasKeyState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
+	crdtState.HasKey = protobuf.GetPartread().GetMap().GetHaskey().GetHas()
+	return crdtState
+}
+
+func (crdtState MapHasKeyState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+	return &proto.ApbReadObjectResp{Partread: &proto.ApbPartialReadResp{Map: &proto.ApbMapPartialReadResp{
+		Haskey: &proto.ApbMapHasKeyReadResp{Has: pb.Bool(crdtState.HasKey)},
+	}}}
+}
+
+func (crdtState MapKeysState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
+	crdtState.Keys = protobuf.GetPartread().GetMap().GetGetkeys().GetKeys()
+	return crdtState
+}
+
+func (crdtState MapKeysState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+	return &proto.ApbReadObjectResp{Partread: &proto.ApbPartialReadResp{Map: &proto.ApbMapPartialReadResp{
+		Getkeys: &proto.ApbMapGetKeysReadResp{Keys: crdtState.Keys},
+	}}}
+}
+
+func (crdtState MapGetValueState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
+	crdtState.Value = Element(protobuf.GetPartread().GetMap().GetGetvalue().GetValue().GetReg().GetValue())
+	return crdtState
+}
+
+func (crdtState MapGetValueState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+	return &proto.ApbReadObjectResp{Partread: &proto.ApbPartialReadResp{Map: &proto.ApbMapPartialReadResp{
+		Getvalue: &proto.ApbMapGetValueResp{Value: &proto.ApbReadObjectResp{
+			Reg: &proto.ApbGetRegResp{Value: []byte(crdtState.Value)},
+		}},
+	}}}
+}
+
+func (args HasKeyArguments) FromPartialRead(protobuf *proto.ApbPartialReadArgs) (readArgs ReadArguments) {
+	args.Key = string(protobuf.GetMap().GetHaskey().GetKey())
+	return args
+}
+
+func (args GetKeysArguments) FromPartialRead(protobuf *proto.ApbPartialReadArgs) (readArgs ReadArguments) {
+	return args
+}
+
+func (args GetValueArguments) FromPartialRead(protobuf *proto.ApbPartialReadArgs) (readArgs ReadArguments) {
+	args.Key = string(protobuf.GetMap().GetGetvalue().GetKey())
+	return args
+}
+
+func (args GetValuesArguments) FromPartialRead(protobuf *proto.ApbPartialReadArgs) (readArgs ReadArguments) {
+	args.Keys = byteArrayToStringArray(protobuf.GetMap().GetGetvalues().GetKeys())
+	return args
+}
+
+func (args HasKeyArguments) ToPartialRead() (protobuf *proto.ApbPartialReadArgs) {
+	return &proto.ApbPartialReadArgs{Map: &proto.ApbMapPartialRead{Haskey: &proto.ApbMapHasKeyRead{Key: []byte(args.Key)}}}
+}
+
+func (args GetKeysArguments) ToPartialRead() (protobuf *proto.ApbPartialReadArgs) {
+	return &proto.ApbPartialReadArgs{Map: &proto.ApbMapPartialRead{Getkeys: &proto.ApbMapGetKeysRead{}}}
+}
+
+func (args GetValueArguments) ToPartialRead() (protobuf *proto.ApbPartialReadArgs) {
+	return &proto.ApbPartialReadArgs{Map: &proto.ApbMapPartialRead{Getvalue: &proto.ApbMapGetValueRead{Key: []byte(args.Key)}}}
+}
+
+func (args GetValuesArguments) ToPartialRead() (protobuf *proto.ApbPartialReadArgs) {
+	keys := stringArrayToByteArray(args.Keys)
+	return &proto.ApbPartialReadArgs{Map: &proto.ApbMapPartialRead{Getvalues: &proto.ApbMapGetValuesRead{Keys: keys}}}
+}
+
+func (downOp DownstreamORMapAddAll) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
+	setProto := protobuf.GetOrmapOp()
+	downOp.Rems = createORMapDownRems(setProto.GetRems())
+
+	downOp.Adds = make(map[string]UniqueElemPair)
+	addsProto := setProto.GetAdds()
+	for _, addProto := range addsProto {
+		downOp.Adds[string(addProto.GetKey())] = UniqueElemPair{Element: Element(addProto.GetElement()), Unique: Unique(addProto.GetUnique())}
+	}
+	return downOp
+}
+
+func (downOp DownstreamORMapRemoveAll) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
+	downOp.Rems = createORMapDownRems(protobuf.GetOrmapOp().GetRems())
+	return downOp
+}
+
+func (downOp DownstreamORMapAddAll) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
+	adds := make([]*proto.ProtoKeyValueUnique, len(downOp.Adds))
+	i := 0
+	for key, pair := range downOp.Adds {
+		adds[i] = &proto.ProtoKeyValueUnique{
+			Key: []byte(key), Element: []byte(pair.Element), Unique: pb.Uint64(uint64(pair.Unique)),
+		}
+		i++
+	}
+	return &proto.ProtoOpDownstream{OrmapOp: &proto.ProtoORMapDownstream{Adds: adds, Rems: createProtoMapRemoves(downOp.Rems)}}
+}
+
+func (downOp DownstreamORMapRemoveAll) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
+	return &proto.ProtoOpDownstream{OrmapOp: &proto.ProtoORMapDownstream{Rems: createProtoMapRemoves(downOp.Rems)}}
+}

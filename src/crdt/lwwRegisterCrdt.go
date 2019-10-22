@@ -5,6 +5,8 @@ import (
 	rand "math/rand"
 	"proto"
 	"time"
+
+	pb "github.com/golang/protobuf/proto"
 )
 
 //Note: Implements both CRDT and InversibleCRDT
@@ -130,3 +132,35 @@ func (crdt *LwwRegisterCrdt) undoEffect(effect *Effect) {
 }
 
 func (crdt *LwwRegisterCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+
+//Protobuf functions
+
+func (crdtOp SetValue) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
+	crdtOp.NewValue = string(protobuf.GetRegop().GetValue())
+	return crdtOp
+}
+
+func (crdtOp SetValue) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
+	return &proto.ApbUpdateOperation{Regop: &proto.ApbRegUpdate{Value: []byte(crdtOp.NewValue.(string))}}
+}
+
+func (crdtState RegisterState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
+	crdtState.Value = string(protobuf.GetReg().GetValue())
+	return crdtState
+}
+
+func (crdtState RegisterState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+	return &proto.ApbReadObjectResp{Reg: &proto.ApbGetRegResp{Value: []byte((crdtState.Value).(string))}}
+}
+
+func (downOp DownstreamSetValue) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
+	regOp := protobuf.GetLwwregOp()
+	downOp.NewValue, downOp.ReplicaID, downOp.Ts = regOp.GetValue(), int16(regOp.GetReplicaID()), regOp.GetTs()
+	return downOp
+}
+
+func (downOp DownstreamSetValue) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
+	return &proto.ProtoOpDownstream{LwwregOp: &proto.ProtoLWWRegisterDownstream{
+		Value: []byte(downOp.NewValue.(string)), Ts: pb.Int64(downOp.Ts), ReplicaID: pb.Int32(int32(downOp.ReplicaID)),
+	}}
+}

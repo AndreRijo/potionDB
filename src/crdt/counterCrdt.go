@@ -3,6 +3,8 @@ package crdt
 import (
 	"clocksi"
 	"proto"
+
+	pb "github.com/golang/protobuf/proto"
 )
 
 //Note: Implements both CRDT and InversibleCRDT
@@ -130,3 +132,50 @@ func (crdt *CounterCrdt) undoEffect(effect *Effect) {
 }
 
 func (crdt *CounterCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+
+//Protobuf functions
+
+func (crdtOp Increment) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
+	crdtOp.Change = int32(protobuf.GetCounterop().GetInc())
+	return crdtOp
+}
+
+func (crdtOp Increment) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
+	return &proto.ApbUpdateOperation{Counterop: &proto.ApbCounterUpdate{Inc: pb.Int64(int64(crdtOp.Change))}}
+}
+
+func (crdtOp Decrement) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
+	crdtOp.Change = int32(-protobuf.GetCounterop().GetInc())
+	return crdtOp
+}
+
+func (crdtOp Decrement) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
+	return &proto.ApbUpdateOperation{Counterop: &proto.ApbCounterUpdate{Inc: pb.Int64(int64(-crdtOp.Change))}}
+}
+
+func (crdtState CounterState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
+	crdtState.Value = protobuf.GetCounter().GetValue()
+	return crdtState
+}
+
+func (crdtState CounterState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+	return &proto.ApbReadObjectResp{Counter: &proto.ApbGetCounterResp{Value: pb.Int32(crdtState.Value)}}
+}
+
+func (downOp Increment) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
+	downOp.Change = protobuf.GetCounterOp().GetChange()
+	return downOp
+}
+
+func (downOp Decrement) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
+	downOp.Change = -protobuf.GetCounterOp().GetChange()
+	return downOp
+}
+
+func (downOp Increment) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
+	return &proto.ProtoOpDownstream{CounterOp: &proto.ProtoCounterDownstream{IsInc: pb.Bool(true), Change: pb.Int32(downOp.Change)}}
+}
+
+func (downOp Decrement) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
+	return &proto.ProtoOpDownstream{CounterOp: &proto.ProtoCounterDownstream{IsInc: pb.Bool(false), Change: pb.Int32(downOp.Change)}}
+}

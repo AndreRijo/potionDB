@@ -3,6 +3,8 @@ package crdt
 import (
 	"clocksi"
 	"proto"
+
+	pb "github.com/golang/protobuf/proto"
 )
 
 type AvgCrdt struct {
@@ -122,3 +124,45 @@ func (crdt *AvgCrdt) undoEffect(effect *Effect) {
 }
 
 func (crdt *AvgCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+
+//Protobuf functions
+
+func (crdtOp AddMultipleValue) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
+	avgProto := protobuf.GetAvgop()
+	crdtOp.SumValue, crdtOp.NAdds = avgProto.GetValue(), avgProto.GetNValues()
+	return crdtOp
+}
+
+func (crdtOp AddMultipleValue) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
+	return &proto.ApbUpdateOperation{Avgop: &proto.ApbAverageUpdate{
+		Value: pb.Int64(crdtOp.SumValue), NValues: pb.Int64(crdtOp.NAdds),
+	}}
+}
+
+func (crdtOp AddValue) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
+	crdtOp.Value = protobuf.GetAvgop().GetValue()
+	return crdtOp
+}
+
+func (crdtOp AddValue) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
+	return &proto.ApbUpdateOperation{Avgop: &proto.ApbAverageUpdate{Value: pb.Int64(crdtOp.Value), NValues: pb.Int64(1)}}
+}
+
+func (crdtState AvgState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
+	crdtState.Value = protobuf.GetAvg().GetAvg()
+	return crdtState
+}
+
+func (crdtState AvgState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+	return &proto.ApbReadObjectResp{Avg: &proto.ApbGetAverageResp{Avg: pb.Float64(crdtState.Value)}}
+}
+
+func (downOp AddMultipleValue) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
+	avgProto := protobuf.GetAvgOp()
+	downOp.SumValue, downOp.NAdds = avgProto.GetSumValue(), avgProto.GetNAdds()
+	return downOp
+}
+
+func (downOp AddMultipleValue) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
+	return &proto.ProtoOpDownstream{AvgOp: &proto.ProtoAvgDownstream{SumValue: pb.Int64(downOp.SumValue), NAdds: pb.Int64(downOp.NAdds)}}
+}

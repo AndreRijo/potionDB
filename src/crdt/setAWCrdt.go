@@ -5,6 +5,8 @@ import (
 	rand "math/rand"
 	"proto"
 	"time"
+
+	pb "github.com/golang/protobuf/proto"
 )
 
 type Element string
@@ -386,3 +388,116 @@ func (crdt *SetAWCrdt) undoRemoveAllEffect(effect *RemoveAllEffect) {
 }
 
 func (crdt *SetAWCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+
+//Protobuf functions
+
+func (crdtOp AddAll) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
+	crdtOp.Elems = ByteMatrixToElementArray(protobuf.GetSetop().GetAdds())
+	return crdtOp
+}
+
+func (crdtOp AddAll) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
+	opType := proto.ApbSetUpdate_ADD
+	elements := ElementArrayToByteMatrix(crdtOp.Elems)
+	return &proto.ApbUpdateOperation{Setop: &proto.ApbSetUpdate{Optype: &opType, Adds: elements}}
+}
+
+func (crdtOp RemoveAll) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
+	crdtOp.Elems = ByteMatrixToElementArray(protobuf.GetSetop().GetRems())
+	return crdtOp
+}
+
+func (crdtOp RemoveAll) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
+	opType := proto.ApbSetUpdate_REMOVE
+	elements := ElementArrayToByteMatrix(crdtOp.Elems)
+	return &proto.ApbUpdateOperation{Setop: &proto.ApbSetUpdate{Optype: &opType, Rems: elements}}
+}
+
+func (crdtOp Add) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
+	crdtOp.Element = Element(protobuf.GetSetop().GetAdds()[0])
+	return crdtOp
+}
+
+func (crdtOp Add) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
+	opType := proto.ApbSetUpdate_ADD
+	element := [][]byte{[]byte(crdtOp.Element)}
+	return &proto.ApbUpdateOperation{Setop: &proto.ApbSetUpdate{Optype: &opType, Adds: element}}
+}
+
+func (crdtOp Remove) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
+	crdtOp.Element = Element(protobuf.GetSetop().GetRems()[0])
+	return crdtOp
+}
+
+func (crdtOp Remove) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
+	opType := proto.ApbSetUpdate_REMOVE
+	element := [][]byte{[]byte(crdtOp.Element)}
+	return &proto.ApbUpdateOperation{Setop: &proto.ApbSetUpdate{Optype: &opType, Rems: element}}
+}
+
+func (crdtState SetAWValueState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
+	crdtState.Elems = ByteMatrixToElementArray(protobuf.GetSet().GetValue())
+	return crdtState
+}
+
+func (crdtState SetAWValueState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+	return &proto.ApbReadObjectResp{Set: &proto.ApbGetSetResp{Value: ElementArrayToByteMatrix(crdtState.Elems)}}
+}
+
+func (crdtState SetAWLookupState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
+	crdtState.HasElem = protobuf.GetPartread().GetSet().GetLookup().GetHas()
+	return crdtState
+}
+
+func (crdtState SetAWLookupState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+	return &proto.ApbReadObjectResp{Partread: &proto.ApbPartialReadResp{Set: &proto.ApbSetPartialReadResp{
+		Lookup: &proto.ApbSetLookupReadResp{Has: pb.Bool(crdtState.HasElem)},
+	}}}
+}
+
+func (args LookupReadArguments) FromPartialRead(protobuf *proto.ApbPartialReadArgs) (readArgs ReadArguments) {
+	args.Elem = Element(protobuf.GetSet().GetLookup().GetElement())
+	return args
+}
+
+func (args LookupReadArguments) ToPartialRead() (protobuf *proto.ApbPartialReadArgs) {
+	return &proto.ApbPartialReadArgs{Set: &proto.ApbSetPartialRead{Lookup: &proto.ApbSetLookupRead{Element: []byte(args.Elem)}}}
+}
+
+func (downOp DownstreamAddAll) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
+	adds := protobuf.GetSetOp().GetAdds()
+	downOp.Elems = make(map[Element]Unique)
+	for _, pairProto := range adds {
+		downOp.Elems[Element(pairProto.GetValue())] = Unique(pairProto.GetUnique())
+	}
+	return downOp
+}
+
+func (downOp DownstreamRemoveAll) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
+	rems := protobuf.GetSetOp().GetRems()
+	downOp.Elems = make(map[Element]UniqueSet)
+	for _, pairProto := range rems {
+		downOp.Elems[Element(pairProto.GetValue())] = UInt64ArrayToUniqueSet(pairProto.GetUniques())
+	}
+	return downOp
+}
+
+func (downOp DownstreamAddAll) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
+	adds := make([]*proto.ProtoValueUnique, len(downOp.Elems))
+	i := 0
+	for value, unique := range downOp.Elems {
+		adds[i] = &proto.ProtoValueUnique{Value: []byte(value), Unique: pb.Uint64(uint64(unique))}
+		i++
+	}
+	return &proto.ProtoOpDownstream{SetOp: &proto.ProtoSetDownstream{Adds: adds}}
+}
+
+func (downOp DownstreamRemoveAll) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
+	rems := make([]*proto.ProtoValueUniques, len(downOp.Elems))
+	i := 0
+	for value, uniques := range downOp.Elems {
+		rems[i] = &proto.ProtoValueUniques{Value: []byte(value), Uniques: UniqueSetToUInt64Array(uniques)}
+		i++
+	}
+	return &proto.ProtoOpDownstream{SetOp: &proto.ProtoSetDownstream{Rems: rems}}
+}

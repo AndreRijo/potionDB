@@ -7,6 +7,8 @@ import (
 	"clocksi"
 	"math"
 	"proto"
+
+	pb "github.com/golang/protobuf/proto"
 )
 
 type MaxMinCrdt struct {
@@ -171,3 +173,50 @@ func (crdt *MaxMinCrdt) undoEffect(effect *Effect) {
 }
 
 func (crdt *MaxMinCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+
+//Protobuf functions
+
+func (crdtOp MaxAddValue) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
+	crdtOp.Value = protobuf.GetMaxminop().GetValue()
+	return crdtOp
+}
+
+func (crdtOp MaxAddValue) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
+	return &proto.ApbUpdateOperation{Maxminop: &proto.ApbMaxMinUpdate{Value: pb.Int64(crdtOp.Value), IsMax: pb.Bool(true)}}
+}
+
+func (crdtOp MinAddValue) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
+	crdtOp.Value = protobuf.GetMaxminop().GetValue()
+	return crdtOp
+}
+
+func (crdtOp MinAddValue) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
+	return &proto.ApbUpdateOperation{Maxminop: &proto.ApbMaxMinUpdate{Value: pb.Int64(crdtOp.Value), IsMax: pb.Bool(false)}}
+}
+
+func (crdtState MaxMinState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
+	crdtState.Value = protobuf.GetMaxmin().GetValue()
+	return crdtState
+}
+
+func (crdtState MaxMinState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+	return &proto.ApbReadObjectResp{Maxmin: &proto.ApbGetMaxMinResp{Value: pb.Int64(crdtState.Value)}}
+}
+
+func (downOp MaxAddValue) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
+	downOp.Value = protobuf.GetMaxminOp().GetMax().GetValue()
+	return downOp
+}
+
+func (downOp MinAddValue) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
+	downOp.Value = protobuf.GetMaxminOp().GetMin().GetValue()
+	return downOp
+}
+
+func (downOp MaxAddValue) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
+	return &proto.ProtoOpDownstream{MaxminOp: &proto.ProtoMaxMinDownstream{Max: &proto.ProtoMaxDownstream{Value: pb.Int64(downOp.Value)}}}
+}
+
+func (downOp MinAddValue) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
+	return &proto.ProtoOpDownstream{MaxminOp: &proto.ProtoMaxMinDownstream{Min: &proto.ProtoMinDownstream{Value: pb.Int64(downOp.Value)}}}
+}
