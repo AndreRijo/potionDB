@@ -6,6 +6,7 @@ import (
 	fmt "fmt"
 	math "math"
 	"os"
+	"proto"
 	"tools"
 
 	hashFunc "github.com/twmb/murmur3"
@@ -74,7 +75,7 @@ type MatPrepareArgs struct {
 }
 
 type MatRemoteTxnArgs struct {
-	ReplicaID int64
+	ReplicaID int16
 	clocksi.Timestamp
 	Upds []*UpdateObjectParams
 }
@@ -85,7 +86,7 @@ type MatSafeClkArgs struct {
 }
 
 type MatClkPosUpdArgs struct {
-	ReplicaID int64
+	ReplicaID int16
 	StableTs  int64
 }
 
@@ -119,8 +120,8 @@ type partitionData struct {
 	//TODO: Choose a better option to hold pending reads? Checking the whole map takes a long time...
 	pendingReads        map[clocksi.TimestampKey]*PendingReads //pending reads that require a more recent version than stableVersion
 	log                 Logger                                 //logs the operations of txns that were commited in this partition
-	remoteWaiting       map[int64][]PairClockUpdates           //remote transactions that are waiting for other remote transactions to be applied. Int: replicaID
-	replicaID           int64
+	remoteWaiting       map[int16][]PairClockUpdates           //remote transactions that are waiting for other remote transactions to be applied. Int: replicaID
+	replicaID           int16
 	partitionID         int64 //Useful for debugging
 	downstreamOpsCh     chan TMDownstreamRemoteMsg
 	pendingOpsForRemote map[TransactionId][]*UpdateObjectParams //pending transactions that are only to be applied in remote replicas
@@ -145,7 +146,7 @@ type Materializer struct {
 //////////*******************Error types***********************//////////
 //TODO: Move this to crdt.go...?
 type UnknownCrdtTypeError struct {
-	CRDTType
+	proto.CRDTType
 }
 
 /////*****************CONSTANTS AND VARIABLES***********************/////
@@ -279,7 +280,7 @@ func (err UnknownCrdtTypeError) Error() (errString string) {
 /////*****************MATERIALIZER CODE***********************/////
 
 //Starts listening goroutines and channels. Also starts each partition's logger and returns it
-func InitializeMaterializer(replicaID int64, downstreamOpsCh chan TMDownstreamRemoteMsg) (mat *Materializer,
+func InitializeMaterializer(replicaID int16, downstreamOpsCh chan TMDownstreamRemoteMsg) (mat *Materializer,
 	loggers []Logger) {
 
 	mat = &Materializer{
@@ -292,10 +293,11 @@ func InitializeMaterializer(replicaID int64, downstreamOpsCh chan TMDownstreamRe
 		loggers[i].Initialize(mat, i)
 		go listenForTransactionManagerRequests(i, loggers[i], replicaID, downstreamOpsCh, mat)
 	}
+
 	return
 }
 
-func listenForTransactionManagerRequests(id uint64, logger Logger, replicaID int64, downstreamOpsCh chan TMDownstreamRemoteMsg, materializer *Materializer) {
+func listenForTransactionManagerRequests(id uint64, logger Logger, replicaID int16, downstreamOpsCh chan TMDownstreamRemoteMsg, materializer *Materializer) {
 	//Each goroutine is responsible for the range of keys [keyRangeSize * id, keyRangeSize * (id + 1)[
 	//Where keyRangeSize = math.MaxUint64 / number of goroutines
 
@@ -308,12 +310,22 @@ func listenForTransactionManagerRequests(id uint64, logger Logger, replicaID int
 		commitedWaitToApply: make(map[TransactionId]clocksi.Timestamp),
 		pendingReads:        make(map[clocksi.TimestampKey]*PendingReads),
 		log:                 logger,
-		remoteWaiting:       make(map[int64][]PairClockUpdates),
+		remoteWaiting:       make(map[int16][]PairClockUpdates),
 		replicaID:           replicaID,
 		partitionID:         int64(id),
 		downstreamOpsCh:     downstreamOpsCh,
 		pendingOpsForRemote: make(map[TransactionId][]*UpdateObjectParams),
 	}
+
+	//TODO: Delete this
+	/*
+		go func() {
+			time.Sleep(80000 * time.Millisecond)
+			fmt.Println("Deleting CRDTs!")
+			partitionData.db = nil
+		}()
+	*/
+
 	//Listens to the channel and processes requests. Has a buffer since requests may be received from multiple sources.
 	channel := make(chan MaterializerRequest, requestQueueSize)
 	materializer.channels[id] = channel
@@ -732,12 +744,12 @@ func applyUpdates(updates []*UpdateObjectParams, commitTimestamp *clocksi.Timest
 	i := 0
 	for _, upd := range updates {
 		hashKey := getHash(getCombinedKey(upd.KeyParams))
-
 		obj, hasKey := partitionData.db[hashKey]
 		if !hasKey {
 			obj = initializeVersionManager(upd.CrdtType, partitionData)
 			partitionData.db[hashKey] = obj
 		}
+
 		//Due to non-uniform CRDTs, the downstream args might be noop (op with no effect/doesn't need to be propagated yet)
 		//Some "normal" CRDTs have also be optimized to do the same (e.g., setAWCrdt when removing element that doesn't exist)
 		downArgs := obj.Update(*upd.UpdateArgs)
@@ -839,16 +851,15 @@ func handleMatClkPosUpd(request MaterializerRequest, partitionData *partitionDat
 	partitionData.stableVersion.UpdatePos(clkArgs.ReplicaID, clkArgs.StableTs)
 }
 
-func initializeVersionManager(crdtType CRDTType, partitionData *partitionData) (newVM VersionManager) {
+func initializeVersionManager(crdtType proto.CRDTType, partitionData *partitionData) (newVM VersionManager) {
 	//For now, all CRDTs use the same version manager
 	crdt := initializeCrdt(crdtType, partitionData)
 	tmpVM := (&InverseOpVM{}).Initialize(crdt)
 	return &tmpVM
 }
 
-//Converts "CRDTTypes". Yay for import cycles and aliases...
-func initializeCrdt(crdtType CRDTType, partitionData *partitionData) (newCrdt crdt.CRDT) {
-	return crdt.InitializeCrdt(crdt.CRDTType(crdtType), partitionData.replicaID)
+func initializeCrdt(crdtType proto.CRDTType, partitionData *partitionData) (newCrdt crdt.CRDT) {
+	return crdt.InitializeCrdt(crdtType, partitionData.replicaID)
 }
 
 /*

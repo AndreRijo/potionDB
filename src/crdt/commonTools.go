@@ -1,6 +1,9 @@
 package crdt
 
-import "shared"
+import (
+	"proto"
+	"shared"
+)
 
 type Unique uint64
 
@@ -66,26 +69,26 @@ func (set UniqueSet) copy() (copySet UniqueSet) {
 
 /***** CRDT INITIALIZATION *****/
 
-func InitializeCrdt(crdtType CRDTType, replicaID int64) (newCrdt CRDT) {
+func InitializeCrdt(crdtType proto.CRDTType, replicaID int16) (newCrdt CRDT) {
 	if shared.IsCRDTDisabled {
 		return (&EmptyCrdt{})
 	}
 	switch crdtType {
-	case CRDTType_COUNTER:
+	case proto.CRDTType_COUNTER:
 		newCrdt = (&CounterCrdt{}).Initialize(nil, replicaID)
-	case CRDTType_LWWREG:
+	case proto.CRDTType_LWWREG:
 		newCrdt = (&LwwRegisterCrdt{}).Initialize(nil, replicaID)
-	case CRDTType_ORSET:
+	case proto.CRDTType_ORSET:
 		newCrdt = (&SetAWCrdt{}).Initialize(nil, replicaID)
-	case CRDTType_ORMAP:
+	case proto.CRDTType_ORMAP:
 		newCrdt = (&ORMapCrdt{}).Initialize(nil, replicaID)
-	case CRDTType_TOPK_RMV:
+	case proto.CRDTType_TOPK_RMV:
 		newCrdt = (&TopKRmvCrdt{}).Initialize(nil, replicaID)
-	case CRDTType_AVG:
+	case proto.CRDTType_AVG:
 		newCrdt = (&AvgCrdt{}).Initialize(nil, replicaID)
-	case CRDTType_MAXMIN:
+	case proto.CRDTType_MAXMIN:
 		newCrdt = (&MaxMinCrdt{}).Initialize(nil, replicaID)
-	case CRDTType_RRMAP:
+	case proto.CRDTType_RRMAP:
 		newCrdt = (&RWEmbMapCrdt{}).Initialize(nil, replicaID)
 	default:
 		newCrdt = nil

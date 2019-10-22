@@ -8,6 +8,7 @@ import (
 	"crdt"
 	fmt "fmt"
 	"math/rand"
+	"proto"
 	"sync"
 	"tools"
 )
@@ -17,7 +18,7 @@ import (
 
 type KeyParams struct {
 	Key      string
-	CrdtType CRDTType
+	CrdtType proto.CRDTType
 	Bucket   string
 }
 
@@ -80,24 +81,24 @@ type TMAbortArgs struct {
 //Used by the Replication Layer. Use a different thread to handle this
 /*
 type TMRemoteTxn struct {
-	ReplicaID int64
+	ReplicaID int16
 	Upds      []NewRemoteTxns
 	StableTs  int64
 }
 */
 
 type TMRemoteMsg interface {
-	getReplicaID() int64
+	getReplicaID() int16
 }
 
 type TMRemoteClk struct {
-	ReplicaID int64
+	ReplicaID int16
 	StableTs  int64
 }
 
 type TMRemotePartTxn struct {
 	PartitionID int64
-	ReplicaID   int64
+	ReplicaID   int16
 	clocksi.Timestamp
 	Upds []*UpdateObjectParams
 }
@@ -176,12 +177,12 @@ type TransactionManager struct {
 	remoteChan chan TMRemoteMsg
 	//TODO: Currently downstreaming txns holds the lock until the whole process is done (i.e., all transactions are either downstreamed to Materializer or queued). This can be a problem if we need to wait for Materializer - use bounded chans?
 	localClock              ProtectedClock
-	downstreamQueue         map[int64][]TMRemoteMsg
+	downstreamQueue         map[int16][]TMRemoteMsg
 	replicator              *Replicator
-	replicaID               int64
+	replicaID               int16
 	downstreamOpsCh         chan TMDownstreamRemoteMsg  //Channel for handling ops that are generated when applying remote downstreams.
-	nPartitionsForRemoteTxn map[int64]*int              //Number of partitions that are involved in the current remote txn for a given replicaID.
-	clockOfRemoteTxn        map[int64]clocksi.Timestamp //Stores the timestamps for the remote txns referred in the map above
+	nPartitionsForRemoteTxn map[int16]*int              //Number of partitions that are involved in the current remote txn for a given replicaID.
+	clockOfRemoteTxn        map[int16]clocksi.Timestamp //Stores the timestamps for the remote txns referred in the map above
 }
 
 /////*****************CONSTANTS AND VARIABLES***********************/////
@@ -237,11 +238,11 @@ func (args TMAbortArgs) getRequestType() (requestType TMRequestType) {
 
 //TMRemoteMsg
 
-func (req TMRemoteClk) getReplicaID() (id int64) {
+func (req TMRemoteClk) getReplicaID() (id int16) {
 	return req.ReplicaID
 }
 
-func (req TMRemotePartTxn) getReplicaID() (id int64) {
+func (req TMRemotePartTxn) getReplicaID() (id int16) {
 	return req.ReplicaID
 }
 
@@ -263,7 +264,7 @@ func (txnPartitions *ongoingTxn) reset() {
 
 /////*****************TRANSACTION MANAGER CODE***********************/////
 
-func Initialize(replicaID int64) (tm *TransactionManager) {
+func Initialize(replicaID int16) (tm *TransactionManager) {
 	downstreamOpsCh := make(chan TMDownstreamRemoteMsg, downstreamOpsChBufferSize)
 	mat, loggers := InitializeMaterializer(replicaID, downstreamOpsCh)
 	//mat, _, _ := InitializeMaterializer(replicaID)
@@ -271,12 +272,12 @@ func Initialize(replicaID int64) (tm *TransactionManager) {
 		mat:                     mat,
 		remoteChan:              make(chan TMRemoteMsg),
 		localClock:              ProtectedClock{Mutex: sync.Mutex{}, Timestamp: clocksi.NewClockSiTimestamp(replicaID)},
-		downstreamQueue:         make(map[int64][]TMRemoteMsg),
+		downstreamQueue:         make(map[int16][]TMRemoteMsg),
 		replicator:              &Replicator{},
 		replicaID:               replicaID,
 		downstreamOpsCh:         downstreamOpsCh,
-		nPartitionsForRemoteTxn: make(map[int64]*int),
-		clockOfRemoteTxn:        make(map[int64]clocksi.Timestamp),
+		nPartitionsForRemoteTxn: make(map[int16]*int),
+		clockOfRemoteTxn:        make(map[int16]clocksi.Timestamp),
 	}
 	tm.replicator.Initialize(tm, loggers, replicaID)
 	go tm.handleRemoteMsgs()
@@ -284,7 +285,7 @@ func Initialize(replicaID int64) (tm *TransactionManager) {
 	return tm
 }
 
-func CreateKeyParams(key string, crdtType CRDTType, bucket string) (keyParams KeyParams) {
+func CreateKeyParams(key string, crdtType proto.CRDTType, bucket string) (keyParams KeyParams) {
 	return KeyParams{Key: key, CrdtType: crdtType, Bucket: bucket}
 }
 
@@ -699,9 +700,13 @@ func (tm *TransactionManager) applyRemoteClk(request *TMRemoteClk) {
 		//Send request
 		//TODO: Filter somehow isolated clocks? I.e., clock updates that are sent from time to time without being associated to a txn.
 		//fmt.Println("[REMOTE TM]Sent request to NUCRDT TM")
-		tm.downstreamOpsCh <- TMNewRemoteTxn{Timestamp: tm.clockOfRemoteTxn[request.ReplicaID], nPartitions: *tm.nPartitionsForRemoteTxn[request.ReplicaID]}
-		delete(tm.nPartitionsForRemoteTxn, request.ReplicaID)
-		delete(tm.clockOfRemoteTxn, request.ReplicaID)
+
+		//This if may be false when we receive a clock but not its transaction (possible situation: clock for bucket we're not replicating, but we still want to update the clock)
+		if nPartitions, has := tm.nPartitionsForRemoteTxn[request.ReplicaID]; has {
+			tm.downstreamOpsCh <- TMNewRemoteTxn{Timestamp: tm.clockOfRemoteTxn[request.ReplicaID], nPartitions: *nPartitions}
+			delete(tm.nPartitionsForRemoteTxn, request.ReplicaID)
+			delete(tm.clockOfRemoteTxn, request.ReplicaID)
+		}
 	} else {
 		tm.downstreamQueue[request.ReplicaID] = append(tm.downstreamQueue[request.ReplicaID], request)
 	}
@@ -734,7 +739,7 @@ func (tm *TransactionManager) applyRemoteTxn(request *TMRemotePartTxn) {
 }
 
 //Pre-condition: localClock's mutex is hold
-func (tm *TransactionManager) downstreamRemoteTxn(partitionID int64, replicaID int64, txnClk clocksi.Timestamp, txnOps []*UpdateObjectParams) {
+func (tm *TransactionManager) downstreamRemoteTxn(partitionID int64, replicaID int16, txnClk clocksi.Timestamp, txnOps []*UpdateObjectParams) {
 	tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Started downstream remote txn")
 	currRequest := MaterializerRequest{MatRequestArgs: MatRemoteTxnArgs{
 		ReplicaID: replicaID,
@@ -936,141 +941,3 @@ func (tm *TransactionManager) commitOpsForRemote(ops map[int64][]*UpdateObjectPa
 	tm.localClock.Timestamp = tm.localClock.Merge(*maxTimestamp)
 	tm.localClock.Unlock()
 }
-
-/*
-func (tm *TransactionManager) applyRemoteTxn(replicaID int64, upds []RemoteTxns, stableTs int64) {
-	tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Started applying remote txn")
-	tm.localClock.Lock()
-	for i, txn := range upds {
-		tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Detected a remote txn. Local clk:", tm.localClock.Timestamp, ". Remote clk:", txn.Timestamp)
-		isLowerOrEqual := txn.Timestamp.IsLowerOrEqualExceptFor(tm.localClock.Timestamp, tm.replicaID, replicaID)
-		if isLowerOrEqual {
-			tm.downstreamRemoteTxn(replicaID, txn.Timestamp, txn.Upds)
-		} else {
-			//Queue all others
-			tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Queuing remote txn")
-			tm.downstreamQueue[replicaID] = append(tm.downstreamQueue[replicaID], upds[i:]...)
-			break
-		}
-	}
-	//All txns were applied, so it's safe to update the local clock of both TM and materializer.
-	if tm.downstreamQueue[replicaID] == nil {
-		tm.localClock.Timestamp = tm.localClock.Timestamp.UpdatePos(replicaID, stableTs)
-		tm.mat.SendRequestToAllChannels(MaterializerRequest{MatRequestArgs: MatClkPosUpdArgs{ReplicaID: replicaID, StableTs: stableTs}})
-	} else {
-		tm.downstreamClkQueue[replicaID] = stableTs
-	}
-	tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Finished applying remote txn")
-	tm.checkPendingRemoteTxns()
-	tm.localClock.Unlock()
-}
-
-//Pre-condition: localClock's mutex is hold
-func (tm *TransactionManager) downstreamRemoteTxn(replicaID int64, txnClk clocksi.Timestamp, txnOps *map[int][]UpdateObjectParams) {
-	tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Started downstream remote txn")
-	var currRequest MaterializerRequest
-	for partId, partOps := range *txnOps {
-		currRequest = MaterializerRequest{MatRequestArgs: MatRemoteTxnArgs{
-			ReplicaID: replicaID,
-			Timestamp: txnClk,
-			Upds:      partOps,
-		}}
-		tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Sending remoteTxn request to Materializer")
-		if len(partOps) > 0 {
-			tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Partition", partId, "has operations:", partOps)
-		} else {
-			tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Partition", partId, "has NO operations:", partOps)
-		}
-		tm.mat.SendRequestToChannel(currRequest, uint64(partId))
-	}
-	tm.localClock.Timestamp = tm.localClock.Timestamp.UpdatePos(replicaID, txnClk.GetPos(replicaID))
-	tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Finished downstream remote txn")
-}
-
-//Pre-condition: localClock's mutex is hold
-func (tm *TransactionManager) checkPendingRemoteTxns() {
-	tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Started checking for pending remote txns")
-	appliedAtLeastOne := true
-	//No txns pending, can return right away
-	if len(tm.downstreamQueue) == 0 {
-		tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Finished checking for pending remote txns")
-		return
-	}
-	for appliedAtLeastOne {
-		for replicaID, pendingTxns := range tm.downstreamQueue {
-			if !appliedAtLeastOne {
-				break
-			}
-			appliedAtLeastOne = false
-			for _, txn := range pendingTxns {
-				isLowerOrEqual := txn.Timestamp.IsLowerOrEqualExceptFor(tm.localClock.Timestamp, tm.replicaID, replicaID)
-				if isLowerOrEqual {
-					tm.downstreamRemoteTxn(replicaID, txn.Timestamp, txn.Upds)
-					appliedAtLeastOne = true
-					if len(pendingTxns) > 1 {
-						pendingTxns = pendingTxns[1:]
-					} else {
-						pendingTxns = nil
-					}
-				} else {
-					break
-				}
-			}
-			if pendingTxns == nil {
-				//Update clock with the previously received stable clock and delte the entries in the queues relative to replicaID.
-				replicaClkValue := tm.downstreamClkQueue[replicaID]
-				tm.localClock.Timestamp = tm.localClock.Timestamp.UpdatePos(replicaID, replicaClkValue)
-				tm.mat.SendRequestToAllChannels(MaterializerRequest{MatRequestArgs: MatClkPosUpdArgs{ReplicaID: replicaID, StableTs: replicaClkValue}})
-
-				delete(tm.downstreamQueue, replicaID)
-				delete(tm.downstreamClkQueue, replicaID)
-			} else {
-				tm.downstreamQueue[replicaID] = pendingTxns
-			}
-		}
-	}
-	tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Finished checking for pending remote txns")
-}
-
-//TODO: Possibly cache the hashing results and return them? That would allow to include them in the requests and paralelize the read requests
-func (tm *TransactionManager) findCommonTimestamp(objsParams []KeyParams, clientTs clocksi.Timestamp) (ts clocksi.Timestamp) {
-	verifiedPartitions := make([]bool, nGoRoutines)
-	var nVerified uint64 = 0
-	readChannels := make([]chan crdt.State, nGoRoutines)
-	var smallestTS clocksi.Timestamp = nil
-
-	//Variables local to the first for. To avoid unecessary redeclarations
-	var currChanKey uint64
-	for _, currRead := range objsParams {
-		currChanKey = GetChannelKey(currRead)
-		//Still haven't verified this transaction
-		if !verifiedPartitions[currChanKey] {
-
-			nVerified++
-			replyTSChan := make(chan clocksi.Timestamp)
-			readChannels[currChanKey] = make(chan crdt.State)
-			currTSRequest := MaterializerRequest{
-				MatRequestArgs: MatVersionArgs{
-					ReplyChan: replyTSChan,
-					ChannelId: currChanKey,
-				},
-			}
-			tm.mat.SendRequestToChannel(currTSRequest, currChanKey)
-			currTS := <-replyTSChan
-			close(replyTSChan)
-
-			if smallestTS == nil || currTS.IsLowerOrEqual(smallestTS) {
-				smallestTS = currTS
-			}
-			//Already verified all partitions, no need to continue
-			if nVerified == nGoRoutines {
-				break
-			}
-		}
-	}
-	if smallestTS.IsLower(clientTs) {
-		smallestTS = clientTs
-	}
-	return smallestTS
-}
-*/

@@ -1,8 +1,9 @@
 package crdt
 
-import "clocksi"
-
-const CRDTType_AVG CRDTType = 7
+import (
+	"clocksi"
+	"proto"
+)
 
 type AvgCrdt struct {
 	*genericInversibleCRDT
@@ -25,16 +26,18 @@ type AddMultipleValue struct {
 
 type AddMultipleValueEffect AddMultipleValue
 
-func (args AddValue) GetCRDTType() CRDTType { return CRDTType_AVG }
+func (args AddValue) GetCRDTType() proto.CRDTType { return proto.CRDTType_AVG }
 
-func (args AddMultipleValue) GetCRDTType() CRDTType { return CRDTType_AVG }
+func (args AddMultipleValue) GetCRDTType() proto.CRDTType { return proto.CRDTType_AVG }
 
-func (args AvgState) GetCRDTType() CRDTType { return CRDTType_AVG }
+func (args AvgState) GetCRDTType() proto.CRDTType { return proto.CRDTType_AVG }
+
+func (args AvgState) GetREADType() proto.READType { return proto.READType_FULL }
 
 func (args AddMultipleValue) MustReplicate() bool { return true }
 
 //Note: crdt can (and most often will be) nil
-func (crdt *AvgCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int64) (newCrdt CRDT) {
+func (crdt *AvgCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
 	crdt = &AvgCrdt{
 		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
 		sum:                   0,

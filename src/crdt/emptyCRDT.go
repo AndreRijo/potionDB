@@ -3,15 +3,20 @@
 
 package crdt
 
-import "clocksi"
+import (
+	"clocksi"
+	"proto"
+)
 
 type EmptyCrdt struct{}
 
 type EmptyState struct{}
 
-func (args EmptyState) GetCRDTType() CRDTType { return CRDTType_LWWREG }
+func (args EmptyState) GetCRDTType() proto.CRDTType { return proto.CRDTType_LWWREG }
 
-func (crdt *EmptyCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int64) (newCrdt CRDT) {
+func (args EmptyState) GetREADType() proto.READType { return proto.READType_FULL }
+
+func (crdt *EmptyCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
 	return crdt
 }
 

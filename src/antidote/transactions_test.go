@@ -5,6 +5,7 @@ import (
 	"crdt"
 	fmt "fmt"
 	"math/rand"
+	"proto"
 	"testing"
 	"time"
 )
@@ -41,8 +42,8 @@ func TestWrites1(t *testing.T) {
 
 	//Sleep for a bit to ensure all gothreads initialize
 	time.Sleep(initializeTime * time.Millisecond)
-	firstKey := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), CRDTType_ORSET, "bkt")
-	secondKey := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), CRDTType_ORSET, "bkt")
+	firstKey := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), proto.CRDTType_ORSET, "bkt")
+	secondKey := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), proto.CRDTType_ORSET, "bkt")
 
 	//We want to force the two keys to go to different partitions
 	for GetChannelKey(secondKey) == GetChannelKey(firstKey) {
@@ -98,8 +99,8 @@ func TestWrites2(t *testing.T) {
 
 	//Sleep for a bit to ensure all gothreads initialize
 	time.Sleep(initializeTime * time.Millisecond)
-	firstKey := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), CRDTType_ORSET, "bkt")
-	secondKey := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), CRDTType_ORSET, "bkt")
+	firstKey := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), proto.CRDTType_ORSET, "bkt")
+	secondKey := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), proto.CRDTType_ORSET, "bkt")
 
 	//We want to force the two keys to go to different partitions
 	for GetChannelKey(secondKey) == GetChannelKey(firstKey) {
@@ -174,7 +175,7 @@ func TestWrites3(t *testing.T) {
 	//Sleep for a bit to ensure all gothreads initialize
 	time.Sleep(initializeTime * time.Millisecond)
 
-	firstKey := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), CRDTType_ORSET, "bkt")
+	firstKey := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), proto.CRDTType_ORSET, "bkt")
 
 	firstWriteParams := createRandomSetAdd(firstKey)
 	firstWriteReq, firstWriteChan := createStaticWrite(TransactionId(0), clocksi.NewClockSiTimestamp(0), firstWriteParams)
@@ -245,7 +246,7 @@ func TestWritesAndReads(t *testing.T) {
 
 	//Sleep for a bit to ensure all gothreads initialize
 	time.Sleep(initializeTime * time.Millisecond)
-	firstKey := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), CRDTType_ORSET, "bkt")
+	firstKey := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), proto.CRDTType_ORSET, "bkt")
 
 	firstWriteParams := createRandomSetAdd(firstKey)
 	firstWriteReq, firstWriteChan := createStaticWrite(TransactionId(rand.Uint64()), clocksi.NewClockSiTimestamp(0), firstWriteParams)
@@ -341,7 +342,7 @@ func TestNonStaticTransaction1(t *testing.T) {
 	txnRep := createAndProcessStartTxn(tm, txnPartitions, TransactionId(rand.Uint64()), clocksi.NewClockSiTimestamp(0))
 	fmt.Println(txnRep.TransactionId)
 
-	firstKey := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), CRDTType_ORSET, "bkt")
+	firstKey := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), proto.CRDTType_ORSET, "bkt")
 	firstWriteParams, firstWriteReply := createAndProcessWrite(tm, txnPartitions, nonStatic, firstKey, createRandomSetAdd, txnRep.TransactionId, txnRep.Timestamp)
 	checkUpdateError(1, firstWriteReply.updateReply, t)
 
@@ -371,7 +372,7 @@ func TestNonStaticTransaction2(t *testing.T) {
 	time.Sleep(initializeTime * time.Millisecond)
 
 	//Initial static update to add some data to a set CRDT
-	key := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), CRDTType_ORSET, "bkt")
+	key := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), proto.CRDTType_ORSET, "bkt")
 	staticTxnWriteParams, staticTxnWriteReply := createAndProcessWrite(tm, txnPartitions, static, key, createRandomSetAdd, TransactionId(rand.Uint64()), clocksi.NewClockSiTimestamp(0))
 	checkStaticUpdateError(1, staticTxnWriteReply.staticUpdateReply, t)
 
@@ -432,7 +433,7 @@ func TestReplicator1(t *testing.T) {
 	//Sleep for a bit to ensure all gothreads initialize
 	time.Sleep(initializeTime * time.Millisecond)
 
-	key := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), CRDTType_ORSET, "bkt")
+	key := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), proto.CRDTType_ORSET, "bkt")
 	writeReq, writeReply := createAndProcessWrite(tm1, nil, static, key, createRandomSetAdd, TransactionId(rand.Uint64()), clocksi.NewClockSiTimestamp(0))
 	checkStaticUpdateError(1, writeReply.staticUpdateReply, t)
 	ignore(writeReq)
@@ -464,7 +465,7 @@ func TestReplicator2(t *testing.T) {
 	//Sleep for a bit to ensure all gothreads initialize
 	time.Sleep(initializeTime * time.Millisecond)
 
-	key := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), CRDTType_ORSET, "bkt")
+	key := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), proto.CRDTType_ORSET, "bkt")
 	writeReq, writeReply := createAndProcessWrite(tm1, nil, static, key, createRandomSetAdd, TransactionId(rand.Uint64()), clocksi.NewClockSiTimestamp(0))
 	checkStaticUpdateError(1, writeReply.staticUpdateReply, t)
 	ignore(writeReq)

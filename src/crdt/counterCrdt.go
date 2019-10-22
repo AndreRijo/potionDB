@@ -1,8 +1,9 @@
 package crdt
 
-import "clocksi"
-
-const CRDTType_COUNTER CRDTType = 3
+import (
+	"clocksi"
+	"proto"
+)
 
 //Note: Implements both CRDT and InversibleCRDT
 type CounterCrdt struct {
@@ -30,18 +31,20 @@ type DecrementEffect struct {
 	Change int32
 }
 
-func (args Increment) GetCRDTType() CRDTType { return CRDTType_COUNTER }
+func (args Increment) GetCRDTType() proto.CRDTType { return proto.CRDTType_COUNTER }
 
-func (args Decrement) GetCRDTType() CRDTType { return CRDTType_COUNTER }
+func (args Decrement) GetCRDTType() proto.CRDTType { return proto.CRDTType_COUNTER }
 
-func (args CounterState) GetCRDTType() CRDTType { return CRDTType_COUNTER }
+func (args CounterState) GetCRDTType() proto.CRDTType { return proto.CRDTType_COUNTER }
+
+func (args CounterState) GetREADType() proto.READType { return proto.READType_FULL }
 
 func (args Increment) MustReplicate() bool { return true }
 
 func (args Decrement) MustReplicate() bool { return true }
 
 //Note: crdt can (and most often will be) nil
-func (crdt *CounterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int64) (newCrdt CRDT) {
+func (crdt *CounterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
 	crdt = &CounterCrdt{
 		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
 		value:                 0,

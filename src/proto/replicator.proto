@@ -1,15 +1,15 @@
 import "antidote.proto";
-option go_package = "antidote";
+option go_package = "proto";
 
 //protoc -I=. --go_out=. ./replicator.proto
 
 message ProtoStableClock {
-    required int64 senderID = 1;
+    required int32 senderID = 1;
     required int64 replicaTs = 2;
 }
 
 message ProtoReplicatePart {
-    required int64 senderID = 1;
+    required int32 senderID = 1;
     required ProtoRemoteTxn txn = 2;
     required int64 partitionID = 3;
 }
@@ -43,7 +43,7 @@ message ProtoCounterDownstream {
 message ProtoLWWRegisterDownstream {
     required bytes value = 1;
     required int64 ts = 2;
-    required int64 replicaID = 3;
+    required int32 replicaID = 3;
 }
 
 message ProtoSetDownstream {
@@ -104,7 +104,7 @@ message ProtoTopKElement {
     required int32 id = 1;
     required int32 score = 2;
     required int64 ts = 3;
-    required int64 replicaID = 4;
+    required int32 replicaID = 4;
 }
 
 message ProtoTopKIdVc {
@@ -120,13 +120,13 @@ message ProtoRWEmbMapDownstream {
 message ProtoRWEmbMapUpdates {
     repeated ProtoEmbMapUpd upds = 1;
     repeated ProtoStableClock vc = 2;
-    required int64 replicaID = 3;
+    required int32 replicaID = 3;
 }
 
 message ProtoRWEmbMapRemoves {
     repeated string keys = 1;
     required int64 ts = 2;
-    required int64 replicaID = 3;
+    required int32 replicaID = 3;
 }
 
 message ProtoEmbMapUpd {

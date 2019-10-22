@@ -3,15 +3,8 @@ package crdt
 import (
 	"clocksi"
 	rand "math/rand"
+	"proto"
 	"time"
-)
-
-const (
-	CRDTType_ORMAP     CRDTType = 15
-	READType_LOOKUP    READType = 1
-	READType_GET_VALUE READType = 2
-	READType_HAS_KEY   READType = 3
-	READType_GET_KEYS  READType = 4
 )
 
 type ORMapCrdt struct {
@@ -97,40 +90,59 @@ type ORMapRemoveAllEffect struct {
 }
 
 //Upds
-func (args MapAdd) GetCRDTType() CRDTType { return CRDTType_ORMAP }
+func (args MapAdd) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
 
-func (args MapRemove) GetCRDTType() CRDTType { return CRDTType_ORMAP }
+func (args MapRemove) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
 
-func (args MapAddAll) GetCRDTType() CRDTType { return CRDTType_ORMAP }
+func (args MapAddAll) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
 
-func (args MapRemoveAll) GetCRDTType() CRDTType { return CRDTType_ORMAP }
+func (args MapRemoveAll) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
 
 //Downstreams
-func (args DownstreamORMapAddAll) GetCRDTType() CRDTType { return CRDTType_ORMAP }
+func (args DownstreamORMapAddAll) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
 
-func (args DownstreamORMapRemoveAll) GetCRDTType() CRDTType { return CRDTType_ORMAP }
+func (args DownstreamORMapRemoveAll) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
 
 func (args DownstreamORMapAddAll) MustReplicate() bool { return true }
 
 func (args DownstreamORMapRemoveAll) MustReplicate() bool { return true }
 
 //States
-func (args MapEntryState) GetCRDTType() CRDTType { return CRDTType_ORMAP }
+func (args MapEntryState) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
 
-func (args MapGetValueState) GetCRDTType() CRDTType { return CRDTType_ORMAP }
+func (args MapEntryState) GetREADType() proto.READType { return proto.READType_FULL }
 
-func (args MapGetValueState) GetREADType() READType { return READType_GET_VALUE }
+func (args MapGetValueState) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
 
-func (args MapHasKeyState) GetCRDTType() CRDTType { return CRDTType_ORMAP }
+func (args MapGetValueState) GetREADType() proto.READType { return proto.READType_GET_VALUE }
 
-func (args MapHasKeyState) GetREADType() READType { return READType_HAS_KEY }
+func (args MapHasKeyState) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
 
-func (args MapKeysState) GetCRDTType() CRDTType { return CRDTType_ORMAP }
+func (args MapHasKeyState) GetREADType() proto.READType { return proto.READType_HAS_KEY }
 
-func (args MapKeysState) GetREADType() READType { return READType_GET_KEYS }
+func (args MapKeysState) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
+
+func (args MapKeysState) GetREADType() proto.READType { return proto.READType_GET_KEYS }
+
+//Queries
+func (args HasKeyArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
+
+func (args HasKeyArguments) GetREADType() proto.READType { return proto.READType_HAS_KEY }
+
+func (args GetKeysArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
+
+func (args GetKeysArguments) GetREADType() proto.READType { return proto.READType_GET_KEYS }
+
+func (args GetValueArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
+
+func (args GetValueArguments) GetREADType() proto.READType { return proto.READType_GET_VALUE }
+
+func (args GetValuesArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
+
+func (args GetValuesArguments) GetREADType() proto.READType { return proto.READType_GET_VALUES }
 
 //Note: crdt can (and most often will be) nil
-func (crdt *ORMapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int64) (newCrdt CRDT) {
+func (crdt *ORMapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
 	crdt = &ORMapCrdt{
 		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
 		entries:               make(map[string]map[Element]UniqueSet),

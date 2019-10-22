@@ -6,9 +6,8 @@ package crdt
 import (
 	"clocksi"
 	"math"
+	"proto"
 )
-
-const CRDTType_MAXMIN CRDTType = 0
 
 type MaxMinCrdt struct {
 	*genericInversibleCRDT
@@ -36,18 +35,20 @@ const (
 	IS_MIN = false
 )
 
-func (args MaxAddValue) GetCRDTType() CRDTType { return CRDTType_MAXMIN }
+func (args MaxAddValue) GetCRDTType() proto.CRDTType { return proto.CRDTType_MAXMIN }
 
-func (args MinAddValue) GetCRDTType() CRDTType { return CRDTType_MAXMIN }
+func (args MinAddValue) GetCRDTType() proto.CRDTType { return proto.CRDTType_MAXMIN }
 
-func (args MaxMinState) GetCRDTType() CRDTType { return CRDTType_MAXMIN }
+func (args MaxMinState) GetCRDTType() proto.CRDTType { return proto.CRDTType_MAXMIN }
+
+func (args MaxMinState) GetREADType() proto.READType { return proto.READType_FULL }
 
 func (args MaxAddValue) MustReplicate() bool { return true }
 
 func (args MinAddValue) MustReplicate() bool { return true }
 
 //Note: crdt can (and most often will be) nil
-func (crdt *MaxMinCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int64) (newCrdt CRDT) {
+func (crdt *MaxMinCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
 	crdt = &MaxMinCrdt{
 		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
 		topValue:              math.MaxInt64,

@@ -3,18 +3,17 @@ package crdt
 import (
 	"clocksi"
 	rand "math/rand"
+	"proto"
 	"time"
 )
-
-const CRDTType_LWWREG CRDTType = 5
 
 //Note: Implements both CRDT and InversibleCRDT
 type LwwRegisterCrdt struct {
 	*genericInversibleCRDT
 	value          interface{}
 	ts             int64
-	replicaID      int64
-	localReplicaID int64 //ReplicaID of the replica with this CRDT instance
+	replicaID      int16
+	localReplicaID int16 //ReplicaID of the replica with this CRDT instance
 }
 
 type RegisterState struct {
@@ -28,26 +27,28 @@ type SetValue struct {
 type DownstreamSetValue struct {
 	NewValue  interface{}
 	Ts        int64
-	ReplicaID int64 //replicaID is only used to dinstiguish cases in which Ts is equal
+	ReplicaID int16 //replicaID is only used to dinstiguish cases in which Ts is equal
 }
 
 //Stores the value previous to the latest setValue
 type SetValueEffect struct {
 	NewValue  interface{}
 	Ts        int64
-	ReplicaID int64
+	ReplicaID int16
 }
 
-func (args SetValue) GetCRDTType() CRDTType { return CRDTType_LWWREG }
+func (args SetValue) GetCRDTType() proto.CRDTType { return proto.CRDTType_LWWREG }
 
-func (args DownstreamSetValue) GetCRDTType() CRDTType { return CRDTType_LWWREG }
+func (args DownstreamSetValue) GetCRDTType() proto.CRDTType { return proto.CRDTType_LWWREG }
 
-func (args RegisterState) GetCRDTType() CRDTType { return CRDTType_LWWREG }
+func (args RegisterState) GetCRDTType() proto.CRDTType { return proto.CRDTType_LWWREG }
+
+func (args RegisterState) GetREADType() proto.READType { return proto.READType_FULL }
 
 func (args DownstreamSetValue) MustReplicate() bool { return true }
 
 //Note: crdt can (and most often will be) nil
-func (crdt *LwwRegisterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int64) (newCrdt CRDT) {
+func (crdt *LwwRegisterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
 	crdt = &LwwRegisterCrdt{
 		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
 		value:                 "",

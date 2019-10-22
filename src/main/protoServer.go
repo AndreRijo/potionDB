@@ -23,6 +23,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"proto"
 	"runtime"
 	"runtime/pprof"
 	"strconv"
@@ -31,7 +32,7 @@ import (
 	"time"
 	"tools"
 
-	proto "github.com/golang/protobuf/proto"
+	pb "github.com/golang/protobuf/proto"
 )
 
 var (
@@ -70,8 +71,8 @@ func main() {
 
 	portString := configs.GetConfig(PORT_KEY)
 	rand.Seed(time.Now().UTC().UnixNano())
-	id, _ := strconv.ParseInt(portString, 0, 64)
-
+	tmpId, _ := strconv.ParseInt(portString, 0, 64)
+	id := int16(tmpId)
 	/*
 		fmt.Println("Other servers? Type their IDs, all in the same line separated by a space.")
 		otherIDsString, _ := in.ReadString('\n')
@@ -117,14 +118,14 @@ Note that this is the same interaction type as in antidote.
 
 conn - the TCP connection between the client and this server.
 */
-func processConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID int64) {
+func processConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID int16) {
 	tmChan := tm.CreateClientHandler()
 	//TODO: Change this to a random ID generated inside the transaction. This ID should be different from transaction to transaction
 	//The current solution can give problems in the Materializer when a commited transaction is put on hold and another transaction from the same client arrives
 	var clientId antidote.ClientId = antidote.ClientId(rand.Uint64())
 
 	var replyType byte = 0
-	var reply proto.Message = nil
+	var reply pb.Message = nil
 	for {
 		//TODO: Handle when client breaks connection or sends invalid data
 		//Possible invalid data case (e.g.): sends code for "StaticUpdateObjs" but instead sends a protobuf of another type (e.g: StartTrans)
@@ -143,42 +144,50 @@ func processConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID
 		case antidote.ConnectReplica:
 			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbConnectReplica")
 			replyType = antidote.ConnectReplicaReply
-			reply = handleReplicaConn(protobuf.(*antidote.ApbConnectReplica), tmChan)
+			reply = handleReplicaConn(protobuf.(*proto.ApbConnectReplica), tmChan)
 		case antidote.ConnectReplicaReply:
 			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbConnectReplicaReply")
-			handleReplicaConnReply(protobuf.(*antidote.ApbConnectReplicaResp), tmChan)
+			handleReplicaConnReply(protobuf.(*proto.ApbConnectReplicaResp), tmChan)
 			//Don't need to send any reply
 			continue
 		case antidote.ReadObjs:
 			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbReadObjects")
 			replyType = antidote.ReadObjsReply
-			reply = handleReadObjects(protobuf.(*antidote.ApbReadObjects), tmChan, clientId)
+			reply = handleReadObjects(protobuf.(*proto.ApbReadObjects), tmChan, clientId)
+		case antidote.Read:
+			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbRead")
+			replyType = antidote.ReadObjsReply
+			reply = handleRead(protobuf.(*proto.ApbRead), tmChan, clientId)
 		case antidote.UpdateObjs:
 			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbUpdateObjects")
 			//TODO: Check what antidote replies on this case
 			replyType = antidote.OpReply
-			reply = handleUpdateObjects(protobuf.(*antidote.ApbUpdateObjects), tmChan, clientId)
+			reply = handleUpdateObjects(protobuf.(*proto.ApbUpdateObjects), tmChan, clientId)
 		case antidote.StartTrans:
 			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbStartTransaction")
 			replyType = antidote.StartTransReply
-			reply = handleStartTxn(protobuf.(*antidote.ApbStartTransaction), tmChan, clientId)
+			reply = handleStartTxn(protobuf.(*proto.ApbStartTransaction), tmChan, clientId)
 		case antidote.AbortTrans:
 			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbAbortTransaction")
 			//TODO: Check what antidote replies on this case
 			replyType = antidote.CommitTransReply
-			reply = handleAbortTxn(protobuf.(*antidote.ApbAbortTransaction), tmChan, clientId)
+			reply = handleAbortTxn(protobuf.(*proto.ApbAbortTransaction), tmChan, clientId)
 		case antidote.CommitTrans:
 			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbCommitTransaction")
 			replyType = antidote.CommitTransReply
-			reply = handleCommitTxn(protobuf.(*antidote.ApbCommitTransaction), tmChan, clientId)
+			reply = handleCommitTxn(protobuf.(*proto.ApbCommitTransaction), tmChan, clientId)
 		case antidote.StaticUpdateObjs:
 			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbStaticUpdateObjects")
 			replyType = antidote.CommitTransReply
-			reply = handleStaticUpdateObjects(protobuf.(*antidote.ApbStaticUpdateObjects), tmChan, clientId)
+			reply = handleStaticUpdateObjects(protobuf.(*proto.ApbStaticUpdateObjects), tmChan, clientId)
 		case antidote.StaticReadObjs:
 			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbStaticReadObjects")
 			replyType = antidote.StaticReadObjsReply
-			reply = handleStaticReadObjects(protobuf.(*antidote.ApbStaticReadObjects), tmChan, clientId)
+			reply = handleStaticReadObjects(protobuf.(*proto.ApbStaticReadObjects), tmChan, clientId)
+		case antidote.StaticRead:
+			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbStaticRead")
+			replyType = antidote.StaticReadObjsReply
+			reply = handleStaticRead(protobuf.(*proto.ApbStaticRead), tmChan, clientId)
 		default:
 			tools.FancyErrPrint(tools.PROTO_PRINT, replicaID, "Received unknown proto, ignored... sort of")
 		}
@@ -188,7 +197,7 @@ func processConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID
 	}
 }
 
-func handleReplicaConn(proto *antidote.ApbConnectReplica, tmChan chan antidote.TransactionManagerRequest) (respProto *antidote.ApbConnectReplicaResp) {
+func handleReplicaConn(proto *proto.ApbConnectReplica, tmChan chan antidote.TransactionManagerRequest) (respProto *proto.ApbConnectReplicaResp) {
 	/*
 		tmChan <- antidote.TransactionManagerRequest{
 			Args:
@@ -197,13 +206,13 @@ func handleReplicaConn(proto *antidote.ApbConnectReplica, tmChan chan antidote.T
 	return nil
 }
 
-func handleReplicaConnReply(proto *antidote.ApbConnectReplicaResp, tmChan chan antidote.TransactionManagerRequest) {
+func handleReplicaConnReply(proto *proto.ApbConnectReplicaResp, tmChan chan antidote.TransactionManagerRequest) {
 
 }
 
 //TODO: Error cases in which it should return ApbErrorResp
-func handleStaticReadObjects(proto *antidote.ApbStaticReadObjects,
-	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *antidote.ApbStaticReadObjectsResp) {
+func handleStaticReadObjects(proto *proto.ApbStaticReadObjects,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbStaticReadObjectsResp) {
 
 	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransaction().GetTimestamp())
 
@@ -219,8 +228,25 @@ func handleStaticReadObjects(proto *antidote.ApbStaticReadObjects,
 	return
 }
 
-func handleStaticUpdateObjects(proto *antidote.ApbStaticUpdateObjects,
-	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *antidote.ApbCommitResp) {
+func handleStaticRead(proto *proto.ApbStaticRead,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbStaticReadObjectsResp) {
+
+	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransaction().GetTimestamp())
+
+	objs := protoReadToAntidoteObjects(proto.GetFullreads(), proto.GetPartialreads())
+	replyChan := make(chan antidote.TMStaticReadReply)
+
+	tmChan <- createTMRequest(antidote.TMStaticReadArgs{ReadParams: objs, ReplyChan: replyChan}, txnId, clientClock)
+
+	reply := <-replyChan
+	close(replyChan)
+
+	respProto = antidote.CreateStaticReadResp(reply.States, txnId, reply.Timestamp)
+	return
+}
+
+func handleStaticUpdateObjects(proto *proto.ApbStaticUpdateObjects,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbCommitResp) {
 
 	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransaction().GetTimestamp())
 
@@ -238,8 +264,8 @@ func handleStaticUpdateObjects(proto *antidote.ApbStaticUpdateObjects,
 	return
 }
 
-func handleReadObjects(proto *antidote.ApbReadObjects,
-	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *antidote.ApbReadObjectsResp) {
+func handleReadObjects(proto *proto.ApbReadObjects,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbReadObjectsResp) {
 
 	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransactionDescriptor())
 
@@ -255,8 +281,8 @@ func handleReadObjects(proto *antidote.ApbReadObjects,
 	return
 }
 
-func handleRead(proto *antidote.ApbRead,
-	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *antidote.ApbReadObjectsResp) {
+func handleRead(proto *proto.ApbRead,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbReadObjectsResp) {
 
 	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransactionDescriptor())
 
@@ -272,8 +298,8 @@ func handleRead(proto *antidote.ApbRead,
 	return
 }
 
-func handleUpdateObjects(proto *antidote.ApbUpdateObjects,
-	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *antidote.ApbOperationResp) {
+func handleUpdateObjects(proto *proto.ApbUpdateObjects,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbOperationResp) {
 
 	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransactionDescriptor())
 
@@ -292,8 +318,8 @@ func handleUpdateObjects(proto *antidote.ApbUpdateObjects,
 	//return type 111, success: true. I guess this always returns success unless there is a type error.
 }
 
-func handleStartTxn(proto *antidote.ApbStartTransaction,
-	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *antidote.ApbStartTransactionResp) {
+func handleStartTxn(proto *proto.ApbStartTransaction,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbStartTransactionResp) {
 
 	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTimestamp())
 	replyChan := make(chan antidote.TMStartTxnReply)
@@ -314,8 +340,8 @@ func handleStartTxn(proto *antidote.ApbStartTransaction,
 	return
 }
 
-func handleAbortTxn(proto *antidote.ApbAbortTransaction,
-	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *antidote.ApbCommitResp) {
+func handleAbortTxn(proto *proto.ApbAbortTransaction,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbCommitResp) {
 
 	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransactionDescriptor())
 
@@ -329,8 +355,8 @@ func handleAbortTxn(proto *antidote.ApbAbortTransaction,
 	return
 }
 
-func handleCommitTxn(proto *antidote.ApbCommitTransaction,
-	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *antidote.ApbCommitResp) {
+func handleCommitTxn(proto *proto.ApbCommitTransaction,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbCommitResp) {
 
 	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransactionDescriptor())
 	replyChan := make(chan antidote.TMCommitReply)
@@ -344,7 +370,7 @@ func handleCommitTxn(proto *antidote.ApbCommitTransaction,
 	return
 }
 
-func protoObjectsToAntidoteObjects(protoObjs []*antidote.ApbBoundObject) (objs []antidote.ReadObjectParams) {
+func protoObjectsToAntidoteObjects(protoObjs []*proto.ApbBoundObject) (objs []antidote.ReadObjectParams) {
 
 	objs = make([]antidote.ReadObjectParams, len(protoObjs))
 
@@ -357,7 +383,7 @@ func protoObjectsToAntidoteObjects(protoObjs []*antidote.ApbBoundObject) (objs [
 	return
 }
 
-func protoReadToAntidoteObjects(fullReads []*antidote.ApbBoundObject, partialReads []*antidote.ApbPartialRead) (objs []antidote.ReadObjectParams) {
+func protoReadToAntidoteObjects(fullReads []*proto.ApbBoundObject, partialReads []*proto.ApbPartialRead) (objs []antidote.ReadObjectParams) {
 
 	objs = make([]antidote.ReadObjectParams, len(fullReads)+len(partialReads))
 
@@ -368,28 +394,28 @@ func protoReadToAntidoteObjects(fullReads []*antidote.ApbBoundObject, partialRea
 		}
 	}
 
-	var boundObj *antidote.ApbBoundObject
+	var boundObj *proto.ApbBoundObject
 	for i, currObj := range partialReads {
 		boundObj = currObj.GetObject()
 		objs[i+len(fullReads)] = antidote.ReadObjectParams{
 			KeyParams: antidote.CreateKeyParams(string(boundObj.GetKey()), boundObj.GetType(), string(boundObj.GetBucket())),
-			ReadArgs:  antidote.ConvertProtoPartialReadToAntidoteRead(currObj.GetArgs(), boundObj.GetType(), currObj.GetReadtype()),
+			ReadArgs:  *crdt.PartialReadOpToAntidoteRead(currObj.GetArgs(), boundObj.GetType(), currObj.GetReadtype()),
 		}
 	}
 	return
 }
 
 //TODO: Maybe this method below should be moved to protoLib?
-func protoUpdateOpToAntidoteUpdate(protoUp []*antidote.ApbUpdateOp) (upParams []*antidote.UpdateObjectParams) {
+func protoUpdateOpToAntidoteUpdate(protoUp []*proto.ApbUpdateOp) (upParams []*antidote.UpdateObjectParams) {
 	upParams = make([]*antidote.UpdateObjectParams, len(protoUp))
-	var currObj *antidote.ApbBoundObject = nil
-	var currUpOp *antidote.ApbUpdateOperation = nil
+	var currObj *proto.ApbBoundObject = nil
+	var currUpOp *proto.ApbUpdateOperation = nil
 
 	for i, update := range protoUp {
 		currObj, currUpOp = update.GetBoundobject(), update.GetOperation()
 		upParams[i] = &antidote.UpdateObjectParams{
 			KeyParams:  antidote.CreateKeyParams(string(currObj.GetKey()), currObj.GetType(), string(currObj.GetBucket())),
-			UpdateArgs: antidote.ConvertProtoUpdateToAntidote(currUpOp, currObj.GetType()),
+			UpdateArgs: crdt.UpdateProtoToAntidoteUpdate(currUpOp, currObj.GetType()),
 		}
 	}
 
@@ -475,7 +501,7 @@ messageTypeToCode('ApbGetConnectionDescriptor')     -> 131;
 messageTypeToCode('ApbGetConnectionDescriptorResp') -> 132.
 */
 
-func notSupported(protobuf proto.Message) {
+func notSupported(protobuf pb.Message) {
 	fmt.Println("Received proto is recognized but not yet supported")
 }
 
@@ -515,10 +541,10 @@ func debugMemory() {
 		fmt.Printf("Number of GC cycles: %d\n", memStats.NumGC)
 		fmt.Println()
 		count++
-		if count%20 == 0 {
+		if count%5 == 0 {
 			fmt.Println("Calling GC")
 			runtime.GC()
 		}
-		time.Sleep(1000 * time.Millisecond)
+		time.Sleep(5000 * time.Millisecond)
 	}
 }

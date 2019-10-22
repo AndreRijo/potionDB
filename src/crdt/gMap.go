@@ -3,10 +3,9 @@ package crdt
 import (
 	"clocksi"
 	rand "math/rand"
+	"proto"
 	"time"
 )
-
-const CRDTType_GMAP CRDTType = 8
 
 /*
 	Grow-only map, based on the GSet.
@@ -19,14 +18,14 @@ type GMapCrdt struct {
 	*genericInversibleCRDT
 	values         map[string]Element
 	ts             int64
-	replicaID      int64
-	localReplicaID int64 //ReplicaID of the replica which has this CRDT instance
+	replicaID      int16
+	localReplicaID int16 //ReplicaID of the replica which has this CRDT instance
 }
 
 type DownstreamGMapAddAll struct {
 	Values    map[string]Element
 	Ts        int64
-	ReplicaID int64
+	ReplicaID int16
 }
 
 //Effect for inversibleCRDT
@@ -35,15 +34,15 @@ type GMapAddAllEffect struct {
 	ReplacedValues  map[string]Element  //Entries for which there was a previous value (and stores that value)
 	NotExistentKeys map[string]struct{} //Entries which didn't exist before
 	Ts              int64               //Ts before this effect
-	ReplicaID       int64               //ReplicaID of the Ts before this effect
+	ReplicaID       int16               //ReplicaID of the Ts before this effect
 }
 
-func (args DownstreamGMapAddAll) GetCRDTType() CRDTType { return CRDTType_GMAP }
+func (args DownstreamGMapAddAll) GetCRDTType() proto.CRDTType { return proto.CRDTType_GMAP }
 
 func (args DownstreamGMapAddAll) MustReplicate() bool { return true }
 
 //Note: crdt can (and most often will be) nil
-func (crdt *GMapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int64) (newCrdt CRDT) {
+func (crdt *GMapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
 	crdt = &GMapCrdt{
 		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
 		values:                make(map[string]Element),

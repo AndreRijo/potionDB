@@ -1,6 +1,7 @@
 // Java package specifiers
 option java_package = "com.basho.riak.protobuf";
 option java_outer_classname = "AntidotePB";
+option go_package = "proto";
 
 
 enum CRDT_type {
@@ -419,9 +420,9 @@ message ApbMapGetValuesRead {
 
 //Helper for identifying a partial read of an embedded CRDT
 message ApbMapEmbPartialArgs {
-    required CRDT_type type = 1;
+    optional CRDT_type type = 1;
     required READ_type readtype = 2;
-    required ApbPartialReadArgs args = 3;
+    optional ApbPartialReadArgs args = 3;   //If not present, then it's a full read
 }
 
 //TOPK
@@ -446,9 +447,9 @@ message ApbSetPartialReadResp {
 
 message ApbMapPartialReadResp {
 	optional ApbMapGetValueResp getvalue = 1;	//Used for both mapGetValue and mapGetPartial
-	//TODO: We might need a proto for getting partial reads of all embedded CRDTs
 	optional ApbMapHasKeyReadResp haskey = 2;
-	optional ApbMapGetKeysReadResp getkeys = 3;
+    optional ApbMapGetKeysReadResp getkeys = 3;
+    optional ApbMapGetValuesResp getvalues = 4;
 }
 
 message ApbTopkPartialReadResp {
@@ -471,4 +472,9 @@ message ApbMapHasKeyReadResp {
 
 message ApbMapGetKeysReadResp {
 	repeated string keys = 1;
+}
+
+message ApbMapGetValuesResp {
+    repeated bytes keys = 1;
+    repeated ApbMapGetValueResp values = 2;
 }

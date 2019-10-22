@@ -4,15 +4,14 @@ import (
 	"clocksi"
 	"fmt"
 	"math"
+	"proto"
 	"sort"
 )
-
-const CRDTType_TOPK_RMV CRDTType = 2
 
 type TopKRmvCrdt struct {
 	*genericInversibleCRDT
 	vc        clocksi.Timestamp
-	replicaID int64
+	replicaID int16
 
 	//Max number of elements that can be in top-K
 	maxElems int
@@ -77,7 +76,7 @@ type TopKElement struct {
 	Id        int32
 	Score     int32
 	Ts        int64
-	ReplicaID int64
+	ReplicaID int16
 }
 
 //Effect of an TopKAdd that adds the element to the top
@@ -152,19 +151,19 @@ func (elem TopKElement) isSmaller(other TopKElement) bool {
 	return other != TopKElement{} && other.isHigher(elem)
 }
 
-func (args TopKAdd) GetCRDTType() CRDTType { return CRDTType_TOPK_RMV }
+//Ops
+func (args TopKAdd) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPK_RMV }
 
-func (args TopKRemove) GetCRDTType() CRDTType { return CRDTType_TOPK_RMV }
+func (args TopKRemove) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPK_RMV }
 
-func (args DownstreamTopKAdd) GetCRDTType() CRDTType { return CRDTType_TOPK_RMV }
+//Downstreams
+func (args DownstreamTopKAdd) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPK_RMV }
 
-func (args DownstreamTopKRemove) GetCRDTType() CRDTType { return CRDTType_TOPK_RMV }
+func (args DownstreamTopKRemove) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPK_RMV }
 
-func (args OptDownstreamTopKAdd) GetCRDTType() CRDTType { return CRDTType_TOPK_RMV }
+func (args OptDownstreamTopKAdd) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPK_RMV }
 
-func (args OptDownstreamTopKRemove) GetCRDTType() CRDTType { return CRDTType_TOPK_RMV }
-
-func (args TopKValueState) GetCRDTType() CRDTType { return CRDTType_TOPK_RMV }
+func (args OptDownstreamTopKRemove) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPK_RMV }
 
 func (args DownstreamTopKAdd) MustReplicate() bool { return true }
 
@@ -174,15 +173,31 @@ func (args OptDownstreamTopKAdd) MustReplicate() bool { return false }
 
 func (args OptDownstreamTopKRemove) MustReplicate() bool { return false }
 
+//States
+func (args TopKValueState) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPK_RMV }
+
+func (args TopKValueState) GetREADType() proto.READType { return proto.READType_FULL }
+
+//Reads
+func (args GetTopNArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPK_RMV }
+
+func (args GetTopNArguments) GetREADType() proto.READType { return proto.READType_GET_N }
+
+func (args GetTopKAboveValueArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPK_RMV }
+
+func (args GetTopKAboveValueArguments) GetREADType() proto.READType {
+	return proto.READType_GET_ABOVE_VALUE
+}
+
 const (
 	defaultTopKSize = 100 //Default number of top positions
 )
 
-func (crdt *TopKRmvCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int64) (newCrdt CRDT) {
+func (crdt *TopKRmvCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
 	return crdt.InitializeWithSize(startTs, replicaID, defaultTopKSize)
 }
 
-func (crdt *TopKRmvCrdt) InitializeWithSize(startTs *clocksi.Timestamp, replicaID int64, size int) (newCrdt CRDT) {
+func (crdt *TopKRmvCrdt) InitializeWithSize(startTs *clocksi.Timestamp, replicaID int16, size int) (newCrdt CRDT) {
 	crdt = &TopKRmvCrdt{
 		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
 		vc:                    clocksi.NewClockSiTimestamp(replicaID),

@@ -3,10 +3,9 @@ package crdt
 import (
 	"clocksi"
 	rand "math/rand"
+	"proto"
 	"time"
 )
-
-const CRDTType_ORSET CRDTType = 4
 
 type Element string
 
@@ -79,28 +78,40 @@ type RemoveAllEffect struct {
 	RemovedMap map[Element]UniqueSet
 }
 
-func (args Add) GetCRDTType() CRDTType { return CRDTType_ORSET }
+//Ops
+func (args Add) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORSET }
 
-func (args Remove) GetCRDTType() CRDTType { return CRDTType_ORSET }
+func (args Remove) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORSET }
 
-func (args AddAll) GetCRDTType() CRDTType { return CRDTType_ORSET }
+func (args AddAll) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORSET }
 
-func (args RemoveAll) GetCRDTType() CRDTType { return CRDTType_ORSET }
+func (args RemoveAll) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORSET }
 
-func (args DownstreamAddAll) GetCRDTType() CRDTType { return CRDTType_ORSET }
+//Downstreams
+func (args DownstreamAddAll) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORSET }
 
-func (args DownstreamRemoveAll) GetCRDTType() CRDTType { return CRDTType_ORSET }
-
-func (args SetAWValueState) GetCRDTType() CRDTType { return CRDTType_ORSET }
-
-func (args SetAWLookupState) GetCRDTType() CRDTType { return CRDTType_ORSET }
+func (args DownstreamRemoveAll) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORSET }
 
 func (args DownstreamAddAll) MustReplicate() bool { return true }
 
 func (args DownstreamRemoveAll) MustReplicate() bool { return true }
 
+//States
+func (args SetAWValueState) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORSET }
+
+func (args SetAWValueState) GetREADType() proto.READType { return proto.READType_FULL }
+
+func (args SetAWLookupState) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORSET }
+
+func (args SetAWLookupState) GetREADType() proto.READType { return proto.READType_LOOKUP }
+
+//Queries
+func (args LookupReadArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORSET }
+
+func (args LookupReadArguments) GetREADType() proto.READType { return proto.READType_LOOKUP }
+
 //Note: crdt can (and most often will be) nil
-func (crdt *SetAWCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int64) (newCrdt CRDT) {
+func (crdt *SetAWCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
 	crdt = &SetAWCrdt{
 		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
 		elems:                 make(map[Element]UniqueSet),

@@ -3,6 +3,7 @@ package antidote
 import (
 	"clocksi"
 	"shared"
+	"strings"
 	"time"
 	"tools"
 )
@@ -16,22 +17,22 @@ type Replicator struct {
 	//receiveReplChan chan ReplicatorRequest
 	remoteConn *RemoteGroup
 	started    bool
-	replicaID  int64
+	replicaID  int16
 }
 
 type ReplicatorMsg interface {
-	getSenderID() int64
+	getSenderID() int16
 }
 
 type NewReplicatorRequest struct {
 	clocksi.Timestamp
 	Upds        []*UpdateObjectParams
-	SenderID    int64
+	SenderID    int16
 	PartitionID int64
 }
 
 type StableClock struct {
-	SenderID int64
+	SenderID int16
 	Ts       int64
 }
 
@@ -46,26 +47,29 @@ const (
 	toSendInitialSize               = 10
 )
 
-func (req NewReplicatorRequest) getSenderID() int64 {
+func (req NewReplicatorRequest) getSenderID() int16 {
 	return req.SenderID
 }
 
-func (req StableClock) getSenderID() int64 {
+func (req StableClock) getSenderID() int16 {
 	return req.SenderID
 }
 
-func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, replicaID int64) {
+func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, replicaID int16) {
 	if !shared.IsReplDisabled {
 		if !repl.started {
 			repl.tm = tm
 			repl.started = true
-			//nGoRoutines: number of partitions (defined in Materializer)
 			repl.localPartitions = loggers
-			//TODO: Actually choose which buckets are to be listen to
-			//remoteConn, err := CreateRemoteConnStruct(partitionIDs, replicaID)
-			bucketsToListen := make([]string, 1)
-			bucketsToListen[0] = "*"
-			//remoteConn, err := CreateRemoteGroupStruct(myDefaultIp, defaultIpList, bucketsToListen, replicaID)
+			//bucketsToListen := make([]string, 1)
+			//bucketsToListen[0] = "*"
+			var bucketsToListen []string
+			stringBuckets, has := tools.SharedConfig.GetAndHasConfig("buckets")
+			if !has {
+				bucketsToListen = []string{"*"}
+			} else {
+				bucketsToListen = strings.Split(stringBuckets, " ")
+			}
 			remoteConn, err := CreateRemoteGroupStruct(bucketsToListen, replicaID)
 			//TODO: Not ignore err
 			ignore(err)
@@ -77,10 +81,7 @@ func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, rep
 				//All txns have a clock higher than this, so the first request is the equivalent of "requesting all commited txns"
 				cacheEntry[0] = PairClockUpdates{clk: &dummyTs}
 				repl.txnCache[id] = cacheEntry
-				//repl.txnCache[id] = make([]PairClockUpdates, 0, cacheInitialSize)
 			}
-			//repl.lastSentClk = clocksi.NewClockSiTimestamp(replicaID)
-			//repl.receiveReplChan = make(chan ReplicatorRequest)
 			repl.replicaID = replicaID
 			go repl.receiveRemoteTxns()
 			go repl.replicateCycle()
@@ -208,6 +209,7 @@ func (repl *Replicator) sendTxns(toSend []RemoteTxn) {
 		}
 		//TODO: This might not even be necessary to be sent - probably it is enough to send this when there's no upds to send.
 		repl.remoteConn.SendStableClk(txn.Timestamp.GetPos(repl.replicaID))
+		//fmt.Println("Sending txns")
 	}
 	tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "finished sendTxns")
 }
