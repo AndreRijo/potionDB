@@ -60,7 +60,9 @@ func CreateRemoteGroupStruct(bucketsToListen []string, replicaID int16) (group *
 		go connectToIp(ip, i, bucketsToListen, replicaID, openConnsChan)
 	}
 	selfConnChan := make(chan GroupOrErr)
-	go connectToIp(myInstanceIP, -1, bucketsToListen, replicaID, selfConnChan)
+	fmt.Println(myInstanceIP)
+	copy := myInstanceIP
+	go connectToIp(copy, -1, bucketsToListen, replicaID, selfConnChan)
 
 	//Wait for self first
 	reply := <-selfConnChan

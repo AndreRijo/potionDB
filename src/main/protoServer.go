@@ -53,28 +53,7 @@ func main() {
 
 	//debug.SetGCPercent(-1)
 
-	configFolder := flag.String("config", "default", "sub-folder in configs folder that contains the configuration files to be used.")
-	rabbitMQIP := flag.String("rabbitMQIP", "F", "ip:port of this replica's rabbitMQ instance.")
-	servers := flag.String("servers", "F", "list of ip:port of remote replicas' rabbitMQ instances, separated by spaces.")
-
-	flag.Parse()
-	configs := &tools.ConfigLoader{}
-	fmt.Println("Using config file:", *configFolder)
-	configs.LoadConfigs(*configFolder)
-
-	//If flags are present, override configs
-	if *rabbitMQIP != "F" && *rabbitMQIP != "" {
-		configs.ReplaceConfig("localRabbitMQAddress", *rabbitMQIP)
-	}
-	if *servers != "F" && *servers != "" {
-		srv := *servers
-		if srv[0] == '[' {
-			srv = strings.Replace(srv[1:len(srv)-1], ",", " ", -1)
-			fmt.Println(srv)
-		}
-		configs.ReplaceConfig("remoteRabbitMQAddresses", srv)
-	}
-
+	configs := loadConfigs()
 	startProfiling(configs)
 
 	portString := configs.GetConfig(PORT_KEY)
@@ -386,6 +365,36 @@ func stopProfiling(configs *tools.ConfigLoader) {
 			os.Exit(0)
 		}()
 	}
+}
+
+func loadConfigs() (configs *tools.ConfigLoader) {
+	configFolder := flag.String("config", "default", "sub-folder in configs folder that contains the configuration files to be used.")
+	rabbitMQIP := flag.String("rabbitMQIP", "F", "ip:port of this replica's rabbitMQ instance.")
+	servers := flag.String("servers", "F", "list of ip:port of remote replicas' rabbitMQ instances, separated by spaces.")
+	vhost := flag.String("rabbitVHost", "/", "vhost to use with rabbitMQ.")
+
+	flag.Parse()
+	configs = &tools.ConfigLoader{}
+	fmt.Println("Using config file:", *configFolder)
+	configs.LoadConfigs(*configFolder)
+
+	//If flags are present, override configs
+	if *rabbitMQIP != "F" && *rabbitMQIP != "" {
+		configs.ReplaceConfig("localRabbitMQAddress", *rabbitMQIP)
+	}
+	if *servers != "F" && *servers != "" {
+		srv := *servers
+		if srv[0] == '[' {
+			srv = strings.Replace(srv[1:len(srv)-1], ",", " ", -1)
+			fmt.Println(srv)
+		}
+		configs.ReplaceConfig("remoteRabbitMQAddresses", srv)
+	}
+	if *vhost != "/" {
+		configs.ReplaceConfig("rabbitVHost", *vhost)
+	}
+
+	return
 }
 
 /*

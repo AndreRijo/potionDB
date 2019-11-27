@@ -30,6 +30,7 @@ EXPOSE 5672
 ENV CONFIG "/go/bin/configs/cluster/default"
 #ENV SERVERS, ENV RABBITMQ
 ENV RABBITMQ_WAIT 10s
+ENV RABBITMQ_VHOST /crdts
 
 #Add config folders late to avoid having to rebuild multiple images
 ADD configs /go/bin/configs

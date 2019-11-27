@@ -47,9 +47,7 @@ const (
 	clockTopic = "clk"
 )
 
-var (
-	prefix string
-)
+var ()
 
 //Topics (i.e., queue filters): partitionID.bucket
 //There's one queue per replica. Each replica's queue will receive messages from ALL other replicas, as long as the topics match the ones
@@ -57,14 +55,19 @@ var (
 //Ip includes both ip and port in format: ip:port
 func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16) (remote *RemoteConn, err error) {
 	//conn, err := amqp.Dial(protocol + prefix + ip + port)
-	prefix = tools.SharedConfig.GetConfig("rabbitMQUser")
+	prefix := tools.SharedConfig.GetConfig("rabbitMQUser")
+	vhost := tools.SharedConfig.GetConfig("rabbitVHost")
 	if prefix == "" {
 		prefix = "test"
 	}
+	if vhost == "" {
+		vhost = "/"
+	}
 	prefix = prefix + ":" + prefix + "@"
 	//conn, err := amqp.Dial(protocol + prefix + ip)
-	fmt.Println(protocol + prefix + ip)
-	conn, err := amqp.DialConfig(protocol+prefix+ip, amqp.Config{Dial: scalateTimeout})
+	link := protocol + prefix + ip + "/" + vhost
+	fmt.Println(link)
+	conn, err := amqp.DialConfig(link, amqp.Config{Dial: scalateTimeout})
 	if err != nil {
 		tools.FancyWarnPrint(tools.REMOTE_PRINT, replicaID, "failed to open connection to rabbitMQ at", ip, ":", err, ". Retrying.")
 		time.Sleep(4000 * time.Millisecond)
