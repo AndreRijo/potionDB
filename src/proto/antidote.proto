@@ -348,7 +348,8 @@ enum READ_type {
 	GET_VALUES = 5;	//Return value for a given set of keys
 	//TopK
 	GET_N = 6;
-	GET_ABOVE_VALUE = 7;	//TODO: Both this and GET_N still need to be implemented in the topK.
+    GET_ABOVE_VALUE = 7;	//TODO: Both this and GET_N still need to be implemented in the topK.
+    GET_FULL_AVG = 8;
 }
 
 //Allows both "full state reads" (ApbReadObjects) and "partial reads"
@@ -373,7 +374,8 @@ message ApbPartialRead {
 message ApbPartialReadArgs {
 	optional ApbSetPartialRead set = 1;
 	optional ApbMapPartialRead map = 2;
-	optional ApbTopkPartialRead topk = 3;
+    optional ApbTopkPartialRead topk = 3;
+    optional ApbAvgPartialRead avg = 4;
 }
 
 message ApbSetPartialRead {
@@ -390,6 +392,10 @@ message ApbMapPartialRead {
 message ApbTopkPartialRead {
 	optional ApbTopkGetNRead getn = 1;
 	optional ApbTopkAboveValueRead getabovevalue = 2;
+}
+
+message ApbAvgPartialRead {
+    optional ApbAvgFullRead getfull = 1;
 }
 
 //SET
@@ -434,11 +440,17 @@ message ApbTopkAboveValueRead {
 	required int32 minValue = 1;
 }
 
+//AVG
+message ApbAvgFullRead {
+
+}
+
 //RESP
 message ApbPartialReadResp {
 	optional ApbSetPartialReadResp set = 1;
 	optional ApbMapPartialReadResp map = 2;
-	optional ApbTopkPartialReadResp topk = 3;
+    optional ApbTopkPartialReadResp topk = 3;
+    optional ApbAvgPartialReadResp avg = 4;
 }
 
 message ApbSetPartialReadResp {
@@ -450,6 +462,10 @@ message ApbMapPartialReadResp {
 	optional ApbMapHasKeyReadResp haskey = 2;
     optional ApbMapGetKeysReadResp getkeys = 3;
     optional ApbMapGetValuesResp getvalues = 4;
+}
+
+message ApbAvgPartialReadResp {
+    optional ApbAvgGetFullReadResp getfull = 1;
 }
 
 message ApbTopkPartialReadResp {
@@ -477,4 +493,9 @@ message ApbMapGetKeysReadResp {
 message ApbMapGetValuesResp {
     repeated bytes keys = 1;
     repeated ApbMapGetValueResp values = 2;
+}
+
+message ApbAvgGetFullReadResp {
+    required int64 sum = 1;
+    required int64 nAdds = 2;
 }

@@ -51,12 +51,10 @@ func (args MinAddValue) MustReplicate() bool { return true }
 
 //Note: crdt can (and most often will be) nil
 func (crdt *MaxMinCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
-	crdt = &MaxMinCrdt{
+	return &MaxMinCrdt{
 		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
 		topValue:              math.MaxInt64,
-	} //TODO: Assign to crdt is potencially unecessary (idea: Updates self in the map (reset operation?))
-	newCrdt = crdt
-	return
+	}
 }
 
 func (crdt *MaxMinCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateArguments) (state State) {
@@ -129,7 +127,6 @@ func (crdt *MaxMinCrdt) applyDownstream(downstreamArgs DownstreamArguments) (eff
 }
 
 func (crdt *MaxMinCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err error) {
-	//TODO: Typechecking
 	return true, nil
 }
 

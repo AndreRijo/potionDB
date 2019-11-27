@@ -13,7 +13,6 @@ import (
 )
 
 /////*****************TYPE DEFINITIONS***********************/////
-//TODO: Extract requests types, replies and methods to another file
 //////////************Requests**************************//////////
 
 type MaterializerRequest struct {

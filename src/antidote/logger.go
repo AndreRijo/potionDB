@@ -83,6 +83,7 @@ type PairClockUpdates struct {
 
 const (
 	initLogCapacity = 100
+	keepWholeLog    = false
 )
 
 /*
@@ -164,6 +165,10 @@ func (logger *MemLogger) handleTxnLogRequest(request LogTxnArgs) {
 	} else {
 		txns = logger.log[logger.currLogPos:]
 		logger.currLogPos = len(logger.log)
+		if !keepWholeLog {
+			logger.log = make([]PairClockUpdates, 0, initLogCapacity)
+			logger.currLogPos = 0
+		}
 	}
 	logger.logLock.Unlock()
 	replyChan := make(chan clocksi.Timestamp)

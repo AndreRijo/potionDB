@@ -2,9 +2,10 @@ package antidote
 
 import (
 	fmt "fmt"
+	"net"
 	"proto"
-	"reflect"
 	"strconv"
+	"time"
 	"tools"
 
 	pb "github.com/golang/protobuf/proto"
@@ -13,6 +14,7 @@ import (
 
 //NOTE: Each replica still receives its own messages - it just ignores them before processing
 //This might be a waste.
+//TODO: I shouldn't mix Publish and Consume on the same connection, according to this: https://godoc.org/github.com/streadway/amqp
 
 type RemoteConn struct {
 	conn             *amqp.Connection
@@ -35,7 +37,7 @@ type HoldOperations struct {
 const (
 	protocol = "amqp://"
 	//ip                  = "guest:guest@localhost:"
-	prefix = "guest:guest@"
+	//prefix = "guest:guest@"
 	//prefix = "test:test@"
 	//port         = "5672/"
 	exchangeName = "objRepl"
@@ -45,16 +47,28 @@ const (
 	clockTopic = "clk"
 )
 
+var (
+	prefix string
+)
+
 //Topics (i.e., queue filters): partitionID.bucket
 //There's one queue per replica. Each replica's queue will receive messages from ALL other replicas, as long as the topics match the ones
 //that were binded to the replica's queue.
 //Ip includes both ip and port in format: ip:port
 func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16) (remote *RemoteConn, err error) {
 	//conn, err := amqp.Dial(protocol + prefix + ip + port)
-	conn, err := amqp.Dial(protocol + prefix + ip)
+	prefix = tools.SharedConfig.GetConfig("rabbitMQUser")
+	if prefix == "" {
+		prefix = "test"
+	}
+	prefix = prefix + ":" + prefix + "@"
+	//conn, err := amqp.Dial(protocol + prefix + ip)
+	fmt.Println(protocol + prefix + ip)
+	conn, err := amqp.DialConfig(protocol+prefix+ip, amqp.Config{Dial: scalateTimeout})
 	if err != nil {
-		tools.FancyWarnPrint(tools.REMOTE_PRINT, replicaID, "failed to open connection to rabbitMQ:", err)
-		return nil, err
+		tools.FancyWarnPrint(tools.REMOTE_PRINT, replicaID, "failed to open connection to rabbitMQ at", ip, ":", err, ". Retrying.")
+		time.Sleep(4000 * time.Millisecond)
+		return CreateRemoteConnStruct(ip, bucketsToListen, replicaID)
 	}
 	sendCh, err := conn.Channel()
 	if err != nil {
@@ -63,7 +77,7 @@ func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16
 	}
 
 	//Call this to delete existing exchange/queues/binds/etc if configurations are changed
-	//deleteRabbitMQStructures(sendCh)
+	deleteRabbitMQStructures(sendCh)
 
 	//We send msgs to the exchange
 	//sendCh.ExchangeDelete(exchangeName, false, true)
@@ -107,6 +121,28 @@ func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16
 		nBucketsToListen: len(bucketsToListen),
 	}
 	go remote.startReceiver()
+	return
+}
+
+func scalateTimeout(network, addr string) (conn net.Conn, err error) {
+	//Also control the timeout locally due to the localhost case which returns immediatelly
+	nextTimeout := 4 * time.Second
+	lastAttempt := time.Now().UnixNano()
+	for {
+		conn, err = net.DialTimeout(network, addr, nextTimeout)
+		if err == nil {
+			break
+		} else {
+			//Controlling timeout locally
+			thisAttempt := time.Now().UnixNano()
+			if thisAttempt-lastAttempt < int64(nextTimeout) {
+				time.Sleep(nextTimeout - time.Duration(thisAttempt-lastAttempt))
+			}
+			lastAttempt = thisAttempt
+			nextTimeout += (nextTimeout / 2)
+			fmt.Println("Failed to connect to", addr, ". Retrying to connect...")
+		}
+	}
 	return
 }
 
@@ -194,9 +230,6 @@ func (remote *RemoteConn) handleReceivedOps(data []byte) {
 	tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Received remote request:", *request)
 	if len(request.Upds) > 0 && request.SenderID != remote.replicaID {
 		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Actually received txns from other replicas.")
-		for _, upd := range request.Upds {
-			tools.FancyWarnPrint(tools.REMOTE_PRINT, remote.replicaID, "Received downstream args:", upd, "type:", reflect.TypeOf(upd.UpdateArgs))
-		}
 	}
 	if request.SenderID != remote.replicaID {
 		holdOps, hasHold := remote.holdOperations[request.SenderID]

@@ -759,7 +759,9 @@ func (tm *TransactionManager) downstreamRemoteTxn(partitionID int64, replicaID i
 //Pre-condition: localClock's mutex is hold
 func (tm *TransactionManager) checkPendingRemoteTxns() {
 	tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Started checking for pending remote txns")
-	appliedAtLeastOne := true
+	//AppliedAtLeastOne: to know if there was clock progression. Skip: if we must skip the remaining replica's txns as one wasn't yet ready to be applied
+	appliedAtLeastOne, skip := true, false
+	var req TMRemoteMsg
 	//No txns pending, can return right away
 	if len(tm.downstreamQueue) == 0 {
 		tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Finished checking for pending remote txns")
@@ -770,15 +772,19 @@ func (tm *TransactionManager) checkPendingRemoteTxns() {
 			if !appliedAtLeastOne {
 				break
 			}
-			appliedAtLeastOne = false
-			for _, req := range pendingTxns {
+			appliedAtLeastOne, skip = false, false
+			i := 0
+			for ; i < len(pendingTxns) && !skip; i++ {
+				req = pendingTxns[i]
 				switch typedReq := req.(type) {
 				case *TMRemoteClk:
 					tm.localClock.UpdatePos(typedReq.ReplicaID, typedReq.StableTs)
 					tm.mat.SendRequestToAllChannels(MaterializerRequest{MatRequestArgs: MatClkPosUpdArgs{ReplicaID: typedReq.ReplicaID, StableTs: typedReq.StableTs}})
+					fmt.Println(tm.clockOfRemoteTxn[typedReq.ReplicaID], tm.nPartitionsForRemoteTxn[typedReq.ReplicaID])
 					tm.downstreamOpsCh <- TMNewRemoteTxn{Timestamp: tm.clockOfRemoteTxn[typedReq.ReplicaID], nPartitions: *tm.nPartitionsForRemoteTxn[typedReq.ReplicaID]}
 					delete(tm.nPartitionsForRemoteTxn, typedReq.ReplicaID)
 					delete(tm.clockOfRemoteTxn, typedReq.ReplicaID)
+					appliedAtLeastOne = true
 				case *TMRemotePartTxn:
 					isLowerOrEqual := typedReq.Timestamp.IsLowerOrEqualExceptFor(tm.localClock.Timestamp, tm.replicaID, typedReq.ReplicaID)
 					if isLowerOrEqual {
@@ -792,20 +798,16 @@ func (tm *TransactionManager) checkPendingRemoteTxns() {
 						}
 						tm.downstreamRemoteTxn(typedReq.PartitionID, typedReq.ReplicaID, typedReq.Timestamp, typedReq.Upds)
 						appliedAtLeastOne = true
-						if len(pendingTxns) > 1 {
-							pendingTxns = pendingTxns[1:]
-						} else {
-							pendingTxns = nil
-						}
 					} else {
-						break
+						i--
+						skip = true
 					}
 				}
 			}
-			if pendingTxns != nil {
-				tm.downstreamQueue[replicaID] = pendingTxns
-			} else {
+			if i == len(pendingTxns) {
 				delete(tm.downstreamQueue, replicaID)
+			} else {
+				tm.downstreamQueue[replicaID] = pendingTxns[i:]
 			}
 		}
 	}

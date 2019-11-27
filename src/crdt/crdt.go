@@ -16,8 +16,6 @@ type CRDT interface {
 	//For now only non-uniform CRDTs need to return upds when downstreaming
 	Downstream(updTs clocksi.Timestamp, downstreamArgs DownstreamArguments) (otherDownstreamArgs DownstreamArguments)
 
-	//GetVersion() (ts clocksi.Timestamp) //TODO: This is probably not needed at all
-
 	IsOperationWellTyped(args UpdateArguments) (ok bool, err error)
 }
 

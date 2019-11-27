@@ -8,9 +8,7 @@ package main
 //profiling: https://github.com/google/pprof/blob/master/doc/README.md
 //go tool pprof -http=localhost:36234 ../../profiles/8087/mem.prof
 
-//TODO: Reuse of canals? Creating a new canal for each read/write seems like a waste... Should I ask the teachers?
-
-//TODO: ApbErrorResp
+//TODO: Reuse of canals? Creating a new canal for each read/write seems like a waste... Should I ask the advisors?
 
 import (
 	"antidote"
@@ -44,6 +42,7 @@ var (
 const (
 	//Keys for configs
 	PORT_KEY        = "protoPort"
+	MEM_DEBUG       = "memDebug"
 	CPU_PROFILE_KEY = "withCPUProfile"
 	MEM_PROFILE_KEY = "withMemProfile"
 	CPU_FILE_KEY    = "cpuProfileFile"
@@ -55,52 +54,44 @@ func main() {
 	//debug.SetGCPercent(-1)
 
 	configFolder := flag.String("config", "default", "sub-folder in configs folder that contains the configuration files to be used.")
+	rabbitMQIP := flag.String("rabbitMQIP", "F", "ip:port of this replica's rabbitMQ instance.")
+	servers := flag.String("servers", "F", "list of ip:port of remote replicas' rabbitMQ instances, separated by spaces.")
+
 	flag.Parse()
 	configs := &tools.ConfigLoader{}
+	fmt.Println("Using config file:", *configFolder)
 	configs.LoadConfigs(*configFolder)
 
-	startProfiling(configs)
+	//If flags are present, override configs
+	if *rabbitMQIP != "F" && *rabbitMQIP != "" {
+		configs.ReplaceConfig("localRabbitMQAddress", *rabbitMQIP)
+	}
+	if *servers != "F" && *servers != "" {
+		srv := *servers
+		if srv[0] == '[' {
+			srv = strings.Replace(srv[1:len(srv)-1], ",", " ", -1)
+			fmt.Println(srv)
+		}
+		configs.ReplaceConfig("remoteRabbitMQAddresses", srv)
+	}
 
-	/*
-		fmt.Println("Port?")
-		portString, _ := in.ReadString('\n')
-		portString = strings.Trim(portString, "\n")
-		rand.Seed(time.Now().UTC().UnixNano())
-		id, _ := strconv.ParseInt(portString, 0, 64)
-	*/
+	startProfiling(configs)
 
 	portString := configs.GetConfig(PORT_KEY)
 	rand.Seed(time.Now().UTC().UnixNano())
 	tmpId, _ := strconv.ParseInt(portString, 0, 64)
 	id := int16(tmpId)
-	/*
-		fmt.Println("Other servers? Type their IDs, all in the same line separated by a space.")
-		otherIDsString, _ := in.ReadString('\n')
-		otherIDsString = strings.Trim(otherIDsString, "\n")
-		otherReplicasIDs := strings.Split(otherIDsString, " ")
-	*/
 
 	tm := antidote.Initialize(id)
-	//tm := antidote.Initialize(0)
-	/*
-		for _, idStr := range otherReplicasIDs {
-			remoteID, _ := strconv.ParseInt(idStr, 0, 64)
-			tm.AddRemoteID(remoteID)
-		}
-	*/
-
-	//server, err := net.Listen("tcp", "127.0.0.1:"+strings.TrimSpace(portString))
-	//For docker:
 	server, err := net.Listen("tcp", "0.0.0.0:"+strings.TrimSpace(portString))
 
-	//server, err := net.Listen("tcp", "127.0.0.1:8087")
 	tools.CheckErr(tools.PORT_ERROR, err)
 	fmt.Println("PotionDB started at port", portString)
 
 	//Stop listening to port on shutdown
 	defer server.Close()
 
-	//go debugMemory()
+	go debugMemory(configs)
 	stopProfiling(configs)
 
 	for {
@@ -119,6 +110,7 @@ Note that this is the same interaction type as in antidote.
 conn - the TCP connection between the client and this server.
 */
 func processConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID int16) {
+	tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Accepted connection.")
 	tmChan := tm.CreateClientHandler()
 	//TODO: Change this to a random ID generated inside the transaction. This ID should be different from transaction to transaction
 	//The current solution can give problems in the Materializer when a commited transaction is put on hold and another transaction from the same client arrives
@@ -137,19 +129,12 @@ func processConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID
 		if err != nil {
 			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Connection closed by client.")
 			tmChan <- antidote.TransactionManagerRequest{Args: antidote.TMConnLostArgs{}}
+			conn.Close()
 			return
 		}
 		tools.CheckErr(tools.NETWORK_READ_ERROR, err)
+
 		switch protoType {
-		case antidote.ConnectReplica:
-			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbConnectReplica")
-			replyType = antidote.ConnectReplicaReply
-			reply = handleReplicaConn(protobuf.(*proto.ApbConnectReplica), tmChan)
-		case antidote.ConnectReplicaReply:
-			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbConnectReplicaReply")
-			handleReplicaConnReply(protobuf.(*proto.ApbConnectReplicaResp), tmChan)
-			//Don't need to send any reply
-			continue
 		case antidote.ReadObjs:
 			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbReadObjects")
 			replyType = antidote.ReadObjsReply
@@ -160,7 +145,6 @@ func processConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID
 			reply = handleRead(protobuf.(*proto.ApbRead), tmChan, clientId)
 		case antidote.UpdateObjs:
 			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbUpdateObjects")
-			//TODO: Check what antidote replies on this case
 			replyType = antidote.OpReply
 			reply = handleUpdateObjects(protobuf.(*proto.ApbUpdateObjects), tmChan, clientId)
 		case antidote.StartTrans:
@@ -169,7 +153,6 @@ func processConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID
 			reply = handleStartTxn(protobuf.(*proto.ApbStartTransaction), tmChan, clientId)
 		case antidote.AbortTrans:
 			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbAbortTransaction")
-			//TODO: Check what antidote replies on this case
 			replyType = antidote.CommitTransReply
 			reply = handleAbortTxn(protobuf.(*proto.ApbAbortTransaction), tmChan, clientId)
 		case antidote.CommitTrans:
@@ -190,24 +173,11 @@ func processConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID
 			reply = handleStaticRead(protobuf.(*proto.ApbStaticRead), tmChan, clientId)
 		default:
 			tools.FancyErrPrint(tools.PROTO_PRINT, replicaID, "Received unknown proto, ignored... sort of")
+			fmt.Println("I don't know how to handle this proto", protoType)
 		}
-		//TODO: Handle errors that may be returned due to incorrect parameters/internal errors
 		tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Sending reply proto")
 		antidote.SendProto(replyType, reply, conn)
 	}
-}
-
-func handleReplicaConn(proto *proto.ApbConnectReplica, tmChan chan antidote.TransactionManagerRequest) (respProto *proto.ApbConnectReplicaResp) {
-	/*
-		tmChan <- antidote.TransactionManagerRequest{
-			Args:
-		}
-	*/
-	return nil
-}
-
-func handleReplicaConnReply(proto *proto.ApbConnectReplicaResp, tmChan chan antidote.TransactionManagerRequest) {
-
 }
 
 //TODO: Error cases in which it should return ApbErrorResp
@@ -216,7 +186,7 @@ func handleStaticReadObjects(proto *proto.ApbStaticReadObjects,
 
 	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransaction().GetTimestamp())
 
-	objs := protoObjectsToAntidoteObjects(proto.GetObjects())
+	objs := antidote.ProtoObjectsToAntidoteObjects(proto.GetObjects())
 	replyChan := make(chan antidote.TMStaticReadReply)
 
 	tmChan <- createTMRequest(antidote.TMStaticReadArgs{ReadParams: objs, ReplyChan: replyChan}, txnId, clientClock)
@@ -233,7 +203,7 @@ func handleStaticRead(proto *proto.ApbStaticRead,
 
 	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransaction().GetTimestamp())
 
-	objs := protoReadToAntidoteObjects(proto.GetFullreads(), proto.GetPartialreads())
+	objs := antidote.ProtoReadToAntidoteObjects(proto.GetFullreads(), proto.GetPartialreads())
 	replyChan := make(chan antidote.TMStaticReadReply)
 
 	tmChan <- createTMRequest(antidote.TMStaticReadArgs{ReadParams: objs, ReplyChan: replyChan}, txnId, clientClock)
@@ -250,7 +220,8 @@ func handleStaticUpdateObjects(proto *proto.ApbStaticUpdateObjects,
 
 	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransaction().GetTimestamp())
 
-	updates := protoUpdateOpToAntidoteUpdate(proto.GetUpdates())
+	updates := antidote.ProtoUpdateOpToAntidoteUpdate(proto.GetUpdates())
+
 	replyChan := make(chan antidote.TMStaticUpdateReply)
 
 	tmChan <- createTMRequest(antidote.TMStaticUpdateArgs{UpdateParams: updates, ReplyChan: replyChan}, txnId, clientClock)
@@ -261,6 +232,7 @@ func handleStaticUpdateObjects(proto *proto.ApbStaticUpdateObjects,
 	ignore(reply.Err)
 
 	respProto = antidote.CreateCommitOkResp(reply.TransactionId, reply.Timestamp)
+	//fmt.Println(respProto.GetSuccess(), respProto.GetCommitTime(), respProto.GetErrorcode())
 	return
 }
 
@@ -269,7 +241,7 @@ func handleReadObjects(proto *proto.ApbReadObjects,
 
 	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransactionDescriptor())
 
-	objs := protoObjectsToAntidoteObjects(proto.GetBoundobjects())
+	objs := antidote.ProtoObjectsToAntidoteObjects(proto.GetBoundobjects())
 	replyChan := make(chan []crdt.State)
 
 	tmChan <- createTMRequest(antidote.TMReadArgs{ReadParams: objs, ReplyChan: replyChan}, txnId, clientClock)
@@ -286,7 +258,7 @@ func handleRead(proto *proto.ApbRead,
 
 	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransactionDescriptor())
 
-	objs := protoReadToAntidoteObjects(proto.GetFullreads(), proto.GetPartialreads())
+	objs := antidote.ProtoReadToAntidoteObjects(proto.GetFullreads(), proto.GetPartialreads())
 	replyChan := make(chan []crdt.State)
 
 	tmChan <- createTMRequest(antidote.TMReadArgs{ReadParams: objs, ReplyChan: replyChan}, txnId, clientClock)
@@ -303,7 +275,8 @@ func handleUpdateObjects(proto *proto.ApbUpdateObjects,
 
 	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransactionDescriptor())
 
-	updates := protoUpdateOpToAntidoteUpdate(proto.GetUpdates())
+	updates := antidote.ProtoUpdateOpToAntidoteUpdate(proto.GetUpdates())
+
 	replyChan := make(chan antidote.TMUpdateReply)
 
 	tmChan <- createTMRequest(antidote.TMUpdateArgs{UpdateParams: updates, ReplyChan: replyChan}, txnId, clientClock)
@@ -335,7 +308,6 @@ func handleStartTxn(proto *proto.ApbStartTransaction,
 	//{tx_id,1550321245370469,<0.4146.0>}. (obtained after deleting the logs)
 	//It's basically a timestamp plus some kind of counter?
 
-	//TODO: Consider properties?
 	respProto = antidote.CreateStartTransactionResp(reply.TransactionId, reply.Timestamp)
 	return
 }
@@ -346,9 +318,6 @@ func handleAbortTxn(proto *proto.ApbAbortTransaction,
 	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransactionDescriptor())
 
 	tmChan <- createTMRequest(antidote.TMAbortArgs{}, txnId, clientClock)
-
-	//TODO: Errors such as transaction does not exist, txn already commited or aborted, etc?
-	//TODO: Should I wait for a msg from TM?
 
 	respProto = antidote.CreateCommitOkResp(txnId, clientClock)
 	//Returns a clock and success set as true. I assume the clock is the same as the one returned in startTxn?
@@ -367,58 +336,6 @@ func handleCommitTxn(proto *proto.ApbCommitTransaction,
 
 	//TODO: Errors?
 	respProto = antidote.CreateCommitOkResp(txnId, reply.Timestamp)
-	return
-}
-
-func protoObjectsToAntidoteObjects(protoObjs []*proto.ApbBoundObject) (objs []antidote.ReadObjectParams) {
-
-	objs = make([]antidote.ReadObjectParams, len(protoObjs))
-
-	for i, currObj := range protoObjs {
-		objs[i] = antidote.ReadObjectParams{
-			KeyParams: antidote.CreateKeyParams(string(currObj.GetKey()), currObj.GetType(), string(currObj.GetBucket())),
-			ReadArgs:  crdt.StateReadArguments{},
-		}
-	}
-	return
-}
-
-func protoReadToAntidoteObjects(fullReads []*proto.ApbBoundObject, partialReads []*proto.ApbPartialRead) (objs []antidote.ReadObjectParams) {
-
-	objs = make([]antidote.ReadObjectParams, len(fullReads)+len(partialReads))
-
-	for i, currObj := range fullReads {
-		objs[i] = antidote.ReadObjectParams{
-			KeyParams: antidote.CreateKeyParams(string(currObj.GetKey()), currObj.GetType(), string(currObj.GetBucket())),
-			ReadArgs:  crdt.StateReadArguments{},
-		}
-	}
-
-	var boundObj *proto.ApbBoundObject
-	for i, currObj := range partialReads {
-		boundObj = currObj.GetObject()
-		objs[i+len(fullReads)] = antidote.ReadObjectParams{
-			KeyParams: antidote.CreateKeyParams(string(boundObj.GetKey()), boundObj.GetType(), string(boundObj.GetBucket())),
-			ReadArgs:  *crdt.PartialReadOpToAntidoteRead(currObj.GetArgs(), boundObj.GetType(), currObj.GetReadtype()),
-		}
-	}
-	return
-}
-
-//TODO: Maybe this method below should be moved to protoLib?
-func protoUpdateOpToAntidoteUpdate(protoUp []*proto.ApbUpdateOp) (upParams []*antidote.UpdateObjectParams) {
-	upParams = make([]*antidote.UpdateObjectParams, len(protoUp))
-	var currObj *proto.ApbBoundObject = nil
-	var currUpOp *proto.ApbUpdateOperation = nil
-
-	for i, update := range protoUp {
-		currObj, currUpOp = update.GetBoundobject(), update.GetOperation()
-		upParams[i] = &antidote.UpdateObjectParams{
-			KeyParams:  antidote.CreateKeyParams(string(currObj.GetKey()), currObj.GetType(), string(currObj.GetBucket())),
-			UpdateArgs: crdt.UpdateProtoToAntidoteUpdate(currUpOp, currObj.GetType()),
-		}
-	}
-
 	return
 }
 
@@ -511,7 +428,15 @@ func ignore(any interface{}) {
 
 }
 
-func debugMemory() {
+func debugMemory(configs *tools.ConfigLoader) {
+	shouldDebug, err := false, error(nil)
+	if debugMem, has := configs.GetAndHasConfig(MEM_DEBUG); has {
+		shouldDebug, err = strconv.ParseBool(debugMem)
+	}
+	if err != nil || !shouldDebug {
+		return
+	}
+
 	memStats := runtime.MemStats{}
 	var maxAlloc uint64 = 0
 	//Go routine that pools memStats.Alloc frequently and stores the highest observed value
@@ -541,10 +466,14 @@ func debugMemory() {
 		fmt.Printf("Number of GC cycles: %d\n", memStats.NumGC)
 		fmt.Println()
 		count++
-		if count%5 == 0 {
-			fmt.Println("Calling GC")
-			runtime.GC()
-		}
-		time.Sleep(5000 * time.Millisecond)
+
+		/*
+			if count%4 == 0 {
+				fmt.Println("Calling GC")
+				runtime.GC()
+			}
+		*/
+
+		time.Sleep(10000 * time.Millisecond)
 	}
 }

@@ -409,7 +409,7 @@ func (ts ClockSiTimestamp) ToString() (tsString string) {
 	return builder.String()
 }
 
-//TODO: If we one day support adding/removing replicas on the fly this will probably no longer work, as it ignores the replica's ID (map key)
+//NOTE: If we one day support adding/removing replicas on the fly this will probably no longer work, as it ignores the replica's ID (map key)
 func (ts ClockSiTimestamp) GetMapKey() (key TimestampKey) {
 	var builder strings.Builder
 	for _, value := range ts.VectorClock {

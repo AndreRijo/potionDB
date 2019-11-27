@@ -47,12 +47,10 @@ func (args Decrement) MustReplicate() bool { return true }
 
 //Note: crdt can (and most often will be) nil
 func (crdt *CounterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
-	crdt = &CounterCrdt{
+	return &CounterCrdt{
 		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
 		value:                 0,
-	} //TODO: Assign to crdt is potencially unecessary (idea: Updates self in the map (reset operation?))
-	newCrdt = crdt
-	return
+	}
 }
 
 func (crdt *CounterCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateArguments) (state State) {
@@ -101,7 +99,6 @@ func (crdt *CounterCrdt) applyDownstream(downstreamArgs DownstreamArguments) (ef
 }
 
 func (crdt *CounterCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err error) {
-	//TODO: Typechecking
 	return true, nil
 }
 

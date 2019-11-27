@@ -18,8 +18,7 @@ FROM rabbitmq
 COPY --from=base /usr/local/go/bin/ /go/
 COPY --from=base /go/bin/ /go/bin/
 
-#Add remaining potionDB stuff
-ADD configs /go/bin/configs
+#Add start script
 ADD dockerStuff/start.sh /go/bin/
 
 #Default listen port
@@ -27,5 +26,14 @@ EXPOSE 8087
 #RabbitMQ port
 EXPOSE 5672
 
+#Arguments
+ENV CONFIG "/go/bin/configs/cluster/default"
+#ENV SERVERS, ENV RABBITMQ
+ENV RABBITMQ_WAIT 10s
+
+#Add config folders late to avoid having to rebuild multiple images
+ADD configs /go/bin/configs
+
 # Run the protoserver
-CMD ["bash", "go/bin/start.sh", "-config=/go/bin/configs/default"]
+#CMD ["sh", "-c", "go/bin/start.sh $CONFIG"]
+CMD ["bash", "go/bin/start.sh"]

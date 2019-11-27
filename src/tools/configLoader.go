@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -46,6 +47,36 @@ func (config *ConfigLoader) GetConfig(key string) (value string) {
 func (config *ConfigLoader) GetAndHasConfig(key string) (value string, has bool) {
 	value, has = config.configs[key]
 	return
+}
+
+func (config *ConfigLoader) GetOrDefault(key string, def string) (value string) {
+	value, has := config.configs[key]
+	if !has {
+		return def
+	}
+	return value
+}
+
+func (config *ConfigLoader) GetBoolConfig(key string, def bool) bool {
+	value, has := config.configs[key]
+	if !has {
+		return def
+	}
+	result, _ := strconv.ParseBool(value)
+	return result
+}
+
+func (config *ConfigLoader) GetIntConfig(key string, def int) int {
+	value, has := config.configs[key]
+	if !has {
+		return def
+	}
+	result, _ := strconv.ParseInt(value, 10, 64)
+	return int(result)
+}
+
+func (config *ConfigLoader) ReplaceConfig(key string, value string) {
+	config.configs[key] = value
 }
 
 func (config *ConfigLoader) getConfigFiles() (fileNames []string) {

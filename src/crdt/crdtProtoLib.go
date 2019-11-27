@@ -23,8 +23,7 @@ INDEX:
 	MISCELANEOUS
 */
 
-//TODO: Move each state/op to its respective file
-//TODO: Maybe think of some way to avoid requiring the generic methods?
+//NOTE: Maybe think of some way to avoid requiring the generic methods?
 //Maybe some kind of array or map built at runtime?
 
 //*****INTERFACES*****/
@@ -73,8 +72,6 @@ func UpdateProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation, crdtType pr
 		tmpUpd = AddMultipleValue{}.FromUpdateObject(protobuf)
 	case proto.CRDTType_MAXMIN:
 		tmpUpd = updateMaxMinProtoToAntidoteUpdate(protobuf)
-	default:
-		//TODO: Support other types and error case, and return error to client
 	}
 
 	return &tmpUpd
@@ -107,7 +104,12 @@ func PartialReadOpToAntidoteRead(protobuf *proto.ApbPartialReadArgs, crdtType pr
 		tmpRead = GetTopNArguments{}.FromPartialRead(protobuf)
 	case proto.READType_GET_ABOVE_VALUE:
 		tmpRead = GetTopKAboveValueArguments{}.FromPartialRead(protobuf)
+
+	//Avg
+	case proto.READType_GET_FULL_AVG:
+		tmpRead = AvgGetFullArguments{}.FromPartialRead(protobuf)
 	}
+
 	return &tmpRead
 }
 
@@ -158,6 +160,10 @@ func partialReadRespProtoToAntidoteState(protobuf *proto.ApbReadObjectResp, crdt
 	//Topk
 	case proto.READType_GET_N, proto.READType_GET_ABOVE_VALUE:
 		state = TopKValueState{}.FromReadResp(protobuf)
+
+	//Avg
+	case proto.READType_GET_FULL_AVG:
+		state = AvgFullState{}.FromReadResp(protobuf)
 	}
 
 	return
@@ -268,29 +274,6 @@ func partialGetValuesOpToAntidoteRead(protobuf *proto.ApbPartialReadArgs, crdtTy
 	return EmbMapPartialArguments{}.FromPartialRead(protobuf)
 }
 
-/*
-case proto.CRDTType_COUNTER:
-		downOp = downstreamProtoCounterToAntidoteDownstream(protobuf)
-	case proto.CRDTType_LWWREG:
-		downOp = SetValue{}.FromReplicatorObj(protobuf)
-	case proto.CRDTType_ORSET:
-		downOp = downstreamProtoSetToAntidoteDownstream(protobuf)
-	case proto.CRDTType_ORMAP:
-		downOp = downstreamProtoORMapToAntidoteDownstream(protobuf)
-	case proto.CRDTType_RRMAP:
-		downOp = downstreamProtoRRMapToAntidoteDownstream(protobuf)
-	case proto.CRDTType_TOPK_RMV:
-		downOp = downstreamProtoTopKToAntidoteDownstream(protobuf)
-	case proto.CRDTType_AVG:
-		downOp = downstreamProtoAvgToAntidoteDownstream(protobuf)
-	case proto.CRDTType_MAXMIN:
-		downOp = downstreamProtoMaxMinToAntidoteDownstream(protobuf)
-
-func downstreamProtoCounterToAntidoteDownstream(protobuf *proto.ProtoOpDownstream) (downOp DownstreamArgs) {
-
-	return
-}
-*/
 func downstreamProtoCounterToAntidoteDownstream(protobuf *proto.ProtoOpDownstream) (downOp DownstreamArguments) {
 	if protobuf.GetCounterOp().GetIsInc() {
 		return Increment{}.FromReplicatorObj(protobuf)

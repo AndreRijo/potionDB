@@ -114,12 +114,11 @@ func (args LookupReadArguments) GetREADType() proto.READType { return proto.READ
 
 //Note: crdt can (and most often will be) nil
 func (crdt *SetAWCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
-	crdt = &SetAWCrdt{
+	return &SetAWCrdt{
 		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
 		elems:                 make(map[Element]UniqueSet),
-		random:                rand.NewSource(time.Now().Unix())} //TODO: Assign to crdt is potencially unecessary (idea: Updates self in the map (reset operation?))
-	newCrdt = crdt
-	return
+		random:                rand.NewSource(time.Now().Unix()),
+	}
 }
 
 func (crdt *SetAWCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateArguments) (state State) {
@@ -328,7 +327,6 @@ func (crdt *SetAWCrdt) applyRemoveAll(toRem map[Element]UniqueSet) (effect *Effe
 }
 
 func (crdt *SetAWCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err error) {
-	//TODO: Typechecking
 	return true, nil
 }
 

@@ -145,12 +145,11 @@ func (args GetValuesArguments) GetREADType() proto.READType { return proto.READT
 
 //Note: crdt can (and most often will be) nil
 func (crdt *ORMapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
-	crdt = &ORMapCrdt{
+	return &ORMapCrdt{
 		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
 		entries:               make(map[string]map[Element]UniqueSet),
-		random:                rand.NewSource(time.Now().Unix())} //TODO: Assign to crdt is potencially unecessary (idea: Updates self in the map (reset operation?))
-	newCrdt = crdt
-	return
+		random:                rand.NewSource(time.Now().Unix()),
+	}
 }
 
 func (crdt *ORMapCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateArguments) (state State) {
@@ -497,7 +496,6 @@ func (crdt *ORMapCrdt) applyRemoveAll(toRem map[string]map[Element]UniqueSet) (e
 }
 
 func (crdt *ORMapCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err error) {
-	//TODO: Typechecking
 	return true, nil
 }
 

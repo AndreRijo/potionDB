@@ -37,12 +37,15 @@ var (
 	}
 	disabledInfos = map[string]struct{}{
 		REMOTE_PRINT: {},
+		REPL_PRINT:   {},
 	}
-	disabledWarnings = map[string]struct{}{}
+	disabledWarnings = map[string]struct{}{
+		MAT_PRINT: {},
+	}
 
 	//disabledDebugs    = map[string]struct{}{}
-	allOutputDisabled = true
-	//allOutputDisabled = false
+	//allOutputDisabled = true
+	allOutputDisabled = false
 )
 
 func CheckErr(msg string, err error) {

@@ -224,7 +224,6 @@ func (crdt *GMapCrdt) applyAddAll(toAdd map[Element]Unique) (effect *Effect) {
 
 */
 func (crdt *GMapCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err error) {
-	//TODO: Typechecking
 	return true, nil
 }
 

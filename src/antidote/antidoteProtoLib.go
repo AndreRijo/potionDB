@@ -46,7 +46,7 @@ const (
 	ErrorReply          = 0
 )
 
-//TODO: A lot of code repetition between ORMap and RRMap. Might be worth to later merge them
+//: A lot of code repetition between ORMap and RRMap. Might be worth to later merge them
 
 /*****COMMUNICATION*****/
 
@@ -147,7 +147,7 @@ func CreateStaticRead(transId []byte, fullReads []ReadObjectParams, partialReads
 	}
 }
 
-//TODO: Use a struct different from the one in transactionManager.
+//: Use a struct different from the one in transactionManager.
 func CreateStaticReadObjs(transId []byte, readParams []ReadObjectParams) (protobuf *proto.ApbStaticReadObjects) {
 	protobuf = &proto.ApbStaticReadObjects{
 		Transaction: CreateStartTransaction(transId),
@@ -222,7 +222,7 @@ func CreateCommitFailedResp(errorCode uint32) (protobuf *proto.ApbCommitResp) {
 	return
 }
 
-//TODO: Check if these replies are being given just like in antidote (i.e., same arguments in case of success/failure, etc.)
+//: Check if these replies are being given just like in antidote (i.e., same arguments in case of success/failure, etc.)
 //func CreateStaticReadResp(readReplies []*proto.ApbReadObjectResp, ts clocksi.Timestamp) (protobuf *proto.ApbStaticReadObjectsResp) {
 func CreateStaticReadResp(objectStates []crdt.State, txnId TransactionId, ts clocksi.Timestamp) (protobuf *proto.ApbStaticReadObjectsResp) {
 	protobuf = &proto.ApbStaticReadObjectsResp{
@@ -248,6 +248,8 @@ func CreateOperationResp() (protoBuf *proto.ApbOperationResp) {
 	return
 }
 
+/***** PROTO -> ANTIDOTE *****/
+
 func DecodeTxnDescriptor(bytes []byte) (txnId TransactionId, ts clocksi.Timestamp) {
 	if bytes == nil || len(bytes) == 0 {
 		//FromBytes of clocksi can handle nil arrays
@@ -255,6 +257,55 @@ func DecodeTxnDescriptor(bytes []byte) (txnId TransactionId, ts clocksi.Timestam
 	} else {
 		txnId, ts = TransactionId(binary.BigEndian.Uint64(bytes[0:8])), clocksi.ClockSiTimestamp{}.FromBytes(bytes[8:])
 	}
+	return
+}
+
+func ProtoObjectsToAntidoteObjects(protoObjs []*proto.ApbBoundObject) (objs []ReadObjectParams) {
+	objs = make([]ReadObjectParams, len(protoObjs))
+
+	for i, currObj := range protoObjs {
+		objs[i] = ReadObjectParams{
+			KeyParams: CreateKeyParams(string(currObj.GetKey()), currObj.GetType(), string(currObj.GetBucket())),
+			ReadArgs:  crdt.StateReadArguments{},
+		}
+	}
+	return
+}
+
+func ProtoReadToAntidoteObjects(fullReads []*proto.ApbBoundObject, partialReads []*proto.ApbPartialRead) (objs []ReadObjectParams) {
+	objs = make([]ReadObjectParams, len(fullReads)+len(partialReads))
+
+	for i, currObj := range fullReads {
+		objs[i] = ReadObjectParams{
+			KeyParams: CreateKeyParams(string(currObj.GetKey()), currObj.GetType(), string(currObj.GetBucket())),
+			ReadArgs:  crdt.StateReadArguments{},
+		}
+	}
+
+	var boundObj *proto.ApbBoundObject
+	for i, currObj := range partialReads {
+		boundObj = currObj.GetObject()
+		objs[i+len(fullReads)] = ReadObjectParams{
+			KeyParams: CreateKeyParams(string(boundObj.GetKey()), boundObj.GetType(), string(boundObj.GetBucket())),
+			ReadArgs:  *crdt.PartialReadOpToAntidoteRead(currObj.GetArgs(), boundObj.GetType(), currObj.GetReadtype()),
+		}
+	}
+	return
+}
+
+func ProtoUpdateOpToAntidoteUpdate(protoUp []*proto.ApbUpdateOp) (upParams []*UpdateObjectParams) {
+	upParams = make([]*UpdateObjectParams, len(protoUp))
+	var currObj *proto.ApbBoundObject = nil
+	var currUpOp *proto.ApbUpdateOperation = nil
+
+	for i, update := range protoUp {
+		currObj, currUpOp = update.GetBoundobject(), update.GetOperation()
+		upParams[i] = &UpdateObjectParams{
+			KeyParams:  CreateKeyParams(string(currObj.GetKey()), currObj.GetType(), string(currObj.GetBucket())),
+			UpdateArgs: crdt.UpdateProtoToAntidoteUpdate(currUpOp, currObj.GetType()),
+		}
+	}
+
 	return
 }
 

@@ -51,19 +51,17 @@ func (args DownstreamSetValue) MustReplicate() bool { return true }
 
 //Note: crdt can (and most often will be) nil
 func (crdt *LwwRegisterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
-	crdt = &LwwRegisterCrdt{
+	return &LwwRegisterCrdt{
 		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
 		value:                 "",
 		ts:                    0,
 		replicaID:             replicaID,
 		localReplicaID:        replicaID,
-	} //TODO: Assign to crdt is potencially unecessary (idea: Updates self in the map (reset operation?))
-	newCrdt = crdt
-	return
+	}
 }
 
 func (crdt *LwwRegisterCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateArguments) (state State) {
-	if updsNotYetApplied == nil || len(updsNotYetApplied) > 0 {
+	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
 		return crdt.GetValue()
 	}
 	//Correct value is always the one in the last update
@@ -100,7 +98,6 @@ func (crdt *LwwRegisterCrdt) applyDownstream(downstreamArgs DownstreamArguments)
 }
 
 func (crdt *LwwRegisterCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err error) {
-	//TODO: Typechecking
 	return true, nil
 }
 

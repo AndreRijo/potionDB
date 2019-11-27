@@ -17,6 +17,13 @@ type AvgState struct {
 	Value float64
 }
 
+type AvgFullState struct {
+	Sum   int64
+	NAdds int64
+}
+
+type AvgGetFullArguments struct{}
+
 type AddValue struct {
 	Value int64
 }
@@ -36,17 +43,23 @@ func (args AvgState) GetCRDTType() proto.CRDTType { return proto.CRDTType_AVG }
 
 func (args AvgState) GetREADType() proto.READType { return proto.READType_FULL }
 
+func (args AvgFullState) GetCRDTType() proto.CRDTType { return proto.CRDTType_AVG }
+
+func (args AvgFullState) GetREADType() proto.READType { return proto.READType_FULL }
+
 func (args AddMultipleValue) MustReplicate() bool { return true }
+
+func (args AvgGetFullArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_AVG }
+
+func (args AvgGetFullArguments) GetREADType() proto.READType { return proto.READType_GET_FULL_AVG }
 
 //Note: crdt can (and most often will be) nil
 func (crdt *AvgCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
-	crdt = &AvgCrdt{
+	return &AvgCrdt{
 		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
 		sum:                   0,
 		nAdds:                 0,
-	} //TODO: Assign to crdt is potencially unecessary (idea: Updates self in the map (reset operation?))
-	newCrdt = crdt
-	return
+	}
 }
 
 func (crdt *AvgCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateArguments) (state State) {
@@ -95,7 +108,6 @@ func (crdt *AvgCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect
 }
 
 func (crdt *AvgCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err error) {
-	//TODO: Typechecking
 	return true, nil
 }
 
@@ -155,6 +167,20 @@ func (crdtState AvgState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state
 
 func (crdtState AvgState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Avg: &proto.ApbGetAverageResp{Avg: pb.Float64(crdtState.Value)}}
+}
+
+func (crdtState AvgFullState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
+	avgReadReply := protobuf.GetPartread().GetAvg().GetGetfull()
+	crdtState.Sum, crdtState.NAdds = avgReadReply.GetSum(), avgReadReply.GetNAdds()
+	return crdtState
+}
+
+func (args AvgGetFullArguments) FromPartialRead(protobuf *proto.ApbPartialReadArgs) (readArgs ReadArguments) {
+	return args
+}
+
+func (args AvgGetFullArguments) ToPartialRead() (protobuf *proto.ApbPartialReadArgs) {
+	return &proto.ApbPartialReadArgs{Avg: &proto.ApbAvgPartialRead{Getfull: &proto.ApbAvgFullRead{}}}
 }
 
 func (downOp AddMultipleValue) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {

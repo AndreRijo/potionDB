@@ -90,15 +90,17 @@ func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, rep
 }
 
 func (repl *Replicator) replicateCycle() {
-	hold := make([][]RemoteTxn, 0, 0)
+	//count := 0
 	for {
 		tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "starting replicateCycle")
 		repl.getNewTxns()
+		//count++
 		toSend := repl.preparateDataToSend()
-		hold = append(hold, toSend)
+		//fmt.Println("[REPLICATOR]Still sending ops.", "Number of remote txns:", len(toSend))
 		repl.sendTxns(toSend)
 		tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "finishing replicateCycle")
 		time.Sleep(tsSendDelay * time.Millisecond)
+		//ignore(toSend)
 	}
 }
 
@@ -160,6 +162,10 @@ func (repl *Replicator) preparateDataToSend() (toSend []RemoteTxn) {
 				//Clock update, this partition has no further transactions. If no smaller clk is found, then this must be the last iteration
 				if len(firstEntry.upds) == 0 {
 					foundStableClk = true
+					//Cleaning buffer
+					partCache = make([]PairClockUpdates, 1, cacheInitialSize)
+					partCache[0] = firstEntry
+					repl.txnCache[id] = partCache
 				} else {
 					foundStableClk = false
 				}
@@ -171,6 +177,10 @@ func (repl *Replicator) preparateDataToSend() (toSend []RemoteTxn) {
 				txnUpdates[id] = firstEntry.upds
 				if len(firstEntry.upds) == 0 {
 					foundStableClk = true
+					//Cleaning buffer
+					partCache = make([]PairClockUpdates, 1, cacheInitialSize)
+					partCache[0] = firstEntry
+					repl.txnCache[id] = partCache
 				}
 			}
 		}
@@ -203,14 +213,20 @@ func (repl *Replicator) sendTxns(toSend []RemoteTxn) {
 	*/
 	//Separate each txn into partitions
 	//TODO: Batch of transactions for the same partition? Not simple due to clock updates.
+	//startTime := time.Now().UnixNano()
+	count := 0
 	for _, txn := range toSend {
 		for partId, upds := range txn.Upds {
+			count++
 			repl.remoteConn.SendPartTxn(&NewReplicatorRequest{PartitionID: int64(partId), SenderID: repl.replicaID, Timestamp: txn.Timestamp, Upds: upds})
 		}
+		count++
 		//TODO: This might not even be necessary to be sent - probably it is enough to send this when there's no upds to send.
 		repl.remoteConn.SendStableClk(txn.Timestamp.GetPos(repl.replicaID))
 		//fmt.Println("Sending txns")
 	}
+	//endTime := time.Now().UnixNano()
+	//fmt.Printf("[REPLICATOR]Took %d ms to send txns to rabbitMQ. Total msgs sent: %d.\n", (endTime-startTime)/1000000, count)
 	tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "finished sendTxns")
 }
 

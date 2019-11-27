@@ -556,7 +556,6 @@ func (crdt *TopKRmvCrdt) findAndUpdateMin() {
 }
 
 func (crdt *TopKRmvCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err error) {
-	//TODO: Typechecking
 	return true, nil
 }
 
@@ -597,7 +596,6 @@ func (crdt *TopKRmvCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect)
 }
 
 func (crdt *TopKRmvCrdt) undoEffect(effect *Effect) {
-	//TODO Adds done, now need to do remove
 	switch typedEffect := (*effect).(type) {
 	case TopKAddEffect:
 		crdt.undoAddEffect(&typedEffect)

@@ -15,6 +15,12 @@ type RemoteGroup struct {
 	groupChan chan ReplicatorMsg //Groups requests sent by each remoteConnection.
 }
 
+type GroupOrErr struct {
+	*RemoteConn
+	error
+	index int
+}
+
 const (
 	defaultListenerSize = 100
 )
@@ -25,24 +31,65 @@ const (
 func CreateRemoteGroupStruct(bucketsToListen []string, replicaID int16) (group *RemoteGroup, err error) {
 	myInstanceIP := tools.SharedConfig.GetConfig("localRabbitMQAddress")
 	othersIPList := strings.Split(tools.SharedConfig.GetConfig("remoteRabbitMQAddresses"), " ")
+	if len(othersIPList) == 1 && len(othersIPList[0]) < 2 {
+		othersIPList = []string{}
+	}
 
 	group = &RemoteGroup{conns: make([]*RemoteConn, len(othersIPList)+1), groupChan: make(chan ReplicatorMsg, defaultListenerSize*len(othersIPList)+1)}
-	for i, ip := range othersIPList {
-		fmt.Println("Connecting to", ip)
-		group.conns[i], err = CreateRemoteConnStruct(ip, bucketsToListen, replicaID)
+
+	/*
+		for i, ip := range othersIPList {
+			fmt.Println("Connecting to", ip)
+			group.conns[i], err = CreateRemoteConnStruct(ip, bucketsToListen, replicaID)
+			if err != nil {
+				fmt.Println("Error while connecting to RabbitMQ:", err)
+				return nil, err
+			}
+			fmt.Println("Connected to", ip)
+		}
+		group.ourConn, err = CreateRemoteConnStruct(myInstanceIP, bucketsToListen, replicaID)
 		if err != nil {
-			fmt.Println("Error while connecting to RabbitMQ:", err)
 			return nil, err
 		}
-		fmt.Println("Connected to", ip)
+		group.conns[len(othersIPList)] = group.ourConn
+		group.prepareMsgListener()
+		return
+	*/
+	openConnsChan := make(chan GroupOrErr, 10)
+	for i, ip := range othersIPList {
+		go connectToIp(ip, i, bucketsToListen, replicaID, openConnsChan)
 	}
-	group.ourConn, err = CreateRemoteConnStruct(myInstanceIP, bucketsToListen, replicaID)
-	if err != nil {
-		return nil, err
+	selfConnChan := make(chan GroupOrErr)
+	go connectToIp(myInstanceIP, -1, bucketsToListen, replicaID, selfConnChan)
+
+	//Wait for self first
+	reply := <-selfConnChan
+	if reply.error != nil {
+		fmt.Printf("Error while connecting to this replica's RabbitMQ at %s: %v", myInstanceIP, err)
+		panic(nil)
 	}
-	group.conns[len(othersIPList)] = group.ourConn
+	group.ourConn = reply.RemoteConn
+	group.conns[len(othersIPList)] = reply.RemoteConn
+	fmt.Println("Connected to self RabbitMQ instance at", myInstanceIP)
+
+	//Wait for others
+	for i := 0; i < len(othersIPList); i++ {
+		reply := <-openConnsChan
+		if reply.error != nil {
+			fmt.Printf("Error while connecting to remote RabbitMQ at %s: %v", othersIPList[reply.index], err)
+			return nil, err
+		}
+		group.conns[i] = reply.RemoteConn
+		fmt.Println("Connected to", othersIPList[reply.index])
+	}
 	group.prepareMsgListener()
 	return
+}
+
+func connectToIp(ip string, index int, bucketsToListen []string, replicaID int16, connChan chan GroupOrErr) {
+	reply := GroupOrErr{index: index}
+	reply.RemoteConn, reply.error = CreateRemoteConnStruct(ip, bucketsToListen, replicaID)
+	connChan <- reply
 }
 
 func (group *RemoteGroup) SendPartTxn(request *NewReplicatorRequest) {
