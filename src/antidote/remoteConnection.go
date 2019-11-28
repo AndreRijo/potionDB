@@ -80,7 +80,7 @@ func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16
 	}
 
 	//Call this to delete existing exchange/queues/binds/etc if configurations are changed
-	deleteRabbitMQStructures(sendCh)
+	//deleteRabbitMQStructures(sendCh)
 
 	//We send msgs to the exchange
 	//sendCh.ExchangeDelete(exchangeName, false, true)
