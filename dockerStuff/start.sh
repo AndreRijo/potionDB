@@ -7,13 +7,14 @@
 #echo $CONFIG ;
 #echo $SERVERS ;
 #echo $RABBITMQ ;
-sleep $RABBITMQ_WAIT ;
-rabbitmqctl add_vhost $RABBITMQ_VHOST;
-rabbitmqctl add_user test test;
+sleep $RABBITMQ_WAIT 
+rabbitmqctl add_vhost $RABBITMQ_VHOST ;
+sleep 2s 
+rabbitmqctl add_user test test ; 
 rabbitmqctl set_user_tags test administrator;
 rabbitmqctl set_permissions -p $RABBITMQ_VHOST test ".*" ".*" ".*";
 sleep 5s;
-#/go/bin/main $1 ;
+#/go/bin/monitor-fetch/main $1 ;
 
 /go/bin/main --config=$CONFIG --servers=$SERVERS --rabbitMQIP=$RABBITMQ --rabbitVHost=$RABBITMQ_VHOST;
 

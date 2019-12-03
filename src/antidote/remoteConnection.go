@@ -119,7 +119,7 @@ func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16
 		//listenerChan:     make(chan ReplicatorMsg, defaultListenerSize),
 		listenerChan:     make(chan ReplicatorMsg),
 		replicaID:        replicaID,
-		replicaString:    fmt.Sprint(replicaID),
+		replicaString:    fmt.Sprint(replicaID), //TODO: We need something different than port for replicaIDs.
 		holdOperations:   make(map[int16]*HoldOperations),
 		nBucketsToListen: len(bucketsToListen),
 	}
@@ -211,6 +211,7 @@ func (remote *RemoteConn) startReceiver() {
 		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Received something!")
 		//TODO: Maybe analyze data.routingKey to avoid decoding the protobuf if it was sent by this own replica? RoutingKey no longer has information about the sender though...
 		if data.CorrelationId == remote.replicaString {
+			//fmt.Println("Ignored, own received.")
 			tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Ignored received request as it was sent by myself")
 		} else {
 			if data.RoutingKey == clockTopic {

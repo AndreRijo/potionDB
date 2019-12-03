@@ -17,6 +17,7 @@ import (
 	"crdt"
 	"flag"
 	"fmt"
+	"math"
 	rand "math/rand"
 	"net"
 	"os"
@@ -53,19 +54,22 @@ func main() {
 
 	//debug.SetGCPercent(-1)
 
+	rand.Seed(time.Now().UTC().UnixNano())
 	configs := loadConfigs()
 	startProfiling(configs)
 
 	portString := configs.GetConfig(PORT_KEY)
-	rand.Seed(time.Now().UTC().UnixNano())
-	tmpId, _ := strconv.ParseInt(portString, 0, 64)
-	id := int16(tmpId)
+	//tmpId, _ := strconv.ParseInt(portString, 0, 64)
+	//tmpId2, _ := strconv.ParseInt(configs.GetConfig("potionDBID"), 10, 64)
+	//id := int16((tmpId + tmpId2) % math.MaxInt16)
+	tmpId, err := strconv.ParseInt(configs.GetConfig("potionDBID"), 10, 64)
+	id := int16(tmpId % (math.MaxInt16 * 2))
 
 	tm := antidote.Initialize(id)
 	server, err := net.Listen("tcp", "0.0.0.0:"+strings.TrimSpace(portString))
 
 	tools.CheckErr(tools.PORT_ERROR, err)
-	fmt.Println("PotionDB started at port", portString)
+	fmt.Println("PotionDB started at port", portString, "with ReplicaID", id)
 
 	//Stop listening to port on shutdown
 	defer server.Close()
@@ -372,6 +376,8 @@ func loadConfigs() (configs *tools.ConfigLoader) {
 	rabbitMQIP := flag.String("rabbitMQIP", "F", "ip:port of this replica's rabbitMQ instance.")
 	servers := flag.String("servers", "F", "list of ip:port of remote replicas' rabbitMQ instances, separated by spaces.")
 	vhost := flag.String("rabbitVHost", "/", "vhost to use with rabbitMQ.")
+	port := flag.String("port", "F", "port for potionDB.")
+	replicaID := flag.String("id", "F", "replicaID that uniquely identifies this replica.")
 
 	flag.Parse()
 	configs = &tools.ConfigLoader{}
@@ -392,6 +398,28 @@ func loadConfigs() (configs *tools.ConfigLoader) {
 	}
 	if *vhost != "/" {
 		configs.ReplaceConfig("rabbitVHost", *vhost)
+	}
+	if *port != "F" {
+		configs.ReplaceConfig(PORT_KEY, *port)
+	}
+	if *replicaID != "F" {
+		configs.ReplaceConfig("potionDBID", *replicaID)
+	} else {
+		/*
+			//Get public address. Dial with UDP doesn't send anything by default, but it looks for
+			//which network interface would be used to solve such request
+			conn, err := net.Dial("udp", "8.8.8.8:80")
+			var ip string
+			if err != nil {
+				log.Fatal(err)
+				ip = strconv.FormatInt(rand.Int63(), 10)
+			} else {
+				defer conn.Close()
+				ip = string(conn.LocalAddr().(*net.UDPAddr).IP)
+			}
+			configs.ReplaceConfig("potionDBID", strconv.FormatInt(int64(hashFunc.StringSum64(ip)), 10))
+		*/
+		configs.ReplaceConfig("potionDBID", strconv.FormatInt(rand.Int63(), 10))
 	}
 
 	return

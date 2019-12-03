@@ -152,7 +152,7 @@ func (crdtState RegisterState) ToReadResp() (protobuf *proto.ApbReadObjectResp) 
 
 func (downOp DownstreamSetValue) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
 	regOp := protobuf.GetLwwregOp()
-	downOp.NewValue, downOp.ReplicaID, downOp.Ts = regOp.GetValue(), int16(regOp.GetReplicaID()), regOp.GetTs()
+	downOp.NewValue, downOp.ReplicaID, downOp.Ts = string(regOp.GetValue()), int16(regOp.GetReplicaID()), regOp.GetTs()
 	return downOp
 }
 
