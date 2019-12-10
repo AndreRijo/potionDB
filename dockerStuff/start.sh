@@ -9,7 +9,7 @@
 #echo $RABBITMQ ;
 sleep $RABBITMQ_WAIT 
 rabbitmqctl add_vhost $RABBITMQ_VHOST ;
-sleep 2s 
+sleep 5s 
 rabbitmqctl add_user test test ; 
 rabbitmqctl set_user_tags test administrator;
 rabbitmqctl set_permissions -p $RABBITMQ_VHOST test ".*" ".*" ".*";

@@ -72,6 +72,7 @@ type GetTopKAboveValueArguments struct {
 type TopKScore struct {
 	Id    int32
 	Score int32
+	Data  *[]byte
 }
 
 type TopKElement struct {
@@ -79,6 +80,7 @@ type TopKElement struct {
 	Score     int32
 	Ts        int64
 	ReplicaID int16
+	Data      *[]byte
 }
 
 //Effect of an TopKAdd that adds the element to the top
@@ -131,7 +133,7 @@ func (set setOps) add(op UpdateArguments) {
 
 //Returns true if elem is > than other
 func (elem TopKElement) isHigher(other TopKElement) bool {
-	if (other == TopKElement{}) {
+	if (other.isEqual(TopKElement{})) {
 		return true
 	}
 	if elem.Score > other.Score {
@@ -150,7 +152,12 @@ func (elem TopKElement) isHigher(other TopKElement) bool {
 }
 
 func (elem TopKElement) isSmaller(other TopKElement) bool {
-	return other != TopKElement{} && other.isHigher(elem)
+	return other.isEqual(TopKElement{}) && other.isHigher(elem)
+}
+
+func (elem TopKElement) isEqual(other TopKElement) bool {
+	return elem.Id == other.Id && elem.ReplicaID == other.ReplicaID &&
+		elem.Score == other.Score && elem.Ts == other.Ts
 }
 
 //Ops
@@ -231,7 +238,7 @@ func (crdt *TopKRmvCrdt) getState(updsNotYetApplied []*UpdateArguments) (state S
 	values := make([]TopKScore, len(crdt.elems))
 	i := 0
 	for _, elem := range crdt.elems {
-		values[i] = TopKScore{Id: elem.Id, Score: elem.Score}
+		values[i] = TopKScore{Id: elem.Id, Score: elem.Score, Data: elem.Data}
 		i++
 	}
 	return TopKValueState{Scores: values}
@@ -259,7 +266,7 @@ func (crdt *TopKRmvCrdt) getTopKAboveValue(minValue int32, updsNotYetApplied []*
 	actuallyAdded := 0
 	for _, elem := range crdt.elems {
 		if elem.Score >= minValue {
-			values[actuallyAdded] = TopKScore{Id: elem.Id, Score: elem.Score}
+			values[actuallyAdded] = TopKScore{Id: elem.Id, Score: elem.Score, Data: elem.Data}
 			actuallyAdded++
 		}
 	}
@@ -285,7 +292,10 @@ func (crdt *TopKRmvCrdt) Update(args UpdateArguments) (downstreamArgs Downstream
 func (crdt *TopKRmvCrdt) getTopKAddDownstreamArgs(addOp *TopKAdd) (args DownstreamArguments) {
 	crdt.vc.SelfIncTimestamp(crdt.replicaID)
 	elem, hasId := crdt.elems[addOp.Id]
-	localArgs := DownstreamTopKAdd{TopKElement: TopKElement{Id: addOp.Id, Score: addOp.Score, Ts: crdt.vc.GetPos(crdt.replicaID), ReplicaID: crdt.replicaID}}
+	localArgs := DownstreamTopKAdd{TopKElement: TopKElement{Id: addOp.Id, Score: addOp.Score, Ts: crdt.vc.GetPos(crdt.replicaID), ReplicaID: crdt.replicaID, Data: addOp.Data}}
+	if addOp.Data == nil {
+		localArgs.Data = &[]byte{}
+	}
 	//Check if this element should belong to the top or not
 	//An element should belong to the top iff one of those are true:
 	//1) Its id is already in the Top but with a smaller score
@@ -359,6 +369,9 @@ func (crdt *TopKRmvCrdt) applyAdd(op *DownstreamTopKAdd) (effect *Effect, otherD
 	//fmt.Println("Applying topK add")
 	var effectValue Effect
 	oldTs := crdt.vc.GetPos(op.ReplicaID)
+	if op.Data == nil {
+		op.Data = &[]byte{}
+	}
 
 	crdt.vc.UpdatePos(op.ReplicaID, op.Ts)
 	remsVc, hasEntry := crdt.rems[op.Id]
@@ -379,7 +392,7 @@ func (crdt *TopKRmvCrdt) applyAdd(op *DownstreamTopKAdd) (effect *Effect, otherD
 					entry.add(elem)
 				}
 				//Check if min should be updated
-				if crdt.smallestScore == elem {
+				if crdt.smallestScore.isEqual(elem) {
 					crdt.findAndUpdateMin()
 				}
 			} else {
@@ -397,7 +410,7 @@ func (crdt *TopKRmvCrdt) applyAdd(op *DownstreamTopKAdd) (effect *Effect, otherD
 			if len(crdt.elems) < crdt.maxElems {
 				crdt.elems[op.Id] = op.TopKElement
 				//Check if min should be updated
-				if (crdt.smallestScore == TopKElement{} || crdt.smallestScore.isHigher(op.TopKElement)) {
+				if (crdt.smallestScore.isEqual(TopKElement{}) || crdt.smallestScore.isHigher(op.TopKElement)) {
 					effectValue = TopKReplaceEffect{newElem: op.TopKElement, oldMin: crdt.smallestScore, oldTs: oldTs}
 					crdt.smallestScore = op.TopKElement
 				} else {
@@ -495,7 +508,7 @@ func (crdt *TopKRmvCrdt) applyRemove(op *DownstreamTopKRemove) (effect *Effect, 
 				}
 			}
 			//Check that notInTop actually had elements.
-			if (highestElem != TopKElement{}) {
+			if (!highestElem.isEqual(TopKElement{})) {
 				//Promote to top-k and set as min
 				crdt.elems[highestElem.Id] = highestElem
 				crdt.smallestScore = highestElem
@@ -508,7 +521,7 @@ func (crdt *TopKRmvCrdt) applyRemove(op *DownstreamTopKRemove) (effect *Effect, 
 				}
 
 				remEffect.minAddedToTop = true
-			} else if elem == crdt.smallestScore {
+			} else if elem.isEqual(crdt.smallestScore) {
 				//No elem to add to top-k, however the removed element was the min. Need to find new one
 				crdt.findAndUpdateMin()
 			}
@@ -526,14 +539,14 @@ func (crdt *TopKRmvCrdt) applyRemove(op *DownstreamTopKRemove) (effect *Effect, 
 				delete(crdt.notInTop, highest.Id)
 			}
 			crdt.elems[highest.Id] = highest
-			if elem == crdt.smallestScore {
+			if elem.isEqual(crdt.smallestScore) {
 				//If the removed elem was the min, the one we added now has, for sure, an even smaller value
 				crdt.smallestScore = highest
 			}
 			//Need to pass this add now
 			//TODO: Analyze if it really needs to be downstreamed or not
 			otherDownstreamArgs = DownstreamTopKAdd{TopKElement: highest}
-		} else if elem == crdt.smallestScore {
+		} else if elem.isEqual(crdt.smallestScore) {
 			//Removed element was the min, need to find new min
 			crdt.findAndUpdateMin()
 		}
@@ -637,7 +650,7 @@ func (crdt *TopKRmvCrdt) undoReplaceEffect(effect *TopKReplaceEffect) {
 	//New element was added to the top
 	delete(crdt.elems, effect.newElem.Id)
 	//If there was an old element, it could had been in the top or notInTop. Regardless, it now belongs to the top
-	if (effect.oldElem != TopKElement{}) {
+	if (!effect.oldElem.isEqual(TopKElement{})) {
 		crdt.elems[effect.oldElem.Id] = effect.oldElem
 		//If the old element was in notInTop, remove it from there
 		if notInTop, has := crdt.notInTop[effect.oldElem.Id]; has {
@@ -682,7 +695,7 @@ func (crdt *TopKRmvCrdt) undoRemoveEffect(effect *TopKRemoveEffect) {
 		notTop.add(elem)
 	}
 
-	if (effect.remElem != TopKElement{}) {
+	if (!effect.remElem.isEqual(TopKElement{})) {
 		//An element was removed.
 		//When this remove was executed, it's possible that a concurrent add in notInTop for the same elem was promoted to the top
 		inTop, has := crdt.elems[effect.remElem.Id]
@@ -782,7 +795,7 @@ func (crdt *TopKRmvCrdt) applyRemove(op *DownstreamTopKRemove) (effect *Effect, 
 //Protobuf functions
 func (crdtOp TopKAdd) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
 	add := protobuf.GetTopkrmvop().GetAdds()[0]
-	crdtOp.TopKScore = TopKScore{Id: add.GetPlayerId(), Score: add.GetScore()}
+	crdtOp.TopKScore = TopKScore{Id: add.GetPlayerId(), Score: add.GetScore(), Data: &add.Data}
 	return crdtOp
 }
 
@@ -809,7 +822,8 @@ func (crdtState TopKValueState) FromReadResp(protobuf *proto.ApbReadObjectResp) 
 	}
 	crdtState.Scores = make([]TopKScore, len(protoScores))
 	for i, pair := range protoScores {
-		crdtState.Scores[i] = TopKScore{Id: pair.GetPlayerId(), Score: pair.GetScore()}
+		data := pair.GetData()
+		crdtState.Scores[i] = TopKScore{Id: pair.GetPlayerId(), Score: pair.GetScore(), Data: &data}
 	}
 	return crdtState
 }
@@ -817,7 +831,7 @@ func (crdtState TopKValueState) FromReadResp(protobuf *proto.ApbReadObjectResp) 
 func (crdtState TopKValueState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
 	protos := make([]*proto.ApbIntPair, len(crdtState.Scores))
 	for i, score := range crdtState.Scores {
-		protos[i] = &proto.ApbIntPair{PlayerId: pb.Int32(score.Id), Score: pb.Int32(score.Score)}
+		protos[i] = &proto.ApbIntPair{PlayerId: pb.Int32(score.Id), Score: pb.Int32(score.Score), Data: *score.Data}
 	}
 	return &proto.ApbReadObjectResp{Topk: &proto.ApbGetTopkResp{Values: protos}}
 }
@@ -846,7 +860,8 @@ func (args GetTopKAboveValueArguments) ToPartialRead() (protobuf *proto.ApbParti
 
 func (downOp DownstreamTopKAdd) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
 	addProto := protobuf.GetTopkrmvOp().GetAdds()[0]
-	downOp.Id, downOp.Score, downOp.Ts, downOp.ReplicaID = addProto.GetId(), addProto.GetScore(), addProto.GetTs(), int16(addProto.GetReplicaID())
+	downOp.Id, downOp.Score, downOp.Ts, downOp.ReplicaID, downOp.Data = addProto.GetId(), addProto.GetScore(), addProto.GetTs(),
+		int16(addProto.GetReplicaID()), &addProto.Data
 	return downOp
 }
 
@@ -858,7 +873,8 @@ func (downOp DownstreamTopKRemove) FromReplicatorObj(protobuf *proto.ProtoOpDown
 
 func (downOp DownstreamTopKAdd) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
 	return &proto.ProtoOpDownstream{TopkrmvOp: &proto.ProtoTopKRmvDownstream{Adds: []*proto.ProtoTopKElement{&proto.ProtoTopKElement{
-		Id: pb.Int32(downOp.Id), Score: pb.Int32(downOp.Score), Ts: pb.Int64(downOp.Ts), ReplicaID: pb.Int32(int32(downOp.ReplicaID)),
+		Id: pb.Int32(downOp.Id), Score: pb.Int32(downOp.Score), Ts: pb.Int64(downOp.Ts),
+		ReplicaID: pb.Int32(int32(downOp.ReplicaID)), Data: *downOp.Data,
 	}}}}
 }
 

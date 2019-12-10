@@ -105,6 +105,7 @@ message ProtoTopKElement {
     required int32 score = 2;
     required int64 ts = 3;
     required int32 replicaID = 4;
+    optional bytes data = 5;
 }
 
 message ProtoTopKIdVc {
