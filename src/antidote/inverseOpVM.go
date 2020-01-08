@@ -41,6 +41,10 @@ func (vm *InverseOpVM) ReadOld(readArgs crdt.ReadArguments, readTs clocksi.Times
 	return cachedCRDT.Read(readArgs, updsNotYetApplied)
 }
 
+func (vm *InverseOpVM) GetLatestCRDT() (crdt crdt.CRDT) {
+	return vm.CRDT
+}
+
 //PRIVATE METHODS
 
 func (vm *InverseOpVM) getClosestMatch(readTs clocksi.Timestamp) (crdt crdt.CRDT) {

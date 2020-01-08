@@ -135,3 +135,115 @@ message ProtoEmbMapUpd {
     required CRDT_type type = 2;
     required ProtoOpDownstream upd = 3;
 }
+
+message ProtoJoin {
+    repeated string buckets = 1;
+    required int32 replicaID = 2;
+    required string replicaIP = 3;
+    //required int32 connID = 4;  //ConnID in the sender side for this replica. This information is needed later for requesting buckets.
+}
+
+message ProtoReplyJoin {
+    repeated string buckets = 1; 
+    //repeated ProtoClock partsClk = 2;
+    repeated bytes partsClk = 2;
+    required int32 replicaID = 3;
+    //required int32 connID = 4;  //Used to know which connection to request the buckets from.
+    required string replicaIP = 4;  //Used to know which connection to request the buckets from.
+}
+
+/*
+message ProtoClock {
+    repeated ProtoStableClock entries = 1;
+}*/
+
+message ProtoRequestBucket {
+    repeated string buckets = 1;
+    //repeated ProtoClock partsClk = 2;
+    //repeated bytes partsClk = 2;
+    required int32 replicaID = 2;
+    required string replicaIP = 3;  //Used to know which connection to send the buckets to
+}
+
+//This contains CRDTs for all the buckets requested, not just one bucket.
+message ProtoReplyBucket {
+    required int32 replicaID = 1;
+    required bytes clk = 2;
+    repeated ProtoPartition parts = 3;
+}
+
+message ProtoPartition {
+    repeated ProtoCRDT states = 1;
+}
+
+message ProtoCRDT {
+    required uint64 keyHash = 1;
+    required CRDT_type type = 2;
+    required ProtoState state = 3;
+}
+
+//TODO: Clock for genericInversibleCRDT initialization? And replicaID.
+message ProtoState {
+    optional ProtoCounterState counter = 1;
+    optional ProtoLWWRegState lwwreg = 2;
+    optional ProtoAWSetState awset = 3;
+    optional ProtoORMapState ormap = 4;
+    optional ProtoEmbMapState embmap = 5;
+    optional ProtoMaxMinState maxmin = 6;
+    optional ProtoTopKState topk = 7;
+    optional ProtoAvgState avg = 8;
+}
+
+message ProtoReplyEmpty {
+
+}
+
+//STATES
+message ProtoCounterState {
+    required int32 value = 1;
+}
+message ProtoLWWRegState {
+    required bytes value = 1;
+    required int64 ts = 2;
+    required int32 replicaID = 3;
+}
+message ProtoAWSetState {
+    repeated ProtoValueUniques elems = 1;
+}
+message ProtoORMapState {
+    repeated ProtoORMapRemove entries = 1;
+}
+message ProtoEmbMapState {
+    repeated ProtoEmbMapEntry crdts = 1;
+    repeated ProtoEmbMapRemove removes = 2;
+    //required ProtoClock rmvClock = 3;
+    required bytes rmvClock = 3;
+}
+message ProtoEmbMapEntry {
+    required string key = 1;
+    required CRDT_type type = 2;
+    required ProtoState state = 3;
+}
+message ProtoEmbMapRemove {
+    required string key = 1;
+    //TODO: Marks?
+    repeated ProtoStableClock clks = 2;
+}
+message ProtoMaxMinState {
+    required int64 value = 1;
+}
+message ProtoAvgState {
+    required int64 sum = 1;
+    required int64 nAdds = 2;
+}
+//TODO: This one could be changed to just include the list of elements and maxElems,
+//and then have everything else be calculated on the moment.
+message ProtoTopKState {
+    repeated ProtoTopKElement elems = 1;
+    repeated ProtoTopKIdVc rems = 2;
+    //notTop maybe deserves its own msg? Since the key will be repeated.
+    repeated ProtoTopKElement notTop = 3;
+    optional ProtoTopKElement smallest = 4;
+    required int32 maxElems = 5;
+    required bytes vc = 6;
+}

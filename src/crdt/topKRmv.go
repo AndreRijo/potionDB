@@ -160,6 +160,8 @@ func (elem TopKElement) isEqual(other TopKElement) bool {
 		elem.Score == other.Score && elem.Ts == other.Ts
 }
 
+func (crdt *TopKRmvCrdt) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPK_RMV }
+
 //Ops
 func (args TopKAdd) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPK_RMV }
 
@@ -219,6 +221,12 @@ func (crdt *TopKRmvCrdt) InitializeWithSize(startTs *clocksi.Timestamp, replicaI
 	}
 	newCrdt = crdt
 	return
+}
+
+//Used to initialize when building a CRDT from a remote snapshot
+func (crdt *TopKRmvCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID int16) (sameCRDT *TopKRmvCrdt) {
+	crdt.genericInversibleCRDT, crdt.replicaID = (&genericInversibleCRDT{}).initialize(startTs), replicaID
+	return crdt
 }
 
 func (crdt *TopKRmvCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateArguments) (state State) {
@@ -882,4 +890,71 @@ func (downOp DownstreamTopKRemove) ToReplicatorObj() (protobuf *proto.ProtoOpDow
 	return &proto.ProtoOpDownstream{TopkrmvOp: &proto.ProtoTopKRmvDownstream{Rems: []*proto.ProtoTopKIdVc{&proto.ProtoTopKIdVc{
 		Id: pb.Int32(downOp.Id), Vc: downOp.Vc.ToBytes(),
 	}}}}
+}
+
+func (crdt *TopKRmvCrdt) ToProtoState() (protobuf *proto.ProtoState) {
+	protoElems, protoRems := make([]*proto.ProtoTopKElement, len(crdt.elems)),
+		make([]*proto.ProtoTopKIdVc, len(crdt.rems))
+	i, j, k := 0, 0, 0
+
+	for _, elem := range crdt.elems {
+		protoElems[i] = &proto.ProtoTopKElement{Id: &elem.Id, Score: &elem.Score,
+			Ts: &elem.Ts, ReplicaID: pb.Int32(int32(elem.ReplicaID)), Data: *elem.Data}
+		i++
+	}
+	for playerId, vc := range crdt.rems {
+		protoRems[j] = &proto.ProtoTopKIdVc{Id: &playerId, Vc: vc.ToBytes()}
+		j++
+	}
+	nElemsNotTop := 0
+	for _, elems := range crdt.notInTop {
+		nElemsNotTop += len(elems)
+	}
+	protoNotTop := make([]*proto.ProtoTopKElement, nElemsNotTop)
+	for _, elems := range crdt.notInTop {
+		for elem := range elems {
+			protoNotTop[k] = &proto.ProtoTopKElement{Id: &elem.Id, Score: &elem.Score,
+				Ts: &elem.Ts, ReplicaID: pb.Int32(int32(elem.ReplicaID)), Data: *elem.Data}
+			k++
+		}
+	}
+	smallest := &proto.ProtoTopKElement{Id: &crdt.smallestScore.Id, Score: &crdt.smallestScore.Score,
+		Ts: &crdt.smallestScore.Ts, ReplicaID: pb.Int32(int32(crdt.smallestScore.ReplicaID)), Data: *crdt.smallestScore.Data}
+	return &proto.ProtoState{Topk: &proto.ProtoTopKState{Elems: protoElems, Rems: protoRems,
+		NotTop: protoNotTop, Smallest: smallest, MaxElems: pb.Int32(int32(crdt.maxElems)), Vc: crdt.vc.ToBytes()}}
+}
+
+func (crdt *TopKRmvCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID int16) (newCRDT CRDT) {
+	topKProto := proto.GetTopk()
+	elems, rems, notTop := make(map[int32]TopKElement), make(map[int32]clocksi.Timestamp), make(map[int32]setTopKElement)
+
+	for _, protoElem := range topKProto.GetElems() {
+		data := protoElem.GetData()
+		elems[protoElem.GetId()] = TopKElement{Id: protoElem.GetId(), Score: protoElem.GetScore(), Ts: protoElem.GetTs(),
+			ReplicaID: int16(protoElem.GetReplicaID()), Data: &data}
+	}
+	for _, protoRem := range topKProto.GetRems() {
+		rems[protoRem.GetId()] = clocksi.ClockSiTimestamp{}.FromBytes(protoRem.GetVc())
+	}
+	previousId := int32(math.MinInt32)
+	var currElemSet setTopKElement
+	for _, protoElem := range topKProto.GetNotTop() {
+		//data := protoElem.GetData()
+		if protoElem.GetId() != previousId {
+			currElemSet = make(setTopKElement)
+			previousId = protoElem.GetId()
+			notTop[previousId] = currElemSet
+		}
+		data := protoElem.GetData()
+		currElemSet.add(TopKElement{Id: protoElem.GetId(), Score: protoElem.GetScore(), Ts: protoElem.GetTs(),
+			ReplicaID: int16(protoElem.GetReplicaID()), Data: &data})
+	}
+	smallestProto := topKProto.GetSmallest()
+	smallestData := smallestProto.GetData()
+	smallestScore := TopKElement{Id: smallestProto.GetId(), Score: smallestProto.GetScore(), Ts: smallestProto.GetTs(),
+		ReplicaID: int16(smallestProto.GetReplicaID()), Data: &smallestData}
+	vc := clocksi.ClockSiTimestamp{}.FromBytes(topKProto.GetVc())
+
+	return (&TopKRmvCrdt{elems: elems, rems: rems, notInTop: notTop, smallestScore: smallestScore,
+		maxElems: int(topKProto.GetMaxElems()), vc: vc}).initializeFromSnapshot(ts, replicaID)
 }

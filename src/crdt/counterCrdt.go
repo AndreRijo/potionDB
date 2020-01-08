@@ -33,6 +33,8 @@ type DecrementEffect struct {
 	Change int32
 }
 
+func (crdt *CounterCrdt) GetCRDTType() proto.CRDTType { return proto.CRDTType_COUNTER }
+
 func (args Increment) GetCRDTType() proto.CRDTType { return proto.CRDTType_COUNTER }
 
 func (args Decrement) GetCRDTType() proto.CRDTType { return proto.CRDTType_COUNTER }
@@ -51,6 +53,12 @@ func (crdt *CounterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16)
 		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
 		value:                 0,
 	}
+}
+
+//Used to initialize when building a CRDT from a remote snapshot
+func (crdt *CounterCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID int16) (sameCRDT *CounterCrdt) {
+	crdt.genericInversibleCRDT = (&genericInversibleCRDT{}).initialize(startTs)
+	return crdt
 }
 
 func (crdt *CounterCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateArguments) (state State) {
@@ -175,4 +183,13 @@ func (downOp Increment) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
 
 func (downOp Decrement) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
 	return &proto.ProtoOpDownstream{CounterOp: &proto.ProtoCounterDownstream{IsInc: pb.Bool(false), Change: pb.Int32(downOp.Change)}}
+}
+
+func (crdt *CounterCrdt) ToProtoState() (protobuf *proto.ProtoState) {
+	value := crdt.value
+	return &proto.ProtoState{Counter: &proto.ProtoCounterState{Value: &value}}
+}
+
+func (crdt *CounterCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID int16) (newCRDT CRDT) {
+	return (&CounterCrdt{value: proto.GetCounter().GetValue()}).initializeFromSnapshot(ts, replicaID)
 }

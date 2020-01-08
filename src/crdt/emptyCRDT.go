@@ -12,6 +12,8 @@ type EmptyCrdt struct{}
 
 type EmptyState struct{}
 
+func (crdt *EmptyCrdt) GetCRDTType() proto.CRDTType { return proto.CRDTType_LWWREG }
+
 func (args EmptyState) GetCRDTType() proto.CRDTType { return proto.CRDTType_LWWREG }
 
 func (args EmptyState) GetREADType() proto.READType { return proto.READType_FULL }

@@ -37,6 +37,8 @@ const (
 	IS_MIN = false
 )
 
+func (crdt *MaxMinCrdt) GetCRDTType() proto.CRDTType { return proto.CRDTType_MAXMIN }
+
 func (args MaxAddValue) GetCRDTType() proto.CRDTType { return proto.CRDTType_MAXMIN }
 
 func (args MinAddValue) GetCRDTType() proto.CRDTType { return proto.CRDTType_MAXMIN }
@@ -55,6 +57,12 @@ func (crdt *MaxMinCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) 
 		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
 		topValue:              math.MaxInt64,
 	}
+}
+
+//Used to initialize when building a CRDT from a remote snapshot
+func (crdt *MaxMinCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID int16) (sameCRDT *MaxMinCrdt) {
+	crdt.genericInversibleCRDT = (&genericInversibleCRDT{}).initialize(startTs)
+	return crdt
 }
 
 func (crdt *MaxMinCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateArguments) (state State) {
@@ -216,4 +224,13 @@ func (downOp MaxAddValue) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) 
 
 func (downOp MinAddValue) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
 	return &proto.ProtoOpDownstream{MaxminOp: &proto.ProtoMaxMinDownstream{Min: &proto.ProtoMinDownstream{Value: pb.Int64(downOp.Value)}}}
+}
+
+func (crdt *MaxMinCrdt) ToProtoState() (protobuf *proto.ProtoState) {
+	topValue := crdt.topValue
+	return &proto.ProtoState{Maxmin: &proto.ProtoMaxMinState{Value: &topValue}}
+}
+
+func (crdt *MaxMinCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID int16) (newCRDT CRDT) {
+	return (&MaxMinCrdt{topValue: proto.GetMaxmin().GetValue()}).initializeFromSnapshot(ts, replicaID)
 }

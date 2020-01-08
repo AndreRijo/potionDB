@@ -39,6 +39,8 @@ type SetValueEffect struct {
 	ReplicaID int16
 }
 
+func (crdt *LwwRegisterCrdt) GetCRDTType() proto.CRDTType { return proto.CRDTType_LWWREG }
+
 func (args SetValue) GetCRDTType() proto.CRDTType { return proto.CRDTType_LWWREG }
 
 func (args DownstreamSetValue) GetCRDTType() proto.CRDTType { return proto.CRDTType_LWWREG }
@@ -58,6 +60,12 @@ func (crdt *LwwRegisterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID in
 		replicaID:             replicaID,
 		localReplicaID:        replicaID,
 	}
+}
+
+//Used to initialize when building a CRDT from a remote snapshot
+func (crdt *LwwRegisterCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID int16) (sameCRDT *LwwRegisterCrdt) {
+	crdt.genericInversibleCRDT, crdt.localReplicaID = (&genericInversibleCRDT{}).initialize(startTs), replicaID
+	return crdt
 }
 
 func (crdt *LwwRegisterCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateArguments) (state State) {
@@ -160,4 +168,15 @@ func (downOp DownstreamSetValue) ToReplicatorObj() (protobuf *proto.ProtoOpDowns
 	return &proto.ProtoOpDownstream{LwwregOp: &proto.ProtoLWWRegisterDownstream{
 		Value: []byte(downOp.NewValue.(string)), Ts: pb.Int64(downOp.Ts), ReplicaID: pb.Int32(int32(downOp.ReplicaID)),
 	}}
+}
+
+func (crdt *LwwRegisterCrdt) ToProtoState() (protobuf *proto.ProtoState) {
+	value, ts, replicaID := crdt.value, crdt.ts, int32(crdt.replicaID)
+	return &proto.ProtoState{Lwwreg: &proto.ProtoLWWRegState{Value: []byte((value).(string)), Ts: &ts, ReplicaID: &replicaID}}
+}
+
+func (crdt *LwwRegisterCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID int16) (newCRDT CRDT) {
+	lwwRegProto := proto.GetLwwreg()
+	return (&LwwRegisterCrdt{value: string(lwwRegProto.GetValue()), ts: lwwRegProto.GetTs(),
+		replicaID: int16(lwwRegProto.GetReplicaID()), localReplicaID: crdt.replicaID}).initializeFromSnapshot(ts, replicaID)
 }

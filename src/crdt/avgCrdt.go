@@ -35,6 +35,8 @@ type AddMultipleValue struct {
 
 type AddMultipleValueEffect AddMultipleValue
 
+func (crdt *AvgCrdt) GetCRDTType() proto.CRDTType { return proto.CRDTType_AVG }
+
 func (args AddValue) GetCRDTType() proto.CRDTType { return proto.CRDTType_AVG }
 
 func (args AddMultipleValue) GetCRDTType() proto.CRDTType { return proto.CRDTType_AVG }
@@ -60,6 +62,12 @@ func (crdt *AvgCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (ne
 		sum:                   0,
 		nAdds:                 0,
 	}
+}
+
+//Used to initialize when building a CRDT from a remote snapshot
+func (crdt *AvgCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID int16) (sameCRDT *AvgCrdt) {
+	crdt.genericInversibleCRDT = (&genericInversibleCRDT{}).initialize(startTs)
+	return crdt
 }
 
 func (crdt *AvgCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateArguments) (state State) {
@@ -191,4 +199,14 @@ func (downOp AddMultipleValue) FromReplicatorObj(protobuf *proto.ProtoOpDownstre
 
 func (downOp AddMultipleValue) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
 	return &proto.ProtoOpDownstream{AvgOp: &proto.ProtoAvgDownstream{SumValue: pb.Int64(downOp.SumValue), NAdds: pb.Int64(downOp.NAdds)}}
+}
+
+func (crdt *AvgCrdt) ToProtoState() (protobuf *proto.ProtoState) {
+	sum, nAdds := crdt.sum, crdt.nAdds
+	return &proto.ProtoState{Avg: &proto.ProtoAvgState{Sum: &sum, NAdds: &nAdds}}
+}
+
+func (crdt *AvgCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID int16) (newCRDT CRDT) {
+	protoAvg := proto.GetAvg()
+	return (&AvgCrdt{sum: protoAvg.GetSum(), nAdds: protoAvg.GetNAdds()}).initializeFromSnapshot(ts, replicaID)
 }

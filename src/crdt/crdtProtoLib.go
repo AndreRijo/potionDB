@@ -1,6 +1,7 @@
 package crdt
 
 import (
+	"clocksi"
 	"proto"
 )
 
@@ -49,6 +50,12 @@ type ProtoDownUpd interface {
 	ToReplicatorObj() (protobuf *proto.ProtoOpDownstream)
 
 	FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments)
+}
+
+type ProtoCRDT interface {
+	ToProtoState() (protobuf *proto.ProtoState)
+
+	FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID int16) (newCRDT CRDT)
 }
 
 /*****GLOBAL FUNCS*****/
@@ -190,6 +197,33 @@ func DownstreamProtoToAntidoteDownstream(protobuf *proto.ProtoOpDownstream, crdt
 	}
 
 	return
+}
+
+func StateProtoToCrdt(protobuf *proto.ProtoState, crdtType proto.CRDTType, ts *clocksi.Timestamp, replicaID int16) (crdt CRDT) {
+	switch crdtType {
+	case proto.CRDTType_COUNTER:
+		crdt = (&CounterCrdt{}).FromProtoState(protobuf, ts, replicaID)
+	case proto.CRDTType_LWWREG:
+		crdt = (&LwwRegisterCrdt{}).FromProtoState(protobuf, ts, replicaID)
+	case proto.CRDTType_ORSET:
+		crdt = (&SetAWCrdt{}).FromProtoState(protobuf, ts, replicaID)
+	case proto.CRDTType_ORMAP:
+		crdt = (&ORMapCrdt{}).FromProtoState(protobuf, ts, replicaID)
+	case proto.CRDTType_RRMAP:
+		crdt = (&RWEmbMapCrdt{}).FromProtoState(protobuf, ts, replicaID)
+	case proto.CRDTType_TOPK_RMV:
+		crdt = (&TopKRmvCrdt{}).FromProtoState(protobuf, ts, replicaID)
+	case proto.CRDTType_AVG:
+		crdt = (&AvgCrdt{}).FromProtoState(protobuf, ts, replicaID)
+	case proto.CRDTType_MAXMIN:
+		crdt = (&MaxMinCrdt{}).FromProtoState(protobuf, ts, replicaID)
+	}
+	return
+}
+
+func CrdtToProtoCRDT(keyHash uint64, crdt CRDT) (protobuf *proto.ProtoCRDT) {
+	protoState, crdtType := crdt.(ProtoCRDT).ToProtoState(), crdt.GetCRDTType()
+	return &proto.ProtoCRDT{KeyHash: &keyHash, Type: &crdtType, State: protoState}
 }
 
 /*****GLOBAL HELPER FUNCS*****/

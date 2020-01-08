@@ -17,6 +17,8 @@ type CRDT interface {
 	Downstream(updTs clocksi.Timestamp, downstreamArgs DownstreamArguments) (otherDownstreamArgs DownstreamArguments)
 
 	IsOperationWellTyped(args UpdateArguments) (ok bool, err error)
+
+	GetCRDTType() proto.CRDTType
 }
 
 //The idea is to include here the methods/data common to every CRDT. For now, there's... nothing

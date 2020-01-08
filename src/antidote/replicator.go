@@ -1,7 +1,13 @@
 package antidote
 
+//TODO: As of now, there's no filtering of buckets in the Materializer when replying to a RequestBucket.
+//I.e., crdts of all buckets are returned.
+//TODO: Think if, for joining replicas, there's any need for asking missing ops.
+
 import (
 	"clocksi"
+	fmt "fmt"
+	"proto"
 	"shared"
 	"strings"
 	"time"
@@ -18,6 +24,16 @@ type Replicator struct {
 	remoteConn *RemoteGroup
 	started    bool
 	replicaID  int16
+	buckets    []string
+	JoinInfo
+}
+
+type JoinInfo struct {
+	holdMsgs       []ReplicatorMsg
+	waitFor        int
+	holdReplyJoins []*ReplyJoin
+	nHoldJoins     int
+	allDone        bool
 }
 
 type ReplicatorMsg interface {
@@ -41,10 +57,43 @@ type RemoteTxn struct {
 	Upds map[int][]*UpdateObjectParams
 }
 
+//All join-related requests include a field to identify in the remoteGroup which connection the reply should be sent to.
+type Join struct {
+	SenderID   int16
+	ReplyID    int16
+	CommonBkts []string
+	ReqIP      string
+}
+
+type ReplyJoin struct {
+	SenderID   int16
+	ReplyID    int16
+	Clks       []clocksi.Timestamp
+	CommonBkts []string
+	ReqIP      string
+}
+
+type RequestBucket struct {
+	SenderID int16
+	ReplyID  int16
+	Buckets  []string
+	ReqIP    string
+}
+
+type ReplyBucket struct {
+	SenderID   int16
+	PartStates [][]*proto.ProtoCRDT
+	Clk        clocksi.Timestamp
+}
+
+type ReplyEmpty struct{}
+
 const (
-	tsSendDelay       time.Duration = 200 //milliseconds
-	cacheInitialSize                = 100
-	toSendInitialSize               = 10
+	tsSendDelay         time.Duration = 2000 //milliseconds
+	cacheInitialSize                  = 100
+	toSendInitialSize                 = 10
+	joinHoldInitialSize               = 100
+	DO_JOIN                           = "doJoin"
 )
 
 func (req NewReplicatorRequest) getSenderID() int16 {
@@ -53,6 +102,26 @@ func (req NewReplicatorRequest) getSenderID() int16 {
 
 func (req StableClock) getSenderID() int16 {
 	return req.SenderID
+}
+
+func (req Join) getSenderID() int16 {
+	return req.SenderID
+}
+
+func (req ReplyJoin) getSenderID() int16 {
+	return req.SenderID
+}
+
+func (req RequestBucket) getSenderID() int16 {
+	return req.SenderID
+}
+
+func (req ReplyBucket) getSenderID() int16 {
+	return req.SenderID
+}
+
+func (req ReplyEmpty) getSenderID() int16 {
+	return 0
 }
 
 func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, replicaID int16) {
@@ -75,6 +144,7 @@ func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, rep
 			ignore(err)
 			repl.remoteConn = remoteConn
 			repl.txnCache = make(map[int][]PairClockUpdates)
+			repl.buckets = bucketsToListen
 			dummyTs := clocksi.NewClockSiTimestamp(replicaID)
 			for id := 0; id < int(nGoRoutines); id++ {
 				cacheEntry := make([]PairClockUpdates, 1, cacheInitialSize)
@@ -83,8 +153,15 @@ func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, rep
 				repl.txnCache[id] = cacheEntry
 			}
 			repl.replicaID = replicaID
-			go repl.receiveRemoteTxns()
-			go repl.replicateCycle()
+
+			//Also skips the joining algorithm if there's no replica to join
+			if tools.SharedConfig.GetBoolConfig(DO_JOIN, true) && len(remoteConn.conns) > 0 {
+				repl.JoinInfo = JoinInfo{holdMsgs: make([]ReplicatorMsg, 0, joinHoldInitialSize), allDone: false, nHoldJoins: 0}
+				repl.joinGroup()
+			} else {
+				go repl.receiveRemoteTxns()
+				go repl.replicateCycle()
+			}
 		}
 	}
 }
@@ -96,7 +173,9 @@ func (repl *Replicator) replicateCycle() {
 		repl.getNewTxns()
 		//count++
 		toSend := repl.preparateDataToSend()
-		//fmt.Println("[REPLICATOR]Still sending ops.", "Number of remote txns:", len(toSend))
+		if len(toSend) > 0 {
+			fmt.Println("[REPLICATOR]Still sending ops.", "Number of remote txns:", len(toSend))
+		}
 		repl.sendTxns(toSend)
 		tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "finishing replicateCycle")
 		time.Sleep(tsSendDelay * time.Millisecond)
@@ -234,235 +313,187 @@ func (repl *Replicator) receiveRemoteTxns() {
 	for {
 		tools.FancyInfoPrint(tools.REPL_PRINT, repl.replicaID, "iterating receiveRemoteTxns")
 		remoteReq := repl.remoteConn.GetNextRemoteRequest()
-
-		switch typedReq := remoteReq.(type) {
-		case *StableClock:
-			repl.tm.SendRemoteMsg(TMRemoteClk{
-				ReplicaID: typedReq.SenderID,
-				StableTs:  typedReq.Ts,
-			})
-		case *NewReplicatorRequest:
-			repl.tm.SendRemoteMsg(TMRemotePartTxn{
-				ReplicaID:   typedReq.SenderID,
-				PartitionID: typedReq.PartitionID,
-				Upds:        typedReq.Upds,
-				Timestamp:   typedReq.Timestamp,
-			})
-		default:
-			tools.FancyErrPrint(tools.REPL_PRINT, repl.replicaID, "failed to process remoteConnection message - unknown msg type.")
-		}
-
-		//time.Sleep(5000 * time.Millisecond)
-		tools.FancyInfoPrint(tools.REPL_PRINT, repl.replicaID, "receiveRemoteTxns finished processing request")
+		repl.handleRemoteRequest(remoteReq)
 	}
 }
 
-/*
-package antidote
-
-import (
-	"clocksi"
-	"time"
-	"tools"
-)
-
-type Replicator struct {
-	tm              *TransactionManager //to send request to downstream transactions
-	localPartitions []Logger
-	//remoteReps      []chan ReplicatorRequest
-	txnCache    map[int][]PairClockUpdates //int: partitionID
-	lastSentClk clocksi.Timestamp
-	//receiveReplChan chan ReplicatorRequest
-	remoteConn *RemoteConn
-	started    bool
-	replicaID  int64
-}
-
-type NewReplicatorRequest struct {
-	SenderID    int64
-	Txns        []NewRemoteTxns
-	PartitionID int64
-	StableTs    int64
-}
-
-type NewRemoteTxns struct {
-	clocksi.Timestamp
-	Upds []*UpdateObjectParams
-}
-
-type ReplicatorRequest struct {
-	SenderID int64
-	Txns     []RemoteTxns
-	StableTs int64
-}
-
-type RemoteTxns struct {
-	clocksi.Timestamp
-	Upds *map[int][]UpdateObjectParams
-}
-
-const (
-	tsSendDelay       time.Duration = 2000 //milliseconds
-	cacheInitialSize                = 100
-	toSendInitialSize               = 10
-)
-
-func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, replicaID int64) {
-	if !repl.started {
-		repl.tm = tm
-		repl.started = true
-		//nGoRoutines: number of partitions (defined in Materializer)
-		repl.localPartitions = loggers
-		//TODO: Some way to know how many and which remoteReps there is
-		//repl.remoteReps = make([]chan ReplicatorRequest, 0)
-		remoteConn, err := CreateRemoteConnStruct(replicaID)
-		//TODO: Not ignore err
-		ignore(err)
-		repl.remoteConn = remoteConn
-		repl.txnCache = make(map[int][]PairClockUpdates)
-		for id := 0; id < int(nGoRoutines); id++ {
-			repl.txnCache[id] = make([]PairClockUpdates, 0, cacheInitialSize)
-		}
-		repl.lastSentClk = clocksi.NewClockSiTimestamp(replicaID)
-		//repl.receiveReplChan = make(chan ReplicatorRequest)
-		repl.replicaID = replicaID
-		go repl.receiveRemoteTxns()
-		go repl.replicateCycle()
-	}
-}
-
-//All replicators must be added before any transaction is executed, otherwise new replicators may not receive old transactions
-//I need to test this and/or read rabbitmq docs to be sure of this
-func (repl *Replicator) AddRemoteReplicator(remoteID int64) {
-	//repl.remoteReps = append(repl.remoteReps, remoteRepl)
-	repl.remoteConn.listenToReplica(remoteID)
-}
-
-func (repl *Replicator) replicateCycle() {
-	for {
-		tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "starting replicateCycle")
-		repl.getNewTxns()
-		toSend, stableTs := repl.preparateDataToSend()
-		repl.sendTxns(toSend, stableTs)
-		tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "finishing replicateCycle")
-		time.Sleep(tsSendDelay * time.Millisecond)
-	}
-}
-
-func (repl *Replicator) getNewTxns() {
-	tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "starting getNewTxns()")
-	replyChans := make([]chan StableClkUpdatesPair, len(repl.localPartitions))
-
-	//Send request for txns
-	for id, part := range repl.localPartitions {
-		partEntry := repl.txnCache[id]
-		replyChans[id] = make(chan StableClkUpdatesPair)
-		var lastClk clocksi.Timestamp
-		if len(partEntry) > 0 {
-			lastClk = *partEntry[len(partEntry)-1].clk
-		} else {
-			lastClk = repl.lastSentClk
-		}
-		part.SendLoggerRequest(LoggerRequest{
-			LogRequestArgs: LogTxnArgs{
-				lastClock: lastClk,
-				ReplyChan: replyChans[id],
-			},
+func (repl *Replicator) handleRemoteRequest(remoteReq ReplicatorMsg) {
+	switch typedReq := remoteReq.(type) {
+	case *StableClock:
+		repl.tm.SendRemoteMsg(TMRemoteClk{
+			ReplicaID: typedReq.SenderID,
+			StableTs:  typedReq.Ts,
 		})
+	case *NewReplicatorRequest:
+		fmt.Println("New replicated OPs")
+		repl.tm.SendRemoteMsg(TMRemotePartTxn{
+			ReplicaID:   typedReq.SenderID,
+			PartitionID: typedReq.PartitionID,
+			Upds:        typedReq.Upds,
+			Timestamp:   typedReq.Timestamp,
+		})
+	case *Join:
+		go repl.handleJoin(typedReq)
+	case *RequestBucket:
+		go repl.handleRequestBucket(typedReq)
+	case *ReplyJoin:
+		fmt.Println("Unexpected ReplyJoin", *typedReq)
+	case *ReplyBucket:
+		fmt.Println("Unexpected ReplyBucket", *typedReq)
+	case *ReplyEmpty:
+		fmt.Println("Unexpected ReplyEmpty")
+	default:
+		tools.FancyErrPrint(tools.REPL_PRINT, repl.replicaID, "failed to process remoteConnection message - unknown msg type.")
+		tools.FancyErrPrint(tools.REPL_PRINT, repl.replicaID, typedReq)
 	}
-	tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "getNewTxns() second part")
 
-	//Receive replies and cache them
-	for id, replyChan := range replyChans {
-		reply := <-replyChan
-		cacheEntry := repl.txnCache[id]
-		//Remove last entry which is the previous, old, stable clock
-		if len(cacheEntry) > 0 {
-			cacheEntry = cacheEntry[:len(cacheEntry)-1]
-		}
-		cacheEntry = append(cacheEntry, reply.upds...)
-		repl.txnCache[id] = append(cacheEntry, PairClockUpdates{clk: &reply.stableClock, upds: &[]UpdateObjectParams{}})
-	}
-	tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "getNewTxns() finish")
+	//time.Sleep(5000 * time.Millisecond)
+	tools.FancyInfoPrint(tools.REPL_PRINT, repl.replicaID, "receiveRemoteTxns finished processing request")
 }
 
-func (repl *Replicator) preparateDataToSend() (toSend []RemoteTxns, stableTs int64) {
-	tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "starting prepareDataToSend")
-	toSend = make([]RemoteTxns, 0, toSendInitialSize)
-	foundStableClk := false
-	for !foundStableClk {
-		minClk := *repl.txnCache[0][0].clk //Using first entry of first partition as initial value
-		var txnUpdates map[int][]UpdateObjectParams = make(map[int][]UpdateObjectParams)
-		//tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "nPartitions:", len(repl.localPartitions))
-		for id := 0; id < len(repl.localPartitions); id++ {
-			partCache := repl.txnCache[id]
+/***** JOINING EXISTING SERVERS LOGIC *****/
 
-			//tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "non empty cache entry:", *partCache[0].clk, *partCache[0].upds)
-			firstEntry := partCache[0]
-			clkCompare := (*firstEntry.clk).Compare(minClk)
-			if clkCompare == clocksi.LowerTs {
-				//Clock update, this partition has no further transactions. If no smaller clk is found, then this must be the last iteration
-				if len(*firstEntry.upds) == 0 {
-					foundStableClk = true
-				} else {
-					foundStableClk = false
-				}
-				minClk = *firstEntry.clk
-				txnUpdates = nil
-				txnUpdates = make(map[int][]UpdateObjectParams)
-				txnUpdates[id] = *firstEntry.upds
-			} else if clkCompare == clocksi.EqualTs {
-				txnUpdates[id] = *firstEntry.upds
-				if len(*firstEntry.upds) == 0 {
-					foundStableClk = true
-				}
+/***** Existing server logic *****/
+
+func (repl *Replicator) handleJoin(req *Join) {
+	joinChan := make(chan TimestampPartIdPair, len(repl.localPartitions))
+	repl.tm.mat.SendRequestToAllChannels(MaterializerRequest{MatCommitedClkArgs{ReplyChan: joinChan}})
+	replyJoin := ReplyJoin{SenderID: repl.replicaID, CommonBkts: req.CommonBkts,
+		Clks: make([]clocksi.Timestamp, len(repl.localPartitions)), ReqIP: tools.SharedConfig.GetConfig("localRabbitMQAddress")}
+
+	sendTo := repl.remoteConn.AddReplica(req.ReqIP, repl.buckets, req.SenderID)
+	for range repl.localPartitions {
+		reply := <-joinChan
+		replyJoin.Clks[reply.partID] = reply.Timestamp
+	}
+	repl.remoteConn.SendReplyJoin(replyJoin, sendTo)
+}
+
+func (repl *Replicator) handleRequestBucket(req *RequestBucket) {
+	bktMap := make(map[string]struct{})
+	for _, bkt := range req.Buckets {
+		bktMap[bkt] = struct{}{}
+	}
+	tmRequest := TMGetSnapshot{Buckets: bktMap, ReplyChan: make(chan TMGetSnapshotReply)}
+	repl.tm.SendRemoteMsg(tmRequest)
+	snapshotReply := <-tmRequest.ReplyChan
+	replyBucket := ReplyBucket{SenderID: repl.replicaID, PartStates: snapshotReply.PartStates, Clk: snapshotReply.Timestamp}
+	repl.remoteConn.SendReplyBucket(replyBucket, req.ReqIP)
+}
+
+/***** New server logic *****/
+
+//TODO: Empty case/first replica to replicate a set of buckets
+func (repl *Replicator) handleReplyJoin(req *ReplyJoin) {
+	fmt.Println("Handling replyJoin")
+	repl.holdReplyJoins[repl.nHoldJoins] = req
+	repl.waitFor--
+	repl.nHoldJoins++
+	if repl.waitFor == 0 {
+		//Got all the replies, so we can now ask for the buckets
+		repl.askBuckets()
+	}
+}
+
+func (repl *Replicator) handleReplyBucket(req *ReplyBucket) {
+	//Need to count how many were received in order to, at the end, return to the "normal replicator state"
+	repl.tm.SendRemoteMsg(TMApplySnapshot{Timestamp: req.Clk, PartStates: req.PartStates})
+	repl.waitFor--
+	if repl.waitFor == 0 {
+		repl.allDone = true
+	}
+}
+
+func (repl *Replicator) handleReplyEmpty() {
+	repl.waitFor--
+	if repl.waitFor == 0 && repl.nHoldJoins == 0 {
+		//Everyone replied empty. Thus, no need to ask for buckets
+		repl.allDone = true
+		fmt.Println("ReplyEmpty, setting all done to true")
+	} else if repl.waitFor == 0 {
+		fmt.Println("Hold joins:", len(repl.holdReplyJoins), repl.holdReplyJoins)
+		//At least one of the replies wasn't empty, thus we should ask for buckets
+		repl.askBuckets()
+	}
+	fmt.Println("ReplyEmpty")
+}
+
+func (repl *Replicator) createConnAndReplyEmpty(req *Join) {
+	sendTo := repl.remoteConn.AddReplica(req.ReqIP, repl.buckets, req.SenderID)
+	repl.remoteConn.SendReplyEmpty(sendTo)
+}
+
+func (repl *Replicator) joinGroup() {
+	fmt.Println("joinGroup")
+	go repl.queueRemoteRequests()
+	repl.waitFor = len(repl.remoteConn.conns)
+	repl.holdReplyJoins = make([]*ReplyJoin, repl.waitFor)
+	fmt.Println("Requesting remoteGroup to send join")
+	repl.remoteConn.SendJoin(repl.buckets, repl.replicaID)
+}
+
+//While the replica is in joining process, this method is used to queue any non-join related msg to a queue.
+//Join msgs are processed differently depending on its type.
+func (repl *Replicator) queueRemoteRequests() {
+	var msg ReplicatorMsg
+	for !repl.allDone {
+		msg = repl.remoteConn.GetNextRemoteRequest()
+		switch typedMsg := msg.(type) {
+		case *ReplyJoin:
+			fmt.Println("[REPL]ReplyJoin")
+			repl.handleReplyJoin(typedMsg)
+		case *ReplyBucket:
+			fmt.Println("[REPL]ReplyBucket")
+			repl.handleReplyBucket(typedMsg)
+		case *Join:
+			fmt.Println("[REPL]Join")
+			//fmt.Println(typedMsg.ReplyID)
+			//repl.remoteConn.SendReplyEmpty(typedMsg.ReplyID)
+			repl.createConnAndReplyEmpty(typedMsg)
+		case *ReplyEmpty:
+			fmt.Println("[REPL]ReplyEmpty")
+			//Another replica that is also joining
+			repl.handleReplyEmpty()
+		default:
+			fmt.Println("[REPL]Default")
+			repl.holdMsgs = append(repl.holdMsgs, msg)
+		}
+	}
+	fmt.Println("Leaving queueRemoteRequests")
+	repl.tm.SendRemoteMsg(TMStart{})
+	//Handle messages on hold
+	for _, holdReq := range repl.holdMsgs {
+		repl.handleRemoteRequest(holdReq)
+	}
+	repl.JoinInfo = JoinInfo{}
+	go repl.receiveRemoteTxns()
+	go repl.replicateCycle()
+}
+
+func (repl *Replicator) askBuckets() {
+	//For each bucket, choose the replica with highest clock.
+	//If there's no clock for a bucket, then we can assume that bucket has no content yet anywhere.
+	bestBktClks := make(map[string]clocksi.Timestamp)
+	askTo := make(map[string]string) //bucket -> ip
+	repl.holdReplyJoins = repl.holdReplyJoins[0:repl.nHoldJoins]
+	for _, replyJoin := range repl.holdReplyJoins {
+		for i, clk := range replyJoin.Clks {
+			bkt := replyJoin.CommonBkts[i]
+			if clk.IsHigher(bestBktClks[bkt]) {
+				bestBktClks[bkt] = clk
+				askTo[bkt] = replyJoin.ReqIP
 			}
 		}
-		if !foundStableClk {
-			//Safe to include the actual txn's clock in the list to send. We can remove entry from cache
-			tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "appending upds. Upds:", txnUpdates)
-			toSend = append(toSend, RemoteTxns{Timestamp: minClk, Upds: &txnUpdates})
-		} else {
-			tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "storing stableClk as at least one entry was empty. Clk:", minClk.GetPos(repl.replicaID))
-			stableTs = minClk.GetPos(repl.replicaID)
-		}
-		for id := range txnUpdates {
-			repl.txnCache[id] = repl.txnCache[id][1:]
-		}
 	}
-	tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "finished prepareDataToSend")
-	return
-}
-
-func (repl *Replicator) sendTxns(toSend []RemoteTxns, stableTs int64) {
-	/*
-		fmt.Print(tools.REPL_PRINT+string(repl.replicaID)+"]"+tools.DEBUG, "starting sendTxns:[")
-		for _, txn := range toSend {
-			fmt.Print("{", txn.Timestamp, "|", *txn.Upds, "},")
-		}
-		fmt.Println("]")
-*/
-/*
-	for _, remoteChan := range repl.remoteReps {
-		remoteChan <- ReplicatorRequest{SenderID: repl.replicaID, Txns: toSend, StableTs: stableTs}
+	//"Invert" askTo, i.e., get the mapping of replica -> bkts.
+	replicaToBkt := make(map[string][]string)
+	for bkt, replica := range askTo {
+		replicaToBkt[replica] = append(replicaToBkt[replica], bkt)
 	}
-*/
-/*
-	repl.remoteConn.SendReplicatorRequest(&ReplicatorRequest{SenderID: repl.replicaID, Txns: toSend, StableTs: stableTs})
-	tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "finished sendTxns")
-}
-
-func (repl *Replicator) receiveRemoteTxns() {
-	for {
-		tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "iterating receiveRemoteTxns")
-		//remoteReq := <-repl.receiveReplChan
-		remoteReq := repl.remoteConn.GetNextRemoteRequest()
-		repl.tm.SendRemoteTxnRequest(TMRemoteTxn{
-			ReplicaID: remoteReq.SenderID,
-			Upds:      remoteReq.Txns,
-			StableTs:  remoteReq.StableTs,
-		})
-		tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "receiveRemoteTxns finished processing request")
+	repl.waitFor = len(replicaToBkt)
+	ownIP := tools.SharedConfig.GetConfig("localRabbitMQAddress")
+	//Finally, send requestBkt msgs
+	for askReplicaIP, buckets := range replicaToBkt {
+		repl.remoteConn.SendRequestBucket(RequestBucket{Buckets: buckets, SenderID: repl.replicaID, ReqIP: ownIP}, askReplicaIP)
 	}
 }
-*/
