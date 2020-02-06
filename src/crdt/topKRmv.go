@@ -374,7 +374,6 @@ func (crdt *TopKRmvCrdt) applyDownstream(downstreamArgs UpdateArguments) (effect
 //Effect addToTop (include previousMin and previousEntry, if any)?
 //Effect addToNotTop
 func (crdt *TopKRmvCrdt) applyAdd(op *DownstreamTopKAdd) (effect *Effect, otherDownstreamArgs DownstreamArguments) {
-	//fmt.Println("Applying topK add")
 	var effectValue Effect
 	oldTs := crdt.vc.GetPos(op.ReplicaID)
 	if op.Data == nil {

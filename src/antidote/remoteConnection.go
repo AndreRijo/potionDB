@@ -5,6 +5,7 @@ import (
 	"net"
 	"proto"
 	"strconv"
+	"strings"
 	"time"
 	"tools"
 
@@ -256,6 +257,12 @@ func (remote *RemoteConn) startReceiver() {
 				tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Ignored received request as it was sent by myself")
 			} else {
 		*/
+		if strings.HasSuffix(data.RoutingKey, "INDEX") {
+			fmt.Println("[RC]Received index")
+		}
+		if strings.Contains(data.RoutingKey, ".") {
+			fmt.Println("[RC]Received bucket", data.RoutingKey[strings.Index(data.RoutingKey, "."):])
+		}
 		switch data.RoutingKey {
 		case clockTopic:
 			remote.handleReceivedStableClock(data.Body)

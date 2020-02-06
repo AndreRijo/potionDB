@@ -102,6 +102,8 @@ func connectToIp(ip string, index int, bucketsToListen []string, replicaID int16
 	connChan <- reply
 }
 
+//TODO: This still has problems, albeit minor - the ip used is the one specified in localRabbitMQAddress, which is often localhost.
+//That means the ip will always appear as localhost and, thus, be known unless the server port is different.
 //Adds a replica if it isn't already known - a joining replica might be already known e.g. when two new replicas start at the same time, aware of each other.
 func (group *RemoteGroup) AddReplica(ip string, bucketsToListen []string, joiningReplicaID int16) (connID int16) {
 	if id, has := group.knownIPs[ip]; has {

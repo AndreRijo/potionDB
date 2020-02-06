@@ -14,6 +14,12 @@ RUN go install main
 #Final image
 FROM rabbitmq
 
+# TC Support for testing. Must be ran here since golang includes this, but not rabbitmq.
+RUN apt-get update && apt-get install -y \
+	iproute2 \
+	iputils-ping \
+	&& rm -rf /var/lib/apt/lists/*
+
 #Copy both go and potionDB binaries
 COPY --from=base /usr/local/go/bin/ /go/
 COPY --from=base /go/bin/ /go/bin/
@@ -31,6 +37,7 @@ ENV CONFIG "/go/bin/configs/cluster/default"
 #ENV SERVERS, ENV RABBITMQ
 ENV RABBITMQ_WAIT 10s
 ENV RABBITMQ_VHOST /crdts
+ENV ADDED_LATENCY 0
 
 #Add config folders late to avoid having to rebuild multiple images
 ADD configs /go/bin/configs

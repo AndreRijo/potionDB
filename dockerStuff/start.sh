@@ -7,6 +7,12 @@
 #echo $CONFIG ;
 #echo $SERVERS ;
 #echo $RABBITMQ ;
+
+if [ "${ADDED_LATENCY}" -gt "0" ]
+then
+	tc qdisc add dev eth0 root netem delay 500ms ; echo "Artificial latency set."
+fi
+
 sleep $RABBITMQ_WAIT 
 rabbitmqctl add_vhost $RABBITMQ_VHOST ;
 sleep 5s 

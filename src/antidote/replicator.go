@@ -325,7 +325,6 @@ func (repl *Replicator) handleRemoteRequest(remoteReq ReplicatorMsg) {
 			StableTs:  typedReq.Ts,
 		})
 	case *NewReplicatorRequest:
-		fmt.Println("New replicated OPs")
 		repl.tm.SendRemoteMsg(TMRemotePartTxn{
 			ReplicaID:   typedReq.SenderID,
 			PartitionID: typedReq.PartitionID,
@@ -356,14 +355,14 @@ func (repl *Replicator) handleRemoteRequest(remoteReq ReplicatorMsg) {
 /***** Existing server logic *****/
 
 func (repl *Replicator) handleJoin(req *Join) {
-	joinChan := make(chan TimestampPartIdPair, len(repl.localPartitions))
-	repl.tm.mat.SendRequestToAllChannels(MaterializerRequest{MatCommitedClkArgs{ReplyChan: joinChan}})
+	yunoChan := make(chan TimestampPartIdPair, len(repl.localPartitions))
+	repl.tm.mat.SendRequestToAllChannels(MaterializerRequest{MatCommitedClkArgs{ReplyChan: yunoChan}})
 	replyJoin := ReplyJoin{SenderID: repl.replicaID, CommonBkts: req.CommonBkts,
 		Clks: make([]clocksi.Timestamp, len(repl.localPartitions)), ReqIP: tools.SharedConfig.GetConfig("localRabbitMQAddress")}
 
 	sendTo := repl.remoteConn.AddReplica(req.ReqIP, repl.buckets, req.SenderID)
 	for range repl.localPartitions {
-		reply := <-joinChan
+		reply := <-yunoChan
 		replyJoin.Clks[reply.partID] = reply.Timestamp
 	}
 	repl.remoteConn.SendReplyJoin(replyJoin, sendTo)
@@ -378,6 +377,7 @@ func (repl *Replicator) handleRequestBucket(req *RequestBucket) {
 	repl.tm.SendRemoteMsg(tmRequest)
 	snapshotReply := <-tmRequest.ReplyChan
 	replyBucket := ReplyBucket{SenderID: repl.replicaID, PartStates: snapshotReply.PartStates, Clk: snapshotReply.Timestamp}
+	//fmt.Println("[REPL]Buckets:", replyBucket)
 	repl.remoteConn.SendReplyBucket(replyBucket, req.ReqIP)
 }
 
@@ -476,14 +476,34 @@ func (repl *Replicator) askBuckets() {
 	bestBktClks := make(map[string]clocksi.Timestamp)
 	askTo := make(map[string]string) //bucket -> ip
 	repl.holdReplyJoins = repl.holdReplyJoins[0:repl.nHoldJoins]
+	bktOffset := 0
 	for _, replyJoin := range repl.holdReplyJoins {
-		for i, clk := range replyJoin.Clks {
-			bkt := replyJoin.CommonBkts[i]
-			if clk.IsHigher(bestBktClks[bkt]) {
-				bestBktClks[bkt] = clk
+		for _, bkt := range replyJoin.CommonBkts {
+			//Need min of a partition. Onlt afterwards I can compare with the other replicas'
+			var smallestClk clocksi.Timestamp = replyJoin.Clks[bktOffset]
+			for _, clk := range replyJoin.Clks[bktOffset+1 : bktOffset+int(nGoRoutines)] {
+				if clk.IsLower(smallestClk) {
+					smallestClk = clk
+					//askTo[bkt] = replyJoin.ReqIP
+				}
+			}
+			//Now, compare with other replicas'
+			if smallestClk.IsHigher(bestBktClks[bkt]) {
+				bestBktClks[bkt] = smallestClk
 				askTo[bkt] = replyJoin.ReqIP
 			}
+
 		}
+		/*
+			fmt.Println("Processing: ", *replyJoin)
+			for i, clk := range replyJoin.Clks {
+				bkt := replyJoin.CommonBkts[i]
+				if clk.IsHigher(bestBktClks[bkt]) {
+					bestBktClks[bkt] = clk
+					askTo[bkt] = replyJoin.ReqIP
+				}
+			}
+		*/
 	}
 	//"Invert" askTo, i.e., get the mapping of replica -> bkts.
 	replicaToBkt := make(map[string][]string)
