@@ -731,7 +731,6 @@ func ignore(any ...interface{}) {
 }
 
 func (tm *TransactionManager) applyRemoteClk(request *TMRemoteClk) {
-	fmt.Println("[TM]Applying remote clk.")
 	//All txns were applied, so it's safe to update the local clock of both TM and materializer.
 	if tm.downstreamQueue[request.ReplicaID] == nil {
 		tm.localClock.Lock()
@@ -754,7 +753,6 @@ func (tm *TransactionManager) applyRemoteClk(request *TMRemoteClk) {
 }
 
 func (tm *TransactionManager) applyRemoteTxn(request *TMRemotePartTxn) {
-	fmt.Println("[TM]Applying remote txn with timestamp.", request.Timestamp.ToString())
 	tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Started applying remote txn. Local clk:", tm.localClock.Timestamp, ". Remote clk:", request.Timestamp)
 	nPartitionsSoFar, has := tm.nPartitionsForRemoteTxn[request.ReplicaID]
 	if !has {

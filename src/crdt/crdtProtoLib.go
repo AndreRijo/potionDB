@@ -253,10 +253,16 @@ func updateEmbMapProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation) (op U
 }
 
 func updateTopkProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
-	if len(protobuf.GetTopkrmvop().GetAdds()) > 0 {
-		return TopKAdd{}.FromUpdateObject(protobuf)
+	if adds := protobuf.GetTopkrmvop().GetAdds(); len(adds) > 0 {
+		if len(adds) == 1 {
+			return TopKAdd{}.FromUpdateObject(protobuf)
+		}
+		return TopKAddAll{}.FromUpdateObject(protobuf)
 	}
-	return TopKRemove{}.FromUpdateObject(protobuf)
+	if len(protobuf.GetTopkrmvop().GetRems()) == 1 {
+		return TopKRemove{}.FromUpdateObject(protobuf)
+	}
+	return TopKRemoveAll{}.FromUpdateObject(protobuf)
 }
 
 func updateMaxMinProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -338,9 +344,16 @@ func downstreamProtoRRMapToAntidoteDownstream(protobuf *proto.ProtoOpDownstream)
 
 func downstreamProtoTopKToAntidoteDownstream(protobuf *proto.ProtoOpDownstream) (downOp DownstreamArguments) {
 	if adds := protobuf.GetTopkrmvOp().GetAdds(); adds != nil {
-		return DownstreamTopKAdd{}.FromReplicatorObj(protobuf)
+		if len(adds) == 1 {
+			return DownstreamTopKAdd{}.FromReplicatorObj(protobuf)
+		} else {
+			return DownstreamTopKAddAll{}.FromReplicatorObj(protobuf)
+		}
 	}
-	return DownstreamTopKRemove{}.FromReplicatorObj(protobuf)
+	if len(protobuf.GetTopkrmvOp().GetRems().GetIds()) == 1 {
+		return DownstreamTopKRemove{}.FromReplicatorObj(protobuf)
+	}
+	return DownstreamTopKRemoveAll{}.FromReplicatorObj(protobuf)
 }
 
 func downstreamProtoMaxMinToAntidoteDownstream(protobuf *proto.ProtoOpDownstream) (downOp DownstreamArguments) {

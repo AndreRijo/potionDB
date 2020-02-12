@@ -58,7 +58,12 @@ message ProtoORMapDownstream {
 
 message ProtoTopKRmvDownstream {
     repeated ProtoTopKElement adds = 1;
-    repeated ProtoTopKIdVc rems = 2;
+    optional ProtoTopKRmvRemove rems = 2;
+}
+
+message ProtoTopKRmvRemove {
+    repeated bytes vcs = 1;  //If client-generated remove: only 1 entry. If topk-generated due to add: 1 entry per id.
+    repeated int32 ids = 2;
 }
 
 message ProtoAvgDownstream {
