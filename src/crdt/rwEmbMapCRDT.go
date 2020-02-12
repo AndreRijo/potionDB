@@ -129,6 +129,8 @@ type RWEmbMapRemoveAllEffect struct {
 	PreviousClk  int64 //Previous value of rmvClock[replicaID]
 }
 
+func (crdt *RWEmbMapCrdt) GetCRDTType() proto.CRDTType { return proto.CRDTType_RRMAP }
+
 //Upds
 func (args EmbMapUpdate) GetCRDTType() proto.CRDTType { return proto.CRDTType_RRMAP }
 
@@ -180,6 +182,12 @@ func (crdt *RWEmbMapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16
 	}
 	newCrdt = crdt
 	return
+}
+
+//Used to initialize when building a CRDT from a remote snapshot
+func (crdt *RWEmbMapCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID int16) (sameCRDT *RWEmbMapCrdt) {
+	crdt.genericInversibleCRDT, crdt.replicaID = (&genericInversibleCRDT{}).initialize(startTs), replicaID
+	return crdt
 }
 
 func (crdt *RWEmbMapCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateArguments) (state State) {
@@ -1042,4 +1050,46 @@ func (downOp DownstreamRWEmbMapRemoveAll) ToReplicatorObj() (protobuf *proto.Pro
 	return &proto.ProtoOpDownstream{RwembmapOp: &proto.ProtoRWEmbMapDownstream{
 		Rems: &proto.ProtoRWEmbMapRemoves{Keys: downOp.Rems, ReplicaID: pb.Int32(int32(downOp.ReplicaID)), Ts: pb.Int64(downOp.Ts)},
 	}}
+}
+
+func (crdt *RWEmbMapCrdt) ToProtoState() (protobuf *proto.ProtoState) {
+	protoCRDTs, protoRems, protoClk := make([]*proto.ProtoEmbMapEntry, len(crdt.entries)), make([]*proto.ProtoEmbMapRemove, len(crdt.removes)), crdt.rmvClock.ToBytes()
+	i, j, k := 0, 0, 0
+	var currRmvClk []*proto.ProtoStableClock
+	for key, crdt := range crdt.entries {
+		crdtType := crdt.GetCRDTType()
+		protoCRDTs[i] = &proto.ProtoEmbMapEntry{Key: &key, Type: &crdtType, State: (crdt.(ProtoCRDT)).ToProtoState()}
+		i++
+	}
+	for key, rmvMap := range crdt.removes {
+		currRmvClk = make([]*proto.ProtoStableClock, len(rmvMap))
+		for replicaID, markedTs := range rmvMap {
+			currRmvClk[k] = &proto.ProtoStableClock{SenderID: pb.Int32(int32(replicaID)), ReplicaTs: &markedTs.ts}
+			k++
+		}
+		protoRems[j] = &proto.ProtoEmbMapRemove{Key: &key, Clks: currRmvClk}
+		j++
+	}
+
+	return &proto.ProtoState{Embmap: &proto.ProtoEmbMapState{Crdts: protoCRDTs, Removes: protoRems, RmvClock: protoClk}}
+}
+
+func (crdt *RWEmbMapCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID int16) (newCRDT CRDT) {
+	protoMap := proto.GetEmbmap()
+	protoCRDTs, protoRmvs, protoClk := protoMap.GetCrdts(), protoMap.GetRemoves(), protoMap.GetRmvClock()
+	entries, removes := make(map[string]CRDT, len(protoCRDTs)), make(map[string]map[int16]*markedTimestamp, len(protoRmvs))
+	var currRmvMap map[int16]*markedTimestamp
+	for _, protoEntry := range protoCRDTs {
+		entries[protoEntry.GetKey()] = StateProtoToCrdt(protoEntry.GetState(), protoEntry.GetType(), ts, replicaID)
+	}
+	for _, protoRmv := range protoRmvs {
+		currRmvMap = make(map[int16]*markedTimestamp)
+		for _, clkProto := range protoRmv.GetClks() {
+			currRmvMap[int16(clkProto.GetSenderID())] = &markedTimestamp{ts: clkProto.GetReplicaTs(), mark: true}
+		}
+		removes[protoRmv.GetKey()] = currRmvMap
+	}
+
+	return (&RWEmbMapCrdt{entries: entries, removes: removes, rmvClock: clocksi.ClockSiTimestamp{}.FromBytes(protoClk),
+		replicaID: crdt.replicaID}).initializeFromSnapshot(ts, replicaID)
 }

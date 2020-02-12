@@ -1,6 +1,7 @@
 package crdt
 
 import (
+	"clocksi"
 	"proto"
 )
 
@@ -49,6 +50,12 @@ type ProtoDownUpd interface {
 	ToReplicatorObj() (protobuf *proto.ProtoOpDownstream)
 
 	FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments)
+}
+
+type ProtoCRDT interface {
+	ToProtoState() (protobuf *proto.ProtoState)
+
+	FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID int16) (newCRDT CRDT)
 }
 
 /*****GLOBAL FUNCS*****/
@@ -192,6 +199,33 @@ func DownstreamProtoToAntidoteDownstream(protobuf *proto.ProtoOpDownstream, crdt
 	return
 }
 
+func StateProtoToCrdt(protobuf *proto.ProtoState, crdtType proto.CRDTType, ts *clocksi.Timestamp, replicaID int16) (crdt CRDT) {
+	switch crdtType {
+	case proto.CRDTType_COUNTER:
+		crdt = (&CounterCrdt{}).FromProtoState(protobuf, ts, replicaID)
+	case proto.CRDTType_LWWREG:
+		crdt = (&LwwRegisterCrdt{}).FromProtoState(protobuf, ts, replicaID)
+	case proto.CRDTType_ORSET:
+		crdt = (&SetAWCrdt{}).FromProtoState(protobuf, ts, replicaID)
+	case proto.CRDTType_ORMAP:
+		crdt = (&ORMapCrdt{}).FromProtoState(protobuf, ts, replicaID)
+	case proto.CRDTType_RRMAP:
+		crdt = (&RWEmbMapCrdt{}).FromProtoState(protobuf, ts, replicaID)
+	case proto.CRDTType_TOPK_RMV:
+		crdt = (&TopKRmvCrdt{}).FromProtoState(protobuf, ts, replicaID)
+	case proto.CRDTType_AVG:
+		crdt = (&AvgCrdt{}).FromProtoState(protobuf, ts, replicaID)
+	case proto.CRDTType_MAXMIN:
+		crdt = (&MaxMinCrdt{}).FromProtoState(protobuf, ts, replicaID)
+	}
+	return
+}
+
+func CrdtToProtoCRDT(keyHash uint64, crdt CRDT) (protobuf *proto.ProtoCRDT) {
+	protoState, crdtType := crdt.(ProtoCRDT).ToProtoState(), crdt.GetCRDTType()
+	return &proto.ProtoCRDT{KeyHash: &keyHash, Type: &crdtType, State: protoState}
+}
+
 /*****GLOBAL HELPER FUNCS*****/
 /***SELECTION HELPERS***/
 
@@ -219,10 +253,16 @@ func updateEmbMapProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation) (op U
 }
 
 func updateTopkProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
-	if len(protobuf.GetTopkrmvop().GetAdds()) > 0 {
-		return TopKAdd{}.FromUpdateObject(protobuf)
+	if adds := protobuf.GetTopkrmvop().GetAdds(); len(adds) > 0 {
+		if len(adds) == 1 {
+			return TopKAdd{}.FromUpdateObject(protobuf)
+		}
+		return TopKAddAll{}.FromUpdateObject(protobuf)
 	}
-	return TopKRemove{}.FromUpdateObject(protobuf)
+	if len(protobuf.GetTopkrmvop().GetRems()) == 1 {
+		return TopKRemove{}.FromUpdateObject(protobuf)
+	}
+	return TopKRemoveAll{}.FromUpdateObject(protobuf)
 }
 
 func updateMaxMinProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -304,9 +344,16 @@ func downstreamProtoRRMapToAntidoteDownstream(protobuf *proto.ProtoOpDownstream)
 
 func downstreamProtoTopKToAntidoteDownstream(protobuf *proto.ProtoOpDownstream) (downOp DownstreamArguments) {
 	if adds := protobuf.GetTopkrmvOp().GetAdds(); adds != nil {
-		return DownstreamTopKAdd{}.FromReplicatorObj(protobuf)
+		if len(adds) == 1 {
+			return DownstreamTopKAdd{}.FromReplicatorObj(protobuf)
+		} else {
+			return DownstreamTopKAddAll{}.FromReplicatorObj(protobuf)
+		}
 	}
-	return DownstreamTopKRemove{}.FromReplicatorObj(protobuf)
+	if len(protobuf.GetTopkrmvOp().GetRems().GetIds()) == 1 {
+		return DownstreamTopKRemove{}.FromReplicatorObj(protobuf)
+	}
+	return DownstreamTopKRemoveAll{}.FromReplicatorObj(protobuf)
 }
 
 func downstreamProtoMaxMinToAntidoteDownstream(protobuf *proto.ProtoOpDownstream) (downOp DownstreamArguments) {

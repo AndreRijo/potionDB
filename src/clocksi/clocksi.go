@@ -425,3 +425,19 @@ func (ts ClockSiTimestamp) Copy() (copyTs Timestamp) {
 	}
 	return copySiTS
 }
+
+func ClockArrayToByteArray(clks []Timestamp) (bytes [][]byte) {
+	bytes = make([][]byte, len(clks))
+	for i, clk := range clks {
+		bytes[i] = clk.ToBytes()
+	}
+	return
+}
+
+func ByteArrayToClockArray(bytes [][]byte) (clks []Timestamp) {
+	clks = make([]Timestamp, len(bytes))
+	for i, clkBytes := range bytes {
+		clks[i] = ClockSiTimestamp{}.FromBytes(clkBytes)
+	}
+	return
+}

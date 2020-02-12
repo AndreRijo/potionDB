@@ -44,6 +44,7 @@ const (
 	//Keys for configs
 	PORT_KEY        = "protoPort"
 	MEM_DEBUG       = "memDebug"
+	DO_JOIN         = "doJoin"
 	CPU_PROFILE_KEY = "withCPUProfile"
 	MEM_PROFILE_KEY = "withMemProfile"
 	CPU_FILE_KEY    = "cpuProfileFile"
@@ -66,6 +67,15 @@ func main() {
 	id := int16(tmpId % (math.MaxInt16 * 2))
 
 	tm := antidote.Initialize(id)
+
+	fmt.Println("ReplicaID:", id)
+	//Wait for joining mechanism, if it's enabled
+	if configs.GetBoolConfig(DO_JOIN, true) {
+		fmt.Println("Joining existing servers, please stand by...")
+		tm.WaitUntilReady()
+		fmt.Println("Join complete, starting PotionDB.")
+	}
+
 	server, err := net.Listen("tcp", "0.0.0.0:"+strings.TrimSpace(portString))
 
 	tools.CheckErr(tools.PORT_ERROR, err)
@@ -378,6 +388,7 @@ func loadConfigs() (configs *tools.ConfigLoader) {
 	vhost := flag.String("rabbitVHost", "/", "vhost to use with rabbitMQ.")
 	port := flag.String("port", "F", "port for potionDB.")
 	replicaID := flag.String("id", "F", "replicaID that uniquely identifies this replica.")
+	doJoin := flag.String("doJoin", "F", "if this replica should query others about the current state before starting to accept client requests")
 
 	flag.Parse()
 	configs = &tools.ConfigLoader{}
@@ -401,6 +412,9 @@ func loadConfigs() (configs *tools.ConfigLoader) {
 	}
 	if *port != "F" {
 		configs.ReplaceConfig(PORT_KEY, *port)
+	}
+	if *doJoin != "F" {
+		configs.ReplaceConfig(DO_JOIN, *doJoin)
 	}
 	if *replicaID != "F" {
 		configs.ReplaceConfig("potionDBID", *replicaID)

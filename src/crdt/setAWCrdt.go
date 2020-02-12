@@ -80,6 +80,8 @@ type RemoveAllEffect struct {
 	RemovedMap map[Element]UniqueSet
 }
 
+func (crdt *SetAWCrdt) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORSET }
+
 //Ops
 func (args Add) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORSET }
 
@@ -119,6 +121,12 @@ func (crdt *SetAWCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (
 		elems:                 make(map[Element]UniqueSet),
 		random:                rand.NewSource(time.Now().Unix()),
 	}
+}
+
+//Used to initialize when building a CRDT from a remote snapshot
+func (crdt *SetAWCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID int16) (sameCRDT *SetAWCrdt) {
+	crdt.genericInversibleCRDT, crdt.random = (&genericInversibleCRDT{}).initialize(startTs), rand.NewSource(time.Now().Unix())
+	return crdt
 }
 
 func (crdt *SetAWCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateArguments) (state State) {
@@ -498,4 +506,23 @@ func (downOp DownstreamRemoveAll) ToReplicatorObj() (protobuf *proto.ProtoOpDown
 		i++
 	}
 	return &proto.ProtoOpDownstream{SetOp: &proto.ProtoSetDownstream{Rems: rems}}
+}
+
+func (crdt *SetAWCrdt) ToProtoState() (protobuf *proto.ProtoState) {
+	protoElems := make([]*proto.ProtoValueUniques, len(crdt.elems))
+	i := 0
+	for value, uniques := range crdt.elems {
+		protoElems[i] = &proto.ProtoValueUniques{Value: []byte(value), Uniques: UniqueSetToUInt64Array(uniques)}
+		i++
+	}
+	return &proto.ProtoState{Awset: &proto.ProtoAWSetState{Elems: protoElems}}
+}
+
+func (crdt *SetAWCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID int16) (newCRDT CRDT) {
+	protoElems := proto.GetAwset().GetElems()
+	elems := make(map[Element]UniqueSet)
+	for _, protoElem := range protoElems {
+		elems[Element(protoElem.GetValue())] = UInt64ArrayToUniqueSet(protoElem.GetUniques())
+	}
+	return (&SetAWCrdt{elems: elems}).initializeFromSnapshot(ts, replicaID)
 }

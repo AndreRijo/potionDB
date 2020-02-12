@@ -25,6 +25,8 @@ type RemoteConn struct {
 	replicaString    string //Used for rabbitMQ headers in order to signal from who the msg is
 	holdOperations   map[int16]*HoldOperations
 	nBucketsToListen int
+	buckets          map[string]struct{}
+	connID           int16 //Uniquely identifies this connection. This should not be confused with the connected replica's replicaID
 }
 
 //Idea: hold operations from a replica until all operations for a partition are received.
@@ -44,7 +46,15 @@ const (
 	exchangeType = "topic"
 	//Go back to using this to buffer requests if we stop using remoteGroup
 	//defaultListenerSize = 100
-	clockTopic = "clk"
+	clockTopic        = "clk"
+	joinTopic         = "join"
+	joinContent       = "join"
+	replyJoinContent  = "replyJoin"
+	requestBktContent = "requestBkt"
+	replyBktContent   = "replyBkt"
+	replyEmptyContent = "replyEmpty"
+	//replQueueName     = "repl"
+	joinQueueName = "join"
 )
 
 var ()
@@ -53,7 +63,8 @@ var ()
 //There's one queue per replica. Each replica's queue will receive messages from ALL other replicas, as long as the topics match the ones
 //that were binded to the replica's queue.
 //Ip includes both ip and port in format: ip:port
-func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16) (remote *RemoteConn, err error) {
+//In the case of the connection to the local replica's RabbitMQ server, we don't consume the self messages (isSelfConn)
+func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16, connID int16, isSelfConn bool) (remote *RemoteConn, err error) {
 	//conn, err := amqp.Dial(protocol + prefix + ip + port)
 	prefix := tools.SharedConfig.GetConfig("rabbitMQUser")
 	vhost := tools.SharedConfig.GetConfig("rabbitVHost")
@@ -66,12 +77,12 @@ func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16
 	prefix = prefix + ":" + prefix + "@"
 	//conn, err := amqp.Dial(protocol + prefix + ip)
 	link := protocol + prefix + ip + "/" + vhost
-	fmt.Println(link)
+	fmt.Println("Connecting to", link)
 	conn, err := amqp.DialConfig(link, amqp.Config{Dial: scalateTimeout})
 	if err != nil {
 		tools.FancyWarnPrint(tools.REMOTE_PRINT, replicaID, "failed to open connection to rabbitMQ at", ip, ":", err, ". Retrying.")
 		time.Sleep(4000 * time.Millisecond)
-		return CreateRemoteConnStruct(ip, bucketsToListen, replicaID)
+		return CreateRemoteConnStruct(ip, bucketsToListen, replicaID, connID, isSelfConn)
 	}
 	sendCh, err := conn.Channel()
 	if err != nil {
@@ -90,7 +101,12 @@ func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16
 		return nil, err
 	}
 	//This queue will store messages sent from other replicas
-	queue, err := sendCh.QueueDeclare("", false, false, true, false, nil)
+	replQueue, err := sendCh.QueueDeclare("", false, true, false, false, nil)
+	if err != nil {
+		tools.FancyWarnPrint(tools.REMOTE_PRINT, replicaID, "failed to declare queue with rabbitMQ:", err)
+		return nil, err
+	}
+	joinQueue, err := sendCh.QueueDeclare(joinQueueName, false, true, false, false, nil)
 	if err != nil {
 		tools.FancyWarnPrint(tools.REMOTE_PRINT, replicaID, "failed to declare queue with rabbitMQ:", err)
 		return nil, err
@@ -98,18 +114,34 @@ func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16
 	//The previously declared queue will receive messages from any replica that publishes updates for objects in buckets in bucketsToListen
 	//TODO: Probably remove the partition part? (i.e., the *.)
 	for _, bucket := range bucketsToListen {
-		sendCh.QueueBind(queue.Name, "*."+bucket, exchangeName, false, nil)
+		sendCh.QueueBind(replQueue.Name, "*."+bucket, exchangeName, false, nil)
+		//sendCh.QueueBind(replQueue.Name, "*", exchangeName, false, nil)
 	}
-	//We also need to listen to stable clocks.
+	//We also need to associate stable clocks to the queue.
 	//TODO: Some kind of filtering for this
-	sendCh.QueueBind(queue.Name, clockTopic, exchangeName, false, nil)
+	sendCh.QueueBind(replQueue.Name, clockTopic, exchangeName, false, nil)
+	//Associate join requests to the join queue.
+	sendCh.QueueBind(joinQueue.Name, joinTopic, exchangeName, false, nil)
 
-	//This channel is used to read from the queue
-	//Note: the true corresponds to auto ack. We should *probably* do manual ack later on
-	recCh, err := sendCh.Consume(queue.Name, "", true, false, false, false, nil)
+	//This channel is used to read from the queue.
+	//If this is a connection to the self rabbitMQ instance, then we only listen to join-related msgs.
+	//Otherwise, we listen exclusively to replication msgs.
+	var recCh <-chan amqp.Delivery = nil
+	var queueToListen amqp.Queue
+	if !isSelfConn {
+		queueToListen = replQueue
+	} else {
+		queueToListen = joinQueue
+	}
+	recCh, err = sendCh.Consume(queueToListen.Name, "", true, false, false, false, nil)
 	if err != nil {
 		tools.FancyWarnPrint(tools.REMOTE_PRINT, replicaID, "failed to obtain consumer from rabbitMQ:", err)
 		return nil, err
+	}
+
+	bucketsMap := make(map[string]struct{})
+	for _, bkt := range bucketsToListen {
+		bucketsMap[bkt] = struct{}{}
 	}
 
 	remote = &RemoteConn{
@@ -119,9 +151,16 @@ func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16
 		//listenerChan:     make(chan ReplicatorMsg, defaultListenerSize),
 		listenerChan:     make(chan ReplicatorMsg),
 		replicaID:        replicaID,
-		replicaString:    fmt.Sprint(replicaID), //TODO: We need something different than port for replicaIDs.
+		replicaString:    fmt.Sprint(replicaID),
 		holdOperations:   make(map[int16]*HoldOperations),
 		nBucketsToListen: len(bucketsToListen),
+		buckets:          bucketsMap,
+		connID:           connID,
+	}
+	if !isSelfConn {
+		fmt.Println("Listening to repl on connection to", ip, "with id", remote.connID)
+	} else {
+		fmt.Println("Listening to join on connection to", ip, "with id", remote.connID)
 	}
 	go remote.startReceiver()
 	return
@@ -207,19 +246,26 @@ func (remote *RemoteConn) SendStableClk(ts int64) {
 
 //This should not be called externally.
 func (remote *RemoteConn) startReceiver() {
+	fmt.Println("[RC] Receiver started")
 	for data := range remote.recCh {
 		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Received something!")
-		//TODO: Maybe analyze data.routingKey to avoid decoding the protobuf if it was sent by this own replica? RoutingKey no longer has information about the sender though...
-		if data.CorrelationId == remote.replicaString {
-			//fmt.Println("Ignored, own received.")
-			tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Ignored received request as it was sent by myself")
-		} else {
-			if data.RoutingKey == clockTopic {
-				remote.handleReceivedStableClock(data.Body)
+		/*
+			//TODO: Maybe analyze data.routingKey to avoid decoding the protobuf if it was sent by this own replica? RoutingKey no longer has information about the sender though...
+			if data.CorrelationId == remote.replicaString {
+				//fmt.Println("Ignored, own received.")
+				tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Ignored received request as it was sent by myself")
 			} else {
-				remote.handleReceivedOps(data.Body)
-			}
+		*/
+		switch data.RoutingKey {
+		case clockTopic:
+			remote.handleReceivedStableClock(data.Body)
+		case joinTopic:
+			remote.handleReceivedJoinTopic(data.ContentType, data.Body)
+		default:
+			//Ops have a topic based on the partition ID + bucket
+			remote.handleReceivedOps(data.Body)
 		}
+		//}
 	}
 }
 
@@ -271,7 +317,7 @@ func (remote *RemoteConn) handleReceivedStableClock(data []byte) {
 	tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Received remote stableClock:", *clkReq)
 	//TODO: Avoid receiving own messages?
 	if clkReq.SenderID == remote.replicaID {
-		fmt.Println("NOT SUPPOSED TO HAPPEN NOW!")
+		fmt.Println("ALSO NOT SUPPOSED TO HAPPEN NOW!")
 		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Ignored received stableClock as it was sent by myself.")
 	} else {
 		//We also need to send a request with the last partition ops, if there's any
@@ -323,4 +369,126 @@ func (remote *RemoteConn) GetNextRemoteRequest() (request ReplicatorMsg) {
 	//1st - the next operation we receive is for a different partition
 	//2nd - the next operation is a clock update
 	return <-remote.listenerChan
+}
+
+/***** JOINING LOGIC *****/
+
+func (remote *RemoteConn) SendJoin(joinData []byte) {
+	fmt.Println("[RC]Sending join as", remote.replicaID, remote.connID)
+	remote.sendCh.Publish(exchangeName, joinTopic, false, false,
+		amqp.Publishing{CorrelationId: remote.replicaString, ContentType: joinContent, Body: joinData})
+}
+
+func (remote *RemoteConn) SendReplyJoin(req ReplyJoin) {
+	protobuf := createProtoReplyJoin(req)
+	data := remote.encodeProtobuf(protobuf, "Failed to generate bytes of ReplyJoin msg.")
+	remote.sendCh.Publish(exchangeName, joinTopic, false, false,
+		amqp.Publishing{CorrelationId: remote.replicaString, ContentType: replyJoinContent, Body: data})
+}
+
+func (remote *RemoteConn) SendRequestBucket(req RequestBucket) {
+	protobuf := createProtoRequestBucket(req)
+	data := remote.encodeProtobuf(protobuf, "Failed to generate bytes of RequestBucket msg.")
+	remote.sendCh.Publish(exchangeName, joinTopic, false, false,
+		amqp.Publishing{CorrelationId: remote.replicaString, ContentType: requestBktContent, Body: data})
+}
+
+func (remote *RemoteConn) SendReplyBucket(req ReplyBucket) {
+	protobuf := createProtoReplyBucket(req)
+	data := remote.encodeProtobuf(protobuf, "Failed to generate bytes of ReplyBucket msg.")
+	remote.sendCh.Publish(exchangeName, joinTopic, false, false,
+		amqp.Publishing{CorrelationId: remote.replicaString, ContentType: replyBktContent, Body: data})
+}
+
+func (remote *RemoteConn) SendReplyEmpty() {
+	protobuf := createProtoReplyEmpty()
+	data := remote.encodeProtobuf(protobuf, "Failed to generate bytes of ReplyEmpty msg.")
+	remote.sendCh.Publish(exchangeName, joinTopic, false, false,
+		amqp.Publishing{CorrelationId: remote.replicaString, ContentType: replyEmptyContent, Body: data})
+}
+
+func (remote *RemoteConn) handleReceivedJoinTopic(msgType string, data []byte) {
+	switch msgType {
+	case joinContent:
+		fmt.Println("Join msg is a join")
+		remote.handleJoin(data)
+	case replyJoinContent:
+		fmt.Println("Join msg is a replyJoin")
+		remote.handleReplyJoin(data)
+	case requestBktContent:
+		fmt.Println("Join msg is a requestBkt")
+		remote.handleRequestBkt(data)
+	case replyBktContent:
+		fmt.Println("Join msg is a replyBkt")
+		remote.handleReplyBkt(data)
+	case replyEmptyContent:
+		fmt.Println("Join msg is a replyEmpty")
+		remote.handleReplyEmpty(data)
+	}
+}
+
+func (remote *RemoteConn) handleJoin(data []byte) {
+	protobuf := &proto.ProtoJoin{}
+	remote.decodeProtobuf(protobuf, data, "Failed to decode bytes of received protoJoin. Error:")
+	otherBkts, senderID, ip := protoToJoin(protobuf)
+	fmt.Println("Join from:", senderID, remote.connID)
+
+	commonBkts := make([]string, len(otherBkts))
+	nCommon := 0
+	for _, bkt := range otherBkts {
+		if _, has := remote.buckets[bkt]; has {
+			commonBkts[nCommon] = bkt
+			nCommon++
+		}
+	}
+	commonBkts = commonBkts[:nCommon]
+	if len(commonBkts) > 0 {
+		//fmt.Println("RemoteConnID:", remote.connID)
+		remote.listenerChan <- &Join{SenderID: int16(senderID), ReplyID: remote.connID, CommonBkts: commonBkts, ReqIP: ip}
+	} else {
+		//TODO: Ask group to send empty
+	}
+}
+
+func (remote *RemoteConn) handleReplyJoin(data []byte) {
+	protobuf := &proto.ProtoReplyJoin{}
+	remote.decodeProtobuf(protobuf, data, "Failed to decode bytes of received protoReplyJoin. Error:")
+	buckets, clks, senderID := protoToReplyJoin(protobuf)
+	fmt.Println("ReplyJoin from:", senderID, remote.connID, remote.sendCh)
+	remote.listenerChan <- &ReplyJoin{SenderID: senderID, ReplyID: remote.connID, Clks: clks, CommonBkts: buckets, ReqIP: protobuf.GetReplicaIP()}
+}
+
+func (remote *RemoteConn) handleRequestBkt(data []byte) {
+	protobuf := &proto.ProtoRequestBucket{}
+	remote.decodeProtobuf(protobuf, data, "Failed to decode bytes of received protoRequestBucket. Error:")
+	buckets, senderID := protoToRequestBucket(protobuf)
+	fmt.Println("RequestBkt from:", senderID, remote.connID)
+	remote.listenerChan <- &RequestBucket{SenderID: senderID, ReplyID: remote.connID, Buckets: buckets, ReqIP: protobuf.GetReplicaIP()}
+}
+
+func (remote *RemoteConn) handleReplyBkt(data []byte) {
+	protobuf := &proto.ProtoReplyBucket{}
+	remote.decodeProtobuf(protobuf, data, "Failed to decode bytes of received protoReplyBucket. Error:")
+	states, clk, senderID := protoToReplyBucket(protobuf)
+	fmt.Println("ReplyBkt from:", senderID, remote.connID)
+	remote.listenerChan <- &ReplyBucket{SenderID: senderID, PartStates: states, Clk: clk}
+}
+
+func (remote *RemoteConn) handleReplyEmpty(data []byte) {
+	remote.listenerChan <- &ReplyEmpty{}
+}
+
+func (remote *RemoteConn) decodeProtobuf(protobuf pb.Message, data []byte, errMsg string) {
+	err := pb.Unmarshal(data, protobuf)
+	if err != nil {
+		tools.FancyErrPrint(tools.REMOTE_PRINT, remote.replicaID, errMsg, err)
+	}
+}
+
+func (remote *RemoteConn) encodeProtobuf(protobuf pb.Message, errMsg string) (data []byte) {
+	data, err := pb.Marshal(protobuf)
+	if err != nil {
+		tools.FancyErrPrint(tools.REMOTE_PRINT, remote.replicaID, errMsg, err)
+	}
+	return
 }

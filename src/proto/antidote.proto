@@ -163,10 +163,11 @@ message ApbGetTopkResp {
 	repeated ApbIntPair values = 1;
 }
 
-//Holds a (playerId, score) pair
+//Holds a (playerId, score, data) triple
 message ApbIntPair {
 	required sint32 playerId = 1;
-	required sint32 score = 2;
+    required sint32 score = 2;
+    optional bytes data = 3;
 }
 
 //--------------------

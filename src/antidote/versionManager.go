@@ -13,4 +13,6 @@ type VersionManager interface {
 	Update(updArgs crdt.UpdateArguments) crdt.DownstreamArguments
 
 	Downstream(updTs clocksi.Timestamp, downstreamArgs crdt.DownstreamArguments) (otherDownstreamArgs crdt.DownstreamArguments)
+
+	GetLatestCRDT() (crdt crdt.CRDT)
 }

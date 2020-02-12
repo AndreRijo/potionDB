@@ -91,6 +91,8 @@ type ORMapRemoveAllEffect struct {
 	Rems map[string]map[Element]UniqueSet
 }
 
+func (crdt *ORMapCrdt) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
+
 //Upds
 func (args MapAdd) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
 
@@ -150,6 +152,12 @@ func (crdt *ORMapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (
 		entries:               make(map[string]map[Element]UniqueSet),
 		random:                rand.NewSource(time.Now().Unix()),
 	}
+}
+
+//Used to initialize when building a CRDT from a remote snapshot
+func (crdt *ORMapCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID int16) (sameCRDT *ORMapCrdt) {
+	crdt.genericInversibleCRDT, crdt.random = (&genericInversibleCRDT{}).initialize(startTs), rand.NewSource(time.Now().Unix())
+	return crdt
 }
 
 func (crdt *ORMapCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateArguments) (state State) {
@@ -769,4 +777,12 @@ func (downOp DownstreamORMapAddAll) ToReplicatorObj() (protobuf *proto.ProtoOpDo
 
 func (downOp DownstreamORMapRemoveAll) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
 	return &proto.ProtoOpDownstream{OrmapOp: &proto.ProtoORMapDownstream{Rems: createProtoMapRemoves(downOp.Rems)}}
+}
+
+func (crdt *ORMapCrdt) ToProtoState() (protobuf *proto.ProtoState) {
+	return &proto.ProtoState{Ormap: &proto.ProtoORMapState{Entries: createProtoMapRemoves(crdt.entries)}}
+}
+
+func (crdt *ORMapCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID int16) (newCRDT CRDT) {
+	return (&ORMapCrdt{entries: createORMapDownRems(proto.GetOrmap().GetEntries())}).initializeFromSnapshot(ts, replicaID)
 }
