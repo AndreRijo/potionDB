@@ -12,6 +12,8 @@ import (
 	hashFunc "github.com/twmb/murmur3"
 )
 
+//TODO: I don't think remoteWaiting is being processed. This may be an issue when clients switch between replicas and use their previous txnClks.
+
 /////*****************TYPE DEFINITIONS***********************/////
 //////////************Requests**************************//////////
 
@@ -24,11 +26,13 @@ type MatRequestArgs interface {
 	getChannel() (channelId uint64)
 }
 
+/*
 //Args for latest stable version request. This won't be necessary if we remove findCommonTimestamp from transactionManager
 type MatVersionArgs struct {
 	ChannelId uint64
 	ReplyChan chan clocksi.Timestamp
 }
+*/
 
 type MatReadCommonArgs struct {
 	ReadObjectParams
@@ -242,12 +246,13 @@ func (args MatUpdateArgs) getChannel() (channelId uint64) {
 	return GetChannelKey(args.Updates[0].KeyParams)
 }
 
+/*
 func (args MatVersionArgs) getRequestType() (requestType MatRequestType) {
 	return versionMatRequest
 }
 func (args MatVersionArgs) getChannel() (channelId uint64) {
 	return args.ChannelId
-}
+}*/
 
 func (args MatCommitArgs) getRequestType() (requestType MatRequestType) {
 	return commitMatRequest
@@ -414,8 +419,8 @@ func handleMatRequest(request MaterializerRequest, partitionData *partitionData)
 		handleMatAbort(request, partitionData)
 	case prepareMatRequest:
 		handleMatPrepare(request, partitionData)
-	case versionMatRequest:
-		handleMatVersion(request, partitionData)
+	//case versionMatRequest:
+	//handleMatVersion(request, partitionData)
 	case safeClkMatRequest:
 		handleMatSafeClk(request, partitionData)
 	case remoteTxnMatRequest:
@@ -447,18 +452,24 @@ func auxiliaryRead(readArgs MatReadCommonArgs, txnId TransactionId, partitionDat
 		applyReadAndReply(&readArgs, readLatest, readArgs.Timestamp, txnId, partitionData)
 	} else {
 		//Queue the request.
-		//##fmt.Println(partitionData.partitionID, "Warning - queuing read")
+		//fmt.Println(partitionData.partitionID, "Warning - queuing read with key", readArgs.Timestamp.GetMapKey())
 		tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Warning - Queuing read")
 		queue, exists := partitionData.pendingReads[readArgs.Timestamp.GetMapKey()]
 		if !exists {
+			//fmt.Println(partitionData.partitionID, "Queue doesn't exist for key", readArgs.Timestamp.GetMapKey())
 			queue = &PendingReads{
 				Timestamp:     readArgs.Timestamp,
 				TransactionId: txnId,
 				Reads:         make([]*MatReadCommonArgs, 0, readQueueSize),
 			}
 			partitionData.pendingReads[readArgs.Timestamp.GetMapKey()] = queue
-		}
+		} /*else {
+			fmt.Println(partitionData.partitionID, "Queue exists for key", readArgs.Timestamp.GetMapKey())
+		}*/
+		//fmt.Println(partitionData.partitionID, "Queue size before appending for key", readArgs.Timestamp.GetMapKey(), len(queue.Reads))
 		queue.Reads = append(queue.Reads, &readArgs)
+		//fmt.Println(partitionData.partitionID, "Queue size after appending for key", readArgs.Timestamp.GetMapKey(),
+		//len(partitionData.pendingReads[readArgs.Timestamp.GetMapKey()].Reads))
 	}
 }
 
@@ -472,16 +483,19 @@ func canRead(readTs clocksi.Timestamp, partitionData *partitionData) (canRead bo
 		canRead, readLatest = true, false
 	} else if partitionData.twoSmallestPendingTxn[0] != nil &&
 		partitionData.suggestedTimestamps[*partitionData.twoSmallestPendingTxn[0]].IsLower(readTs) {
-		//fmt.Printf("canRead - pending ts %s is lower than read ts %s, thus !canRead and !readLatest.\n", partitionData.suggestedTimestamps[*partitionData.twoSmallestPendingTxn[0]].ToString(), readTs.ToString())
+		//fmt.Printf("%d canRead - pending ts %s is lower than read ts %s, thus !canRead and !readLatest.\n", partitionData.partitionID, partitionData.suggestedTimestamps[*partitionData.twoSmallestPendingTxn[0]].ToString(), readTs.ToString())
 		//There's a commit prepared with a timestamp lower than read's
 		canRead, readLatest = false, false
 	} else {
 		localTs := partitionData.stableVersion.NextTimestamp(partitionData.replicaID)
-		//fmt.Printf("canRead - else case, asking for next timestamp. New ts is %s, previous read is %s, stable is %s\n", localTs.ToString(), readTs.ToString(), partitionData.stableVersion.ToString())
+		//fmt.Printf("%d canRead - else case, asking for next timestamp. New ts is %s, previous read is %s, stable is %s\n", partitionData.partitionID, localTs.ToString(), readTs.ToString(), partitionData.stableVersion.ToString())
 		//TODO: Can this be false when we consider concurrent replicas...?
 		if localTs.IsHigherOrEqual(readTs) {
-			//fmt.Println("canRead - generated timestamp is higher, thus canRead and readLatest\n")
+			//fmt.Println(partitionData.partitionID, "canRead - generated timestamp is higher, thus canRead and readLatest")
 			canRead, readLatest = true, true
+		} else {
+			//fmt.Printf("%d canRead - generated timestamp isn't higher, thus !canRead and !readLatest. Generated, read ts and readKey: %s %s %s\n", partitionData.partitionID, localTs.ToString(), readTs.ToString(), readTs.GetMapKey())
+			canRead, readLatest = false, false
 		}
 	}
 	return
@@ -548,6 +562,9 @@ func handleMatStaticWrite(request MaterializerRequest, partitionData *partitionD
 			error:     err,
 		}
 	} else {
+		if partitionData.partitionID == 1 {
+			fmt.Println("[MATP1]Applying write request!")
+		}
 		auxiliaryStartTransaction(writeArgs.TransactionId, partitionData)
 		partitionData.pendingOps[writeArgs.TransactionId] = writeArgs.Updates
 		writeArgs.ReplyChan <- TimestampErrorPair{
@@ -602,9 +619,11 @@ func handleMatPrepare(request MaterializerRequest, partitionData *partitionData)
 	prepareArgs.ReplyChan <- partitionData.suggestedTimestamps[prepareArgs.TransactionId]
 }
 
+/*
 func handleMatVersion(request MaterializerRequest, partitionData *partitionData) {
-	request.MatRequestArgs.(MatVersionArgs).ReplyChan <- partitionData.stableVersion
+	request.MatRequestArgs.(MatVersionArgs).ReplyChan <- partitionData.stableVersion.Copy()
 }
+*/
 
 func handleMatAbort(request MaterializerRequest, partitionData *partitionData) {
 	delete(partitionData.pendingOps, request.MatRequestArgs.(MatAbortArgs).TransactionId)
@@ -844,12 +863,13 @@ func applyPendingReads(partitionData *partitionData) {
 	for tsKey, pendingReads := range partitionData.pendingReads {
 		if canRead, readLatest := canRead(pendingReads.Timestamp, partitionData); canRead {
 			//Apply all reads of that transaction
-			//##fmt.Printf("%d Applying pending reads for txn with key %s. Number of reads: %d.\n", partitionData.partitionID, tsKey, len(pendingReads.Reads))
+			fmt.Printf("%d Applying pending reads for txn with key %s. Number of reads: %d.\n", partitionData.partitionID, tsKey, len(pendingReads.Reads))
 			for _, readArgs := range pendingReads.Reads {
-				//##fmt.Println(partitionData.partitionID, "Applying pending read.")
+				//fmt.Println(partitionData.partitionID, "Applying pending read.")
 				applyReadAndReply(readArgs, readLatest, pendingReads.Timestamp, pendingReads.TransactionId, partitionData)
-				//##fmt.Println(partitionData.partitionID, "Finished applying pending read.")
+				//fmt.Println(partitionData.partitionID, "Finished applying pending read.")
 			}
+			fmt.Printf("%d Finished applying all pending reads for txn with key %s with nReads %d.\n", partitionData.partitionID, tsKey, len(pendingReads.Reads))
 			delete(partitionData.pendingReads, tsKey)
 		}
 	}
@@ -873,7 +893,6 @@ func handleMatRemoteTxn(request MaterializerRequest, partitionData *partitionDat
 	tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Starting to handle remoteTxn")
 	remoteTxnArgs := request.MatRequestArgs.(MatRemoteTxnArgs)
 	copyTs := remoteTxnArgs.Timestamp.Copy()
-	fmt.Println("[MAT]Handling remoteTxn")
 	if copyTs.IsLowerOrEqualExceptFor(partitionData.stableVersion, partitionData.replicaID, remoteTxnArgs.ReplicaID) {
 		//Downstream upds that may be generated by non-uniform crdts
 		newDownstream := make([]*UpdateObjectParams, 0, expectedNewDownstreamSize)
@@ -898,7 +917,11 @@ func handleMatRemoteTxn(request MaterializerRequest, partitionData *partitionDat
 			tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Object after downstream:", obj, "hashkey:", hashKey)
 		}
 		tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Stable clk before:", partitionData.stableVersion)
-		partitionData.stableVersion = partitionData.stableVersion.UpdatePos(remoteTxnArgs.ReplicaID, remoteTxnArgs.Timestamp.GetPos(remoteTxnArgs.ReplicaID))
+		//TODO: Go Back
+		//partitionData.stableVersion = partitionData.stableVersion.UpdatePos(remoteTxnArgs.ReplicaID, remoteTxnArgs.Timestamp.GetPos(remoteTxnArgs.ReplicaID))
+		partitionData.stableVersion.UpdatePos(remoteTxnArgs.ReplicaID, remoteTxnArgs.Timestamp.GetPos(remoteTxnArgs.ReplicaID))
+		//copyTs := partitionData.stableVersion.Copy()
+		//partitionData.stableVersion = copyTs.UpdatePos(remoteTxnArgs.ReplicaID, remoteTxnArgs.Timestamp.GetPos(remoteTxnArgs.ReplicaID))
 
 		//Need to "commit" some operations for non-uniform CRDTs
 		/*
@@ -907,6 +930,7 @@ func handleMatRemoteTxn(request MaterializerRequest, partitionData *partitionDat
 				partitionData.log.SendLoggerRequest(LoggerRequest{LogRequestArgs: LogCommitArgs{TxnClk: &copyClk, Upds: &newDownstream}})
 			}
 		*/
+		//TODO: Go Back (uncomment line below)
 		partitionData.downstreamOpsCh <- TMDownstreamNewOps{Timestamp: copyTs, partitionID: partitionData.partitionID, newOps: newDownstream}
 		tools.FancyDebugPrint(tools.MAT_PRINT, partitionData.replicaID, "Stable clk after:", partitionData.stableVersion)
 	} else {
@@ -924,7 +948,18 @@ func handleMatRemoteTxn(request MaterializerRequest, partitionData *partitionDat
 func handleMatClkPosUpd(request MaterializerRequest, partitionData *partitionData) {
 	clkArgs := request.MatRequestArgs.(MatClkPosUpdArgs)
 	//Note that updatePos keeps the maximum of the actual value and the one in the argument
+	//TODO: Go Back
 	partitionData.stableVersion.UpdatePos(clkArgs.ReplicaID, clkArgs.StableTs)
+	//copyTs := partitionData.stableVersion.Copy()
+	//partitionData.stableVersion = copyTs.UpdatePos(clkArgs.ReplicaID, clkArgs.StableTs)
+
+	//TODO: Shouldn't we check here for pending reads...? In case there's no further update or read for this partition.
+	//This should be done because either a commit or a read may depend on a future VC entry (due to using TM's clock as a basis).
+	//This update may never arrive the current partition (i.e., that transaction didn't involve this partition).
+	//Thus, the only information this partition will receive is the clkPosUpd
+	//Furthermore, if there's no further update, any read or commit on hold will stay on hold forever, since they won't receive anything besides clkPosUpd.
+	applyPendingReads(partitionData)
+	//TODO: CHECK PENDING COMMITS!
 }
 
 func handleMatGetSnapshot(request MaterializerRequest, partitionData *partitionData) {

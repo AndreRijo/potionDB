@@ -396,28 +396,84 @@ func (tm *TransactionManager) handleStaticTMRead(request TransactionManagerReque
 	readArgs := request.Args.(TMStaticReadArgs)
 	//tsToUse := request.Timestamp
 	tm.localClock.Lock()
-	tsToUse := tm.localClock.Timestamp //TODO: Should we use here directly localClock or localClock.NextTimestamp()?
+	//TODO: Debug mod: added .Copy() to prevent conflict with applyRemoteClk.
+	tsToUse := tm.localClock.Timestamp.Copy() //TODO: Should we use here directly localClock or localClock.NextTimestamp()?
 	tm.localClock.Unlock()
 
-	var currReadChan chan crdt.State = nil
-	var currRequest MaterializerRequest
-	states := make([]crdt.State, len(readArgs.ReadParams))
+	/*
+		var currReadChan chan crdt.State = nil
+		var currRequest MaterializerRequest
+		states := make([]crdt.State, len(readArgs.ReadParams))
 
-	//Now, ask to read the client requested version.
+		//Now, ask to read the client requested version.
+		for i, currRead := range readArgs.ReadParams {
+			currReadChan = make(chan crdt.State)
+			//currReadChan = make(chan crdt.State, 1)
+
+			currRequest = MaterializerRequest{
+				MatRequestArgs: MatStaticReadArgs{MatReadCommonArgs: MatReadCommonArgs{
+					Timestamp:        tsToUse,
+					ReadObjectParams: currRead,
+					ReplyChan:        currReadChan,
+				}},
+			}
+			tm.mat.SendRequest(currRequest)
+			//TODO: Wait for reply in different for
+			states[i] = <-currReadChan
+			close(currReadChan)*/
+	/*
+		select {
+		case states[i] = <-currReadChan:
+			close(currReadChan)
+		case <-time.After(15 * time.Second):
+			fmt.Printf("[TM]Read with timestamp %s (%s) has blocked for more than 15s. Returning CounterState{0} response. Partition at fault: %d. "+
+				"TxnId/ClientId: %d. Key: %s %s %d\n",
+				tsToUse.ToString(), tsToUse.GetMapKey(), GetChannelKey(readArgs.ReadParams[i].KeyParams),
+				request.TransactionId,
+				readArgs.ReadParams[i].Key, readArgs.ReadParams[i].Bucket, readArgs.ReadParams[i].CrdtType)
+			states[i] = crdt.CounterState{Value: 0}
+		}
+	*/ /*
+		}
+	*/
+
+	//TODO: Go back
+
+	var currRequest MaterializerRequest
+	readChans := make([]chan crdt.State, len(readArgs.ReadParams))
+	states := make([]crdt.State, len(readArgs.ReadParams))
 	for i, currRead := range readArgs.ReadParams {
-		currReadChan = make(chan crdt.State)
+		readChans[i] = make(chan crdt.State, 1)
 
 		currRequest = MaterializerRequest{
 			MatRequestArgs: MatStaticReadArgs{MatReadCommonArgs: MatReadCommonArgs{
 				Timestamp:        tsToUse,
 				ReadObjectParams: currRead,
-				ReplyChan:        currReadChan,
+				ReplyChan:        readChans[i],
 			}},
 		}
 		tm.mat.SendRequest(currRequest)
-		//TODO: Wait for reply in different for
-		states[i] = <-currReadChan
-		close(currReadChan)
+	}
+
+	/*
+		for i, readChan := range readChans {
+			select {
+			case states[i] = <-readChan:
+				close(readChan)
+			case <-time.After(8 * time.Second):
+				fmt.Printf("[TM]Read with timestamp %s (%s) has blocked for more than 15s. Returning CounterState{0} response. Partition at fault: %d. "+
+					"TxnId/ClientId: %d. Key: %s %s %d\n",
+					tsToUse.ToString(), tsToUse.GetMapKey(), GetChannelKey(readArgs.ReadParams[i].KeyParams),
+					request.TransactionId,
+					readArgs.ReadParams[i].Key, readArgs.ReadParams[i].Bucket, readArgs.ReadParams[i].CrdtType)
+				states[i] = crdt.CounterState{Value: 0}
+			}
+		}
+	*/
+
+	for i, readChan := range readChans {
+		states[i] = <-readChan
+		close(readChan)
 	}
 
 	//fmt.Println("[TM]Static read with clk: ", tsToUse)
@@ -469,6 +525,8 @@ func (tm *TransactionManager) handleStaticTMUpdate(request TransactionManagerReq
 		}
 		if reply.Timestamp.IsHigherOrEqual(*maxTimestamp) {
 			maxTimestamp = &reply.Timestamp
+			//tmp := reply.Timestamp.Copy()
+			//maxTimestamp = &tmp
 		}
 	}
 
@@ -484,6 +542,9 @@ func (tm *TransactionManager) handleStaticTMUpdate(request TransactionManagerReq
 		}
 	}
 
+	//TODO: Maybe TM's clock should only be updated AFTER all partitions apply the txn?
+	//This should reduce the number of reads that get queued for later (and even reduce to 0 if clients are sticky), albeit it might raise the number of reads
+	//in the past.
 	tm.localClock.Lock()
 	tm.localClock.Timestamp = tm.localClock.Merge(*maxTimestamp)
 	tm.localClock.Unlock()
@@ -526,7 +587,7 @@ func (tm *TransactionManager) handleTMRead(request TransactionManagerRequest) {
 
 	//Now, ask to read the client requested version.
 	for i, currRead := range readArgs.ReadParams {
-		currReadChan = make(chan crdt.State)
+		currReadChan = make(chan crdt.State, 1)
 
 		currRequest = MaterializerRequest{
 			MatRequestArgs: MatReadArgs{MatReadCommonArgs: MatReadCommonArgs{
@@ -869,17 +930,49 @@ func (tm *TransactionManager) handleDownstreamGeneratedOps() {
 	partitionsLeft := make(map[clocksi.TimestampKey]*int)                       //Stores the number of partitions that still need to reply
 	opsForTxn := make(map[clocksi.TimestampKey]map[int64][]*UpdateObjectParams) //Stores the generated ops separated by partition.
 	for {
-		//fmt.Println("[NUCRDT TM]Waiting for request...")
-		switch typedReq := (<-tm.downstreamOpsCh).(type) {
-		case TMNewRemoteTxn:
-			//fmt.Println("[NUCRDT TM]Handling TMNewRemoteTxn for timestamp" + typedReq.Timestamp.ToString())
-			clkKey := typedReq.Timestamp.GetMapKey()
-			nLeft, hasEntry := partitionsLeft[clkKey]
-			if !hasEntry {
-				partitionsLeft[clkKey] = &typedReq.nPartitions
-				opsForTxn[clkKey] = make(map[int64][]*UpdateObjectParams)
-			} else {
-				*nLeft += typedReq.nPartitions
+		//TODO: Go back (Remove */ and */, and delete the 2 lines below)
+		<-tm.downstreamOpsCh
+		ignore(partitionsLeft, opsForTxn)
+		/*
+			//fmt.Println("[NUCRDT TM]Waiting for request...")
+			switch typedReq := (<-tm.downstreamOpsCh).(type) {
+			case TMNewRemoteTxn:
+				//fmt.Println("[NUCRDT TM]Handling TMNewRemoteTxn for timestamp" + typedReq.Timestamp.ToString())
+				clkKey := typedReq.Timestamp.GetMapKey()
+				nLeft, hasEntry := partitionsLeft[clkKey]
+				if !hasEntry {
+					partitionsLeft[clkKey] = &typedReq.nPartitions
+					opsForTxn[clkKey] = make(map[int64][]*UpdateObjectParams)
+				} else {
+					*nLeft += typedReq.nPartitions
+					if *nLeft == 0 {
+						//Already received a reply from all materializers
+						ops := opsForTxn[clkKey]
+						//Only create a txn if there's actually new ops
+						if len(ops) > 0 {
+							//fmt.Println("[NUCRDT TM]Received reply from all partitions, need to commit for timestamp", typedReq.Timestamp.ToString())
+							go tm.commitOpsForRemote(ops)
+						}
+						delete(opsForTxn, clkKey)
+						delete(partitionsLeft, clkKey)
+					}
+				}
+			case TMDownstreamNewOps:
+				//fmt.Printf("[NUCRDT TM]Handling TMDownstreamNewOps for timestamp %s from partition %d.\n", typedReq.Timestamp.ToString(), typedReq.partitionID)
+				clkKey := typedReq.Timestamp.GetMapKey()
+				nLeft, hasEntry := partitionsLeft[clkKey]
+				if !hasEntry {
+					value := -1 //We don't know yet how many partitions are involved in this txn
+					nLeft = &value
+					partitionsLeft[clkKey] = &value
+					opsForTxn[clkKey] = make(map[int64][]*UpdateObjectParams)
+				} else {
+					*nLeft -= 1
+				}
+				if len(typedReq.newOps) > 0 {
+					//Actually has ops
+					opsForTxn[clkKey][typedReq.partitionID] = typedReq.newOps
+				}
 				if *nLeft == 0 {
 					//Already received a reply from all materializers
 					ops := opsForTxn[clkKey]
@@ -892,34 +985,7 @@ func (tm *TransactionManager) handleDownstreamGeneratedOps() {
 					delete(partitionsLeft, clkKey)
 				}
 			}
-		case TMDownstreamNewOps:
-			//fmt.Printf("[NUCRDT TM]Handling TMDownstreamNewOps for timestamp %s from partition %d.\n", typedReq.Timestamp.ToString(), typedReq.partitionID)
-			clkKey := typedReq.Timestamp.GetMapKey()
-			nLeft, hasEntry := partitionsLeft[clkKey]
-			if !hasEntry {
-				value := -1 //We don't know yet how many partitions are involved in this txn
-				nLeft = &value
-				partitionsLeft[clkKey] = &value
-				opsForTxn[clkKey] = make(map[int64][]*UpdateObjectParams)
-			} else {
-				*nLeft -= 1
-			}
-			if len(typedReq.newOps) > 0 {
-				//Actually has ops
-				opsForTxn[clkKey][typedReq.partitionID] = typedReq.newOps
-			}
-			if *nLeft == 0 {
-				//Already received a reply from all materializers
-				ops := opsForTxn[clkKey]
-				//Only create a txn if there's actually new ops
-				if len(ops) > 0 {
-					//fmt.Println("[NUCRDT TM]Received reply from all partitions, need to commit for timestamp", typedReq.Timestamp.ToString())
-					go tm.commitOpsForRemote(ops)
-				}
-				delete(opsForTxn, clkKey)
-				delete(partitionsLeft, clkKey)
-			}
-		}
+		*/
 	}
 }
 

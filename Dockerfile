@@ -8,6 +8,7 @@ RUN go get github.com/streadway/amqp
 
 # Adding src and building
 ADD src/ /go/src/
+#RUN go install -race main
 RUN go install main
 
 
@@ -29,10 +30,15 @@ EXPOSE 5672
 #Arguments
 ENV CONFIG "/go/bin/configs/cluster/default"
 #ENV SERVERS, ENV RABBITMQ
-ENV RABBITMQ_WAIT 10s
+#ENV RABBITMQ_WAIT 10s
+#ENV RABBITMQ_WAIT 5s
 ENV RABBITMQ_VHOST /crdts
 
 #Add config folders late to avoid having to rebuild multiple images
+ENV RABBITMQ_PID_FILE /var/lib/rabbitmq/mnesia/rabbitmq
+#ADD dockerStuff/rabbitmq.config /etc/rabbitmq/
+#ADD dockerStuff/definitions.json /etc/rabbitmq/
+#RUN chown rabbitmq:rabbitmq /etc/rabbitmq/rabbitmq.config /etc/rabbitmq/definitions.json
 ADD configs /go/bin/configs
 
 # Run the protoserver

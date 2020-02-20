@@ -1,0 +1,22 @@
+{
+	"users": [
+	{
+		"name": "test",
+		"tags": "administrator"
+	}
+	],
+	"vhosts": [
+	{
+		"name": "\/crdts"
+	}
+	],
+	"permissions": [
+	{
+		"user": "test",
+		"vhost": "\/crdts",
+		"configure": ".*",
+		"write": ".*",
+		"read": ".*"
+	}
+	]
+}

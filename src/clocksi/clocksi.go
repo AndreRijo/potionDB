@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 )
@@ -411,9 +412,22 @@ func (ts ClockSiTimestamp) ToString() (tsString string) {
 
 //NOTE: If we one day support adding/removing replicas on the fly this will probably no longer work, as it ignores the replica's ID (map key)
 func (ts ClockSiTimestamp) GetMapKey() (key TimestampKey) {
+	//Need to ensure this is written in order, since go randomizes map iteration order
+	keys := make([]int16, len(ts.VectorClock))
+	i := 0
+	for key := range ts.VectorClock {
+		keys[i] = key
+		i++
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
 	var builder strings.Builder
-	for _, value := range ts.VectorClock {
-		builder.WriteString(fmt.Sprint(value, ","))
+	/*
+		for _, value := range ts.VectorClock {
+			builder.WriteString(fmt.Sprint(value, ","))
+		}
+	*/
+	for _, key := range keys {
+		builder.WriteString(fmt.Sprint(ts.VectorClock[key], ","))
 	}
 	return builder.String()
 }

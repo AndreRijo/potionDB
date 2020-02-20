@@ -89,11 +89,12 @@ type ReplyBucket struct {
 type ReplyEmpty struct{}
 
 const (
-	tsSendDelay         time.Duration = 2000 //milliseconds
-	cacheInitialSize                  = 100
-	toSendInitialSize                 = 10
-	joinHoldInitialSize               = 100
-	DO_JOIN                           = "doJoin"
+	tsSendDelay time.Duration = 2000 //milliseconds
+	//tsSendDelay         time.Duration = 500
+	cacheInitialSize    = 100
+	toSendInitialSize   = 10
+	joinHoldInitialSize = 100
+	DO_JOIN             = "doJoin"
 )
 
 func (req NewReplicatorRequest) getSenderID() int16 {
@@ -325,7 +326,6 @@ func (repl *Replicator) handleRemoteRequest(remoteReq ReplicatorMsg) {
 			StableTs:  typedReq.Ts,
 		})
 	case *NewReplicatorRequest:
-		fmt.Println("New replicated OPs")
 		repl.tm.SendRemoteMsg(TMRemotePartTxn{
 			ReplicaID:   typedReq.SenderID,
 			PartitionID: typedReq.PartitionID,
