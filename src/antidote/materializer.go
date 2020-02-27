@@ -562,9 +562,6 @@ func handleMatStaticWrite(request MaterializerRequest, partitionData *partitionD
 			error:     err,
 		}
 	} else {
-		if partitionData.partitionID == 1 {
-			fmt.Println("[MATP1]Applying write request!")
-		}
 		auxiliaryStartTransaction(writeArgs.TransactionId, partitionData)
 		partitionData.pendingOps[writeArgs.TransactionId] = writeArgs.Updates
 		writeArgs.ReplyChan <- TimestampErrorPair{
@@ -832,6 +829,16 @@ func applyUpdates(updates []*UpdateObjectParams, commitTimestamp *clocksi.Timest
 	i := 0
 	for _, upd := range updates {
 		hashKey := getHash(getCombinedKey(upd.KeyParams))
+
+		//If it's a reset, delete the CRDT, generate the downstream and continue to the next upd.
+		//Note that reads may recreate the CRDT, but with an empty state.
+		if (*upd.UpdateArgs == crdt.ResetOp{}) {
+			tmp[i] = upd
+			i++
+			delete(partitionData.db, hashKey)
+			continue
+		}
+
 		obj, hasKey := partitionData.db[hashKey]
 		if !hasKey {
 			obj = initializeVersionManager(upd.CrdtType, partitionData)
@@ -863,13 +870,13 @@ func applyPendingReads(partitionData *partitionData) {
 	for tsKey, pendingReads := range partitionData.pendingReads {
 		if canRead, readLatest := canRead(pendingReads.Timestamp, partitionData); canRead {
 			//Apply all reads of that transaction
-			fmt.Printf("%d Applying pending reads for txn with key %s. Number of reads: %d.\n", partitionData.partitionID, tsKey, len(pendingReads.Reads))
+			//fmt.Printf("%d Applying pending reads for txn with key %s. Number of reads: %d.\n", partitionData.partitionID, tsKey, len(pendingReads.Reads))
 			for _, readArgs := range pendingReads.Reads {
 				//fmt.Println(partitionData.partitionID, "Applying pending read.")
 				applyReadAndReply(readArgs, readLatest, pendingReads.Timestamp, pendingReads.TransactionId, partitionData)
 				//fmt.Println(partitionData.partitionID, "Finished applying pending read.")
 			}
-			fmt.Printf("%d Finished applying all pending reads for txn with key %s with nReads %d.\n", partitionData.partitionID, tsKey, len(pendingReads.Reads))
+			//fmt.Printf("%d Finished applying all pending reads for txn with key %s with nReads %d.\n", partitionData.partitionID, tsKey, len(pendingReads.Reads))
 			delete(partitionData.pendingReads, tsKey)
 		}
 	}

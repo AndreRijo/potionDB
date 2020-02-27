@@ -58,9 +58,37 @@ func (args StateReadArguments) GetREADType() proto.READType { return proto.READT
 
 type NoOp struct{}
 
+/*
+	Current ResetOp implementation:
+	Nothing is done in the internal structure of the CRDT.
+	The materializer simply deletes the CRDT when he sees this operation.
+	For updsNotYetApplied (i.e., reads), this op is ignored.
+*/
+type ResetOp struct{}
+
 func (op NoOp) GetCRDTType() proto.CRDTType { return -1 }
 
 func (op NoOp) MustReplicate() bool { return false }
+
+func (op ResetOp) GetCRDTType() proto.CRDTType { return -1 }
+
+func (op ResetOp) MustReplicate() bool { return true }
+
+func (op ResetOp) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
+	return &proto.ApbUpdateOperation{Resetop: &proto.ApbCrdtReset{}}
+}
+
+func (resetOp ResetOp) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
+	return resetOp
+}
+
+func (op ResetOp) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
+	return op
+}
+
+func (op ResetOp) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
+	return &proto.ProtoOpDownstream{ResetOp: &proto.ProtoResetDownstream{}}
+}
 
 type ArgsError struct {
 	err  string

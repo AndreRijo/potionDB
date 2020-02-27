@@ -881,7 +881,7 @@ func (tm *TransactionManager) checkPendingRemoteTxns() {
 				case *TMRemoteClk:
 					tm.localClock.UpdatePos(typedReq.ReplicaID, typedReq.StableTs)
 					tm.mat.SendRequestToAllChannels(MaterializerRequest{MatRequestArgs: MatClkPosUpdArgs{ReplicaID: typedReq.ReplicaID, StableTs: typedReq.StableTs}})
-					fmt.Println(tm.clockOfRemoteTxn[typedReq.ReplicaID], tm.nPartitionsForRemoteTxn[typedReq.ReplicaID])
+					fmt.Println("[TM]Remote txns on hold.", tm.clockOfRemoteTxn[typedReq.ReplicaID], *tm.nPartitionsForRemoteTxn[typedReq.ReplicaID])
 					tm.downstreamOpsCh <- TMNewRemoteTxn{Timestamp: tm.clockOfRemoteTxn[typedReq.ReplicaID], nPartitions: *tm.nPartitionsForRemoteTxn[typedReq.ReplicaID]}
 					delete(tm.nPartitionsForRemoteTxn, typedReq.ReplicaID)
 					delete(tm.clockOfRemoteTxn, typedReq.ReplicaID)
@@ -913,80 +913,6 @@ func (tm *TransactionManager) checkPendingRemoteTxns() {
 		}
 	}
 	tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "Finished checking for pending remote txns")
-}
-
-//A separate go routine that is responsible for handling ops that are generated when remote downstream ops are applied
-//For now, this should only happen with NuCRDTs.
-func (tm *TransactionManager) handleDownstreamGeneratedOps() {
-	//TODO: Find out why this keeps on receiving msgs with updated timestamps from time to time that come from both TM + materializer
-	//If it was only materializer it would be understandable, as it would just be clock updates.
-	//Actually it seems to be applying ops so... something is quite slow here.
-	/*
-		for {
-			<-tm.downstreamOpsCh
-			fmt.Println("[NUCRDT TM]Debugging, ignored request")
-		}
-	*/
-	partitionsLeft := make(map[clocksi.TimestampKey]*int)                       //Stores the number of partitions that still need to reply
-	opsForTxn := make(map[clocksi.TimestampKey]map[int64][]*UpdateObjectParams) //Stores the generated ops separated by partition.
-	for {
-		//TODO: Go back (Remove */ and */, and delete the 2 lines below)
-		<-tm.downstreamOpsCh
-		ignore(partitionsLeft, opsForTxn)
-		/*
-			//fmt.Println("[NUCRDT TM]Waiting for request...")
-			switch typedReq := (<-tm.downstreamOpsCh).(type) {
-			case TMNewRemoteTxn:
-				//fmt.Println("[NUCRDT TM]Handling TMNewRemoteTxn for timestamp" + typedReq.Timestamp.ToString())
-				clkKey := typedReq.Timestamp.GetMapKey()
-				nLeft, hasEntry := partitionsLeft[clkKey]
-				if !hasEntry {
-					partitionsLeft[clkKey] = &typedReq.nPartitions
-					opsForTxn[clkKey] = make(map[int64][]*UpdateObjectParams)
-				} else {
-					*nLeft += typedReq.nPartitions
-					if *nLeft == 0 {
-						//Already received a reply from all materializers
-						ops := opsForTxn[clkKey]
-						//Only create a txn if there's actually new ops
-						if len(ops) > 0 {
-							//fmt.Println("[NUCRDT TM]Received reply from all partitions, need to commit for timestamp", typedReq.Timestamp.ToString())
-							go tm.commitOpsForRemote(ops)
-						}
-						delete(opsForTxn, clkKey)
-						delete(partitionsLeft, clkKey)
-					}
-				}
-			case TMDownstreamNewOps:
-				//fmt.Printf("[NUCRDT TM]Handling TMDownstreamNewOps for timestamp %s from partition %d.\n", typedReq.Timestamp.ToString(), typedReq.partitionID)
-				clkKey := typedReq.Timestamp.GetMapKey()
-				nLeft, hasEntry := partitionsLeft[clkKey]
-				if !hasEntry {
-					value := -1 //We don't know yet how many partitions are involved in this txn
-					nLeft = &value
-					partitionsLeft[clkKey] = &value
-					opsForTxn[clkKey] = make(map[int64][]*UpdateObjectParams)
-				} else {
-					*nLeft -= 1
-				}
-				if len(typedReq.newOps) > 0 {
-					//Actually has ops
-					opsForTxn[clkKey][typedReq.partitionID] = typedReq.newOps
-				}
-				if *nLeft == 0 {
-					//Already received a reply from all materializers
-					ops := opsForTxn[clkKey]
-					//Only create a txn if there's actually new ops
-					if len(ops) > 0 {
-						//fmt.Println("[NUCRDT TM]Received reply from all partitions, need to commit for timestamp", typedReq.Timestamp.ToString())
-						go tm.commitOpsForRemote(ops)
-					}
-					delete(opsForTxn, clkKey)
-					delete(partitionsLeft, clkKey)
-				}
-			}
-		*/
-	}
 }
 
 func (tm *TransactionManager) handleTMGetSnapshot(snapshot *TMGetSnapshot) {
@@ -1029,6 +955,82 @@ func (tm *TransactionManager) handleTMApplySnapshot(snapshot *TMApplySnapshot) {
 	tm.localClock.Lock()
 	tm.localClock.Timestamp = tm.localClock.Merge(ts)
 	tm.localClock.Unlock()
+}
+
+//A separate go routine that is responsible for handling ops that are generated when remote downstream ops are applied
+//For now, this should only happen with NuCRDTs.
+func (tm *TransactionManager) handleDownstreamGeneratedOps() {
+	//TODO: Find out why this keeps on receiving msgs with updated timestamps from time to time that come from both TM + materializer
+	//If it was only materializer it would be understandable, as it would just be clock updates.
+	//Actually it seems to be applying ops so... something is quite slow here.
+	/*
+		for {
+			<-tm.downstreamOpsCh
+			fmt.Println("[NUCRDT TM]Debugging, ignored request")
+		}
+	*/
+	partitionsLeft := make(map[clocksi.TimestampKey]*int)                       //Stores the number of partitions that still need to reply
+	opsForTxn := make(map[clocksi.TimestampKey]map[int64][]*UpdateObjectParams) //Stores the generated ops separated by partition.
+	for {
+		//TODO: Go back (Remove */ and */, and delete the 2 lines below)
+		/*
+			<-tm.downstreamOpsCh
+			ignore(partitionsLeft, opsForTxn)
+		*/
+
+		//fmt.Println("[NUCRDT TM]Waiting for request...")
+		switch typedReq := (<-tm.downstreamOpsCh).(type) {
+		case TMNewRemoteTxn:
+			//fmt.Println("[NUCRDT TM]Handling TMNewRemoteTxn for timestamp" + typedReq.Timestamp.ToString())
+			clkKey := typedReq.Timestamp.GetMapKey()
+			nLeft, hasEntry := partitionsLeft[clkKey]
+			if !hasEntry {
+				partitionsLeft[clkKey] = &typedReq.nPartitions
+				opsForTxn[clkKey] = make(map[int64][]*UpdateObjectParams)
+			} else {
+				*nLeft += typedReq.nPartitions
+				if *nLeft == 0 {
+					//Already received a reply from all materializers
+					ops := opsForTxn[clkKey]
+					//Only create a txn if there's actually new ops
+					if len(ops) > 0 {
+						//fmt.Println("[NUCRDT TM]Received reply from all partitions, need to commit for timestamp", typedReq.Timestamp.ToString())
+						go tm.commitOpsForRemote(ops)
+					}
+					delete(opsForTxn, clkKey)
+					delete(partitionsLeft, clkKey)
+				}
+			}
+		case TMDownstreamNewOps:
+			//fmt.Printf("[NUCRDT TM]Handling TMDownstreamNewOps for timestamp %s from partition %d.\n", typedReq.Timestamp.ToString(), typedReq.partitionID)
+			clkKey := typedReq.Timestamp.GetMapKey()
+			nLeft, hasEntry := partitionsLeft[clkKey]
+			if !hasEntry {
+				value := -1 //We don't know yet how many partitions are involved in this txn
+				nLeft = &value
+				partitionsLeft[clkKey] = &value
+				opsForTxn[clkKey] = make(map[int64][]*UpdateObjectParams)
+			} else {
+				*nLeft -= 1
+			}
+			if len(typedReq.newOps) > 0 {
+				//Actually has ops
+				opsForTxn[clkKey][typedReq.partitionID] = typedReq.newOps
+			}
+			if *nLeft == 0 {
+				//Already received a reply from all materializers
+				ops := opsForTxn[clkKey]
+				//Only create a txn if there's actually new ops
+				if len(ops) > 0 {
+					//fmt.Println("[NUCRDT TM]Received reply from all partitions, need to commit for timestamp", typedReq.Timestamp.ToString())
+					go tm.commitOpsForRemote(ops)
+				}
+				delete(opsForTxn, clkKey)
+				delete(partitionsLeft, clkKey)
+			}
+		}
+
+	}
 }
 
 //Does a local commit but without applying the operations in the local partitions.

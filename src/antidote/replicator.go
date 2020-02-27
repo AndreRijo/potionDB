@@ -168,18 +168,29 @@ func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, rep
 }
 
 func (repl *Replicator) replicateCycle() {
-	//count := 0
+	count, start, finish, toSleep := time.Duration(0), int64(0), int64(0), time.Duration(0)
 	for {
+		start = time.Now().UnixNano()
 		tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "starting replicateCycle")
+
 		repl.getNewTxns()
-		//count++
+		count++
 		toSend := repl.preparateDataToSend()
 		if len(toSend) > 0 {
-			fmt.Println("[REPLICATOR]Still sending ops.", "Number of remote txns:", len(toSend))
+			fmt.Println("[REPLICATOR]Sending ops.", "Number of remote txns:", len(toSend))
 		}
 		repl.sendTxns(toSend)
 		tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "finishing replicateCycle")
-		time.Sleep(tsSendDelay * time.Millisecond)
+
+		finish = time.Now().UnixNano()
+		toSleep = tsSendDelay - time.Duration((finish-start)/1000000)
+		if toSleep > 10 {
+			time.Sleep(toSleep * time.Millisecond)
+		}
+		//time.Sleep(tsSendDelay * time.Millisecond)
+		if count*tsSendDelay%60000 == 0 && len(toSend) == 0 {
+			fmt.Println("[REPLICATOR]No ops to send.")
+		}
 		//ignore(toSend)
 	}
 }

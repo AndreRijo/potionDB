@@ -62,6 +62,11 @@ type ProtoCRDT interface {
 func UpdateProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation, crdtType proto.CRDTType) (op *UpdateArguments) {
 	var tmpUpd UpdateArguments = &NoOp{}
 
+	if protobuf.GetResetop() != nil {
+		tmpUpd = &ResetOp{}
+		return &tmpUpd
+	}
+
 	switch crdtType {
 	case proto.CRDTType_COUNTER:
 		tmpUpd = Increment{}.FromUpdateObject(protobuf)

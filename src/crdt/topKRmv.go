@@ -746,6 +746,9 @@ func (crdt *TopKRmvCrdt) applyRemoveAll(op *DownstreamTopKRemoveAll) (effect *Ef
 						//Promote to top-k and set as min
 						crdt.elems[highestElem.Id] = highestElem
 						crdt.smallestScore = highestElem
+						if highestElem.Data == nil {
+							highestElem.Data = &[]byte{}
+						}
 						downAdds.DownstreamAdds[nAdds] = highestElem
 						nAdds++
 						//Also remove it from notInTop
@@ -780,6 +783,9 @@ func (crdt *TopKRmvCrdt) applyRemoveAll(op *DownstreamTopKRemoveAll) (effect *Ef
 					}
 					//Need to pass this add now
 					//TODO: Analyze if it really needs to be downstreamed or not
+					if highest.Data == nil {
+						highest.Data = &[]byte{}
+					}
 					downAdds.DownstreamAdds[nAdds] = highest
 					nAdds++
 				} else if elem.isEqual(crdt.smallestScore) {
@@ -856,7 +862,11 @@ func (crdt *TopKRmvCrdt) applyRemove(op *DownstreamTopKRemove) (effect *Effect, 
 				//Promote to top-k and set as min
 				crdt.elems[highestElem.Id] = highestElem
 				crdt.smallestScore = highestElem
-				otherDownstreamArgs = DownstreamTopKAdd{TopKElement: highestElem}
+				otherDown := DownstreamTopKAdd{TopKElement: highestElem}
+				if otherDown.Data == nil {
+					otherDown.Data = &[]byte{}
+				}
+				otherDownstreamArgs = otherDown
 				//Also remove it from notInTop
 				notTop := crdt.notInTop[highestElem.Id]
 				delete(notTop, highestElem)
@@ -889,7 +899,11 @@ func (crdt *TopKRmvCrdt) applyRemove(op *DownstreamTopKRemove) (effect *Effect, 
 			}
 			//Need to pass this add now
 			//TODO: Analyze if it really needs to be downstreamed or not
-			otherDownstreamArgs = DownstreamTopKAdd{TopKElement: highest}
+			otherDown := DownstreamTopKAdd{TopKElement: highest}
+			if otherDown.Data == nil {
+				otherDown.Data = &[]byte{}
+			}
+			otherDownstreamArgs = otherDown
 		} else if elem.isEqual(crdt.smallestScore) {
 			//Removed element was the min, need to find new min
 			crdt.findAndUpdateMin()

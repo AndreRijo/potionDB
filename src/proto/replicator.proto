@@ -33,6 +33,7 @@ message ProtoOpDownstream {
     optional ProtoAvgDownstream avgOp = 6;
     optional ProtoMaxMinDownstream maxminOp = 7;
     optional ProtoRWEmbMapDownstream rwembmapOp = 8;
+    optional ProtoResetDownstream resetOp = 15;
 }
 
 message ProtoCounterDownstream {
@@ -141,6 +142,11 @@ message ProtoEmbMapUpd {
     required ProtoOpDownstream upd = 3;
 }
 
+message ProtoResetDownstream {
+}
+
+/*****REPLICA MANAGEMENT*****/
+
 message ProtoJoin {
     repeated string buckets = 1;
     required int32 replicaID = 2;
@@ -203,7 +209,7 @@ message ProtoReplyEmpty {
 
 }
 
-//STATES
+//*****STATES*****
 message ProtoCounterState {
     required int32 value = 1;
 }
