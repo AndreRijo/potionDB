@@ -66,14 +66,16 @@ var ()
 //In the case of the connection to the local replica's RabbitMQ server, we don't consume the self messages (isSelfConn)
 func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16, connID int16, isSelfConn bool) (remote *RemoteConn, err error) {
 	//conn, err := amqp.Dial(protocol + prefix + ip + port)
-	prefix := tools.SharedConfig.GetConfig("rabbitMQUser")
-	vhost := tools.SharedConfig.GetConfig("rabbitVHost")
-	if prefix == "" {
-		prefix = "test"
-	}
-	if vhost == "" {
-		vhost = "/"
-	}
+	prefix := tools.SharedConfig.GetOrDefault("rabbitMQUser", "test")
+	vhost := tools.SharedConfig.GetOrDefault("rabbitVHost", "/")
+	/*
+		if prefix == "" {
+			prefix = "guest"
+		}
+		if vhost == "" {
+			vhost = "/"
+		}
+	*/
 	prefix = prefix + ":" + prefix + "@"
 	//conn, err := amqp.Dial(protocol + prefix + ip)
 	link := protocol + prefix + ip + "/" + vhost

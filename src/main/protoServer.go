@@ -59,7 +59,7 @@ func main() {
 	configs := loadConfigs()
 	startProfiling(configs)
 
-	portString := configs.GetConfig(PORT_KEY)
+	portString := configs.GetOrDefault(PORT_KEY, "8087")
 	//tmpId, _ := strconv.ParseInt(portString, 0, 64)
 	//tmpId2, _ := strconv.ParseInt(configs.GetConfig("potionDBID"), 10, 64)
 	//id := int16((tmpId + tmpId2) % math.MaxInt16)
@@ -70,7 +70,7 @@ func main() {
 
 	fmt.Println("ReplicaID:", id)
 	//Wait for joining mechanism, if it's enabled
-	if configs.GetBoolConfig(DO_JOIN, true) {
+	if configs.GetBoolConfig(DO_JOIN, false) {
 		fmt.Println("Joining existing servers, please stand by...")
 		tm.WaitUntilReady()
 		fmt.Println("Join complete, starting PotionDB.")
@@ -382,7 +382,7 @@ func stopProfiling(configs *tools.ConfigLoader) {
 }
 
 func loadConfigs() (configs *tools.ConfigLoader) {
-	configFolder := flag.String("config", "default", "sub-folder in configs folder that contains the configuration files to be used.")
+	configFolder := flag.String("config", "../../configs/default/", "sub-folder in configs folder that contains the configuration files to be used.")
 	rabbitMQIP := flag.String("rabbitMQIP", "F", "ip:port of this replica's rabbitMQ instance.")
 	servers := flag.String("servers", "F", "list of ip:port of remote replicas' rabbitMQ instances, separated by spaces.")
 	vhost := flag.String("rabbitVHost", "/", "vhost to use with rabbitMQ.")
