@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"reflect"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -198,4 +200,9 @@ func StateToString(state crdt.State) (stateString string) {
 	}
 
 	return sb.String()
+}
+
+//Note: Use with care as this uses reflection!
+func GetFunctionName(fun interface{}) string {
+	return runtime.FuncForPC(reflect.ValueOf(fun).Pointer()).Name()
 }

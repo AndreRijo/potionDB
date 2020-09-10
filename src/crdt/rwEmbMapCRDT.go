@@ -177,8 +177,9 @@ func (crdt *RWEmbMapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16
 		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
 		entries:               make(map[string]CRDT),
 		removes:               make(map[string]map[int16]*markedTimestamp),
-		rmvClock:              clocksi.NewClockSiTimestamp(replicaID),
-		replicaID:             replicaID,
+		rmvClock:              clocksi.NewClockSiTimestamp(),
+		//rmvClock:              clocksi.NewClockSiTimestamp(replicaID),
+		replicaID: replicaID,
 	}
 	newCrdt = crdt
 	return

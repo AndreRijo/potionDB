@@ -36,6 +36,7 @@ const (
 	CommitTrans      = 121
 	StaticUpdateObjs = 122
 	StaticReadObjs   = 123
+	ResetServer      = 12
 	//Replies
 	ConnectReplicaReply = 11
 	OpReply             = 111
@@ -43,6 +44,7 @@ const (
 	ReadObjsReply       = 126
 	CommitTransReply    = 127
 	StaticReadObjsReply = 128
+	ResetServerReply    = 13
 	ErrorReply          = 0
 )
 
@@ -331,6 +333,8 @@ func unmarshallProto(code byte, msgBuf []byte) (protobuf pb.Message) {
 		protobuf = &proto.ApbStaticReadObjects{}
 	case StaticRead:
 		protobuf = &proto.ApbStaticRead{}
+	case ResetServer:
+		protobuf = &proto.ApbResetServer{}
 	case OpReply:
 		protobuf = &proto.ApbOperationResp{}
 	case StartTransReply:
@@ -341,6 +345,8 @@ func unmarshallProto(code byte, msgBuf []byte) (protobuf pb.Message) {
 		protobuf = &proto.ApbCommitResp{}
 	case StaticReadObjsReply:
 		protobuf = &proto.ApbStaticReadObjectsResp{}
+	case ResetServerReply:
+		protobuf = &proto.ApbResetServerResp{}
 	case ErrorReply:
 		protobuf = &proto.ApbErrorResp{}
 	}

@@ -147,6 +147,10 @@ message ProtoResetDownstream {
 
 /*****REPLICA MANAGEMENT*****/
 
+message ProtoRemoteID {
+    required int32 replicaID = 1;
+}
+
 message ProtoJoin {
     repeated string buckets = 1;
     required int32 replicaID = 2;

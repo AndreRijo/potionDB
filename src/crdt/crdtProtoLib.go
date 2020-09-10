@@ -60,10 +60,10 @@ type ProtoCRDT interface {
 
 /*****GLOBAL FUNCS*****/
 func UpdateProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation, crdtType proto.CRDTType) (op *UpdateArguments) {
-	var tmpUpd UpdateArguments = &NoOp{}
+	var tmpUpd UpdateArguments = NoOp{}
 
 	if protobuf.GetResetop() != nil {
-		tmpUpd = &ResetOp{}
+		tmpUpd = ResetOp{}
 		return &tmpUpd
 	}
 

@@ -24,7 +24,9 @@ import (
 	"os/signal"
 	"proto"
 	"runtime"
+	"runtime/debug"
 	"runtime/pprof"
+	"shared"
 	"strconv"
 	"strings"
 	"syscall"
@@ -74,6 +76,10 @@ func main() {
 		fmt.Println("Joining existing servers, please stand by...")
 		tm.WaitUntilReady()
 		fmt.Println("Join complete, starting PotionDB.")
+	} else {
+		fmt.Println("Waiting for replicaIDs of existing replicas...")
+		tm.WaitUntilReady()
+		fmt.Println("All replicaIDs are now known, starting PotionDB.")
 	}
 
 	server, err := net.Listen("tcp", "0.0.0.0:"+strings.TrimSpace(portString))
@@ -164,6 +170,10 @@ func processConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID
 			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbStaticRead")
 			replyType = antidote.StaticReadObjsReply
 			reply = handleStaticRead(protobuf.(*proto.ApbStaticRead), tmChan, clientId)
+		case antidote.ResetServer:
+			fmt.Println("Starting to reset PotionDB")
+			replyType = antidote.ResetServerReply
+			reply = handleResetServer(tm)
 		default:
 			tools.FancyErrPrint(tools.PROTO_PRINT, replicaID, "Received unknown proto, ignored... sort of")
 			fmt.Println("I don't know how to handle this proto", protoType)
@@ -332,6 +342,17 @@ func handleCommitTxn(proto *proto.ApbCommitTransaction,
 	return
 }
 
+func handleResetServer(tm *antidote.TransactionManager) (respProto *proto.ApbResetServerResp) {
+	tm.ResetServer()
+	fmt.Println("Forcing GB...")
+	debug.FreeOSMemory()
+	fmt.Println("Server successfully reset.")
+	fmt.Println("Memory stats after reset:")
+	printMemStats(&runtime.MemStats{}, 0)
+
+	return &proto.ApbResetServerResp{}
+}
+
 func createTMRequest(args antidote.TMRequestArgs, txnId antidote.TransactionId,
 	clientClock clocksi.Timestamp) (request antidote.TransactionManagerRequest) {
 	return antidote.TransactionManagerRequest{
@@ -389,6 +410,10 @@ func loadConfigs() (configs *tools.ConfigLoader) {
 	port := flag.String("port", "F", "port for potionDB.")
 	replicaID := flag.String("id", "F", "replicaID that uniquely identifies this replica.")
 	doJoin := flag.String("doJoin", "F", "if this replica should query others about the current state before starting to accept client requests")
+	stringBuckets := flag.String("buckets", "none", "list of buckets for the server to replicate.")
+	disableRepl := flag.String("disableReplicator", "none", "if replicator should be disabled. False by default.")
+	disableLog := flag.String("disableLog", "none", "if logging of operations should be disabled. False by default.")
+	disableReadWaiting := flag.String("disableReadWaiting", "none", "if reads should wait until the materializer's clock is >= to the read's")
 
 	flag.Parse()
 	configs = &tools.ConfigLoader{}
@@ -435,6 +460,26 @@ func loadConfigs() (configs *tools.ConfigLoader) {
 		*/
 		configs.ReplaceConfig("potionDBID", strconv.FormatInt(rand.Int63(), 10))
 	}
+	if *stringBuckets != "none" {
+		bks := *stringBuckets
+		if bks[0] == '[' {
+			bks = strings.Replace(bks[1:len(bks)-1], ",", " ", -1)
+			fmt.Println(bks)
+		}
+		configs.ReplaceConfig("buckets", bks)
+	}
+	if *disableRepl != "none" {
+		configs.ReplaceConfig("disableReplicator", *disableRepl)
+	}
+	if *disableLog != "none" {
+		configs.ReplaceConfig("disableLog", *disableRepl)
+	}
+	if *disableReadWaiting != "none" {
+		configs.ReplaceConfig("disableReadWaiting", *disableReadWaiting)
+	}
+	shared.IsReplDisabled = configs.GetBoolConfig("disableReplicator", false)
+	shared.IsLogDisabled = configs.GetBoolConfig("disableLog", false)
+	shared.IsReadWaitingDisabled = configs.GetBoolConfig("disableReadWaiting", false)
 
 	return
 }
@@ -501,21 +546,9 @@ func debugMemory(configs *tools.ConfigLoader) {
 		}
 	}()
 
-	const MB = 1048576
 	count := 0
 	for {
-		runtime.ReadMemStats(&memStats)
-		fmt.Printf("Total mem stolen from OS: %d MB\n", memStats.Sys/MB)
-		fmt.Printf("Max alloced: %d MB\n", maxAlloc/MB)
-		fmt.Printf("Currently alloced: %d MB\n", memStats.Alloc/MB)
-		fmt.Printf("Mem that could be returned to OS: %d MB\n", (memStats.HeapIdle-memStats.HeapReleased)/MB)
-		fmt.Printf("Number of objs still malloced: %d\n", memStats.HeapObjects)
-		fmt.Printf("Largest heap size: %d MB\n", memStats.HeapSys/MB)
-		fmt.Printf("Stack size stolen from OS: %d MB\n", memStats.StackSys/MB)
-		fmt.Printf("Stack size in use: %d MB\n", memStats.StackInuse/MB)
-		fmt.Printf("Number of goroutines: %d\n", runtime.NumGoroutine())
-		fmt.Printf("Number of GC cycles: %d\n", memStats.NumGC)
-		fmt.Println()
+		printMemStats(&memStats, maxAlloc)
 		count++
 
 		/*
@@ -527,4 +560,22 @@ func debugMemory(configs *tools.ConfigLoader) {
 
 		time.Sleep(10000 * time.Millisecond)
 	}
+}
+
+func printMemStats(memStats *runtime.MemStats, maxAlloc uint64) {
+	runtime.ReadMemStats(memStats)
+	const MB = 1048576
+	fmt.Printf("Total mem stolen from OS: %d MB\n", memStats.Sys/MB)
+	if maxAlloc != 0 {
+		fmt.Printf("Max alloced: %d MB\n", maxAlloc/MB)
+	}
+	fmt.Printf("Currently alloced: %d MB\n", memStats.Alloc/MB)
+	fmt.Printf("Mem that could be returned to OS: %d MB\n", (memStats.HeapIdle-memStats.HeapReleased)/MB)
+	fmt.Printf("Number of objs still malloced: %d\n", memStats.HeapObjects)
+	fmt.Printf("Largest heap size: %d MB\n", memStats.HeapSys/MB)
+	fmt.Printf("Stack size stolen from OS: %d MB\n", memStats.StackSys/MB)
+	fmt.Printf("Stack size in use: %d MB\n", memStats.StackInuse/MB)
+	fmt.Printf("Number of goroutines: %d\n", runtime.NumGoroutine())
+	fmt.Printf("Number of GC cycles: %d\n", memStats.NumGC)
+	fmt.Println()
 }

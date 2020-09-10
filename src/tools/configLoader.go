@@ -23,6 +23,10 @@ var (
 	SharedConfig *ConfigLoader
 )
 
+func (config *ConfigLoader) InitEmptyConfig() {
+	config.configs = make(map[string]string)
+}
+
 func (config *ConfigLoader) LoadConfigs(folder string) {
 	SharedConfig = config
 	config.configs = make(map[string]string)
@@ -73,6 +77,15 @@ func (config *ConfigLoader) GetIntConfig(key string, def int) int {
 	}
 	result, _ := strconv.ParseInt(value, 10, 64)
 	return int(result)
+}
+
+func (config *ConfigLoader) GetFloatConfig(key string, def float64) float64 {
+	value, has := config.configs[key]
+	if !has {
+		return def
+	}
+	result, _ := strconv.ParseFloat(value, 64)
+	return result
 }
 
 func (config *ConfigLoader) ReplaceConfig(key string, value string) {

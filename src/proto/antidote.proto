@@ -336,6 +336,14 @@ message ApbConnectReplicaResp {
 
 
 
+//Others
+message ApbResetServer {
+    //Resets server state, i.e., deletes all CRDTs and replication status
+}
+
+message ApbResetServerResp {}
+
+
 //Partial reading
 
 enum READ_type {

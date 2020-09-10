@@ -149,6 +149,18 @@ func (group *RemoteGroup) listenToRemoteConn(channel chan ReplicatorMsg) {
 	}
 }
 
+func (group *RemoteGroup) sendReplicaID() {
+	//Same msg for everyone, so we prepare it here
+	protobuf := createProtoRemoteID(group.replicaID)
+	data, err := pb.Marshal(protobuf)
+	if err != nil {
+		tools.FancyErrPrint(tools.REMOTE_PRINT, group.replicaID, "Failed to generate bytes of RemoteID msg:", err)
+	}
+	for _, conn := range group.conns {
+		conn.SendRemoteID(data)
+	}
+}
+
 func (group *RemoteGroup) SendJoin(buckets []string, replicaID int16) {
 	//Same msg for everyone, so we prepare it here
 	protobuf := createProtoJoin(buckets, replicaID, tools.SharedConfig.GetConfig("localRabbitMQAddress"))

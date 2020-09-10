@@ -51,7 +51,7 @@ func TestWrites1(t *testing.T) {
 	}
 
 	firstWriteParams := createRandomSetAdd(firstKey)
-	firstWriteReq, firstWriteChan := createStaticWrite(TransactionId(rand.Uint64()), clocksi.NewClockSiTimestamp(0), firstWriteParams)
+	firstWriteReq, firstWriteChan := createStaticWrite(TransactionId(rand.Uint64()), clocksi.NewClockSiTimestampFromId(0), firstWriteParams)
 
 	go tm.handleStaticTMUpdate(firstWriteReq)
 	firstWriteReply := <-firstWriteChan
@@ -109,7 +109,7 @@ func TestWrites2(t *testing.T) {
 	}
 
 	firstWriteParams := createRandomSetAdd(firstKey)
-	firstWriteReq, firstWriteChan := createStaticWrite(TransactionId(rand.Uint64()), clocksi.NewClockSiTimestamp(0), firstWriteParams)
+	firstWriteReq, firstWriteChan := createStaticWrite(TransactionId(rand.Uint64()), clocksi.NewClockSiTimestampFromId(0), firstWriteParams)
 
 	//fmt.Println("Sending 1st write")
 	go tm.handleStaticTMUpdate(firstWriteReq)
@@ -178,7 +178,7 @@ func TestWrites3(t *testing.T) {
 	firstKey := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), proto.CRDTType_ORSET, "bkt")
 
 	firstWriteParams := createRandomSetAdd(firstKey)
-	firstWriteReq, firstWriteChan := createStaticWrite(TransactionId(0), clocksi.NewClockSiTimestamp(0), firstWriteParams)
+	firstWriteReq, firstWriteChan := createStaticWrite(TransactionId(0), clocksi.NewClockSiTimestampFromId(0), firstWriteParams)
 
 	go tm.handleStaticTMUpdate(firstWriteReq)
 	firstWriteReply := <-firstWriteChan
@@ -198,7 +198,7 @@ func TestWrites3(t *testing.T) {
 	}
 
 	thirdWriteParams := createRandomSetAdd(firstKey)
-	thirdWriteReq, thirdWriteChan := createStaticWrite(TransactionId(0), clocksi.NewClockSiTimestamp(0), thirdWriteParams)
+	thirdWriteReq, thirdWriteChan := createStaticWrite(TransactionId(0), clocksi.NewClockSiTimestampFromId(0), thirdWriteParams)
 
 	go tm.handleStaticTMUpdate(thirdWriteReq)
 	thirdWriteReply := <-thirdWriteChan
@@ -249,7 +249,7 @@ func TestWritesAndReads(t *testing.T) {
 	firstKey := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), proto.CRDTType_ORSET, "bkt")
 
 	firstWriteParams := createRandomSetAdd(firstKey)
-	firstWriteReq, firstWriteChan := createStaticWrite(TransactionId(rand.Uint64()), clocksi.NewClockSiTimestamp(0), firstWriteParams)
+	firstWriteReq, firstWriteChan := createStaticWrite(TransactionId(rand.Uint64()), clocksi.NewClockSiTimestampFromId(0), firstWriteParams)
 
 	go tm.handleStaticTMUpdate(firstWriteReq)
 	firstWriteReply := <-firstWriteChan
@@ -339,7 +339,7 @@ func TestNonStaticTransaction1(t *testing.T) {
 	//Sleep for a bit to ensure all gothreads initialize
 	time.Sleep(initializeTime * time.Millisecond)
 
-	txnRep := createAndProcessStartTxn(tm, txnPartitions, TransactionId(rand.Uint64()), clocksi.NewClockSiTimestamp(0))
+	txnRep := createAndProcessStartTxn(tm, txnPartitions, TransactionId(rand.Uint64()), clocksi.NewClockSiTimestampFromId(0))
 	fmt.Println(txnRep.TransactionId)
 
 	firstKey := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), proto.CRDTType_ORSET, "bkt")
@@ -373,7 +373,7 @@ func TestNonStaticTransaction2(t *testing.T) {
 
 	//Initial static update to add some data to a set CRDT
 	key := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), proto.CRDTType_ORSET, "bkt")
-	staticTxnWriteParams, staticTxnWriteReply := createAndProcessWrite(tm, txnPartitions, static, key, createRandomSetAdd, TransactionId(rand.Uint64()), clocksi.NewClockSiTimestamp(0))
+	staticTxnWriteParams, staticTxnWriteReply := createAndProcessWrite(tm, txnPartitions, static, key, createRandomSetAdd, TransactionId(rand.Uint64()), clocksi.NewClockSiTimestampFromId(0))
 	checkStaticUpdateError(1, staticTxnWriteReply.staticUpdateReply, t)
 
 	firstTxnRep := createAndProcessStartTxn(tm, txnPartitions, staticTxnWriteReply.staticUpdateReply.TransactionId, staticTxnWriteReply.staticUpdateReply.Timestamp)
@@ -434,7 +434,7 @@ func TestReplicator1(t *testing.T) {
 	time.Sleep(initializeTime * time.Millisecond)
 
 	key := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), proto.CRDTType_ORSET, "bkt")
-	writeReq, writeReply := createAndProcessWrite(tm1, nil, static, key, createRandomSetAdd, TransactionId(rand.Uint64()), clocksi.NewClockSiTimestamp(0))
+	writeReq, writeReply := createAndProcessWrite(tm1, nil, static, key, createRandomSetAdd, TransactionId(rand.Uint64()), clocksi.NewClockSiTimestampFromId(0))
 	checkStaticUpdateError(1, writeReply.staticUpdateReply, t)
 	ignore(writeReq)
 	//ignore(tm2)
@@ -466,7 +466,7 @@ func TestReplicator2(t *testing.T) {
 	time.Sleep(initializeTime * time.Millisecond)
 
 	key := CreateKeyParams(string(fmt.Sprint(rand.Uint64())), proto.CRDTType_ORSET, "bkt")
-	writeReq, writeReply := createAndProcessWrite(tm1, nil, static, key, createRandomSetAdd, TransactionId(rand.Uint64()), clocksi.NewClockSiTimestamp(0))
+	writeReq, writeReply := createAndProcessWrite(tm1, nil, static, key, createRandomSetAdd, TransactionId(rand.Uint64()), clocksi.NewClockSiTimestampFromId(0))
 	checkStaticUpdateError(1, writeReply.staticUpdateReply, t)
 	ignore(writeReq)
 	//ignore(tm2)
@@ -620,7 +620,7 @@ func createAndProccessRead(tm *TransactionManager, isStatic bool, readParams []R
 }
 
 func createAndProcessStartTxn(tm *TransactionManager, txnPartitions *ongoingTxn, txnId TransactionId, ts clocksi.Timestamp) (reply TMStartTxnReply) {
-	txn, txnChan := createStartTxn(TransactionId(rand.Uint64()), clocksi.NewClockSiTimestamp(0))
+	txn, txnChan := createStartTxn(TransactionId(rand.Uint64()), clocksi.NewClockSiTimestampFromId(0))
 	go tm.handleTMStartTxn(txn, txnPartitions)
 	return <-txnChan
 }

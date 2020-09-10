@@ -2,6 +2,7 @@ package antidote
 
 import (
 	"clocksi"
+	fmt "fmt"
 	"shared"
 	"sync"
 )
@@ -14,6 +15,8 @@ type Logger interface {
 	//Send a request to the logger.
 	//Each logger implementation must support the following requests: LogCommitArgs, LogNextClkArgs
 	SendLoggerRequest(request LoggerRequest)
+	//Resets the status of the logger to the initial state (i.e., empty log)
+	Reset()
 }
 
 type LoggerRequest struct {
@@ -116,6 +119,12 @@ func (logger *MemLogger) Initialize(mat *Materializer, partId uint64) {
 	}
 }
 
+func (logger *MemLogger) Reset() {
+	logger.log = make([]PairClockUpdates, 0, initLogCapacity)
+	logger.currLogPos = 0
+	fmt.Printf("[LOG %d]Reset complete.\n", logger.partId)
+}
+
 /*
 func (logger *MemLogger) handleRequests() {
 	for {
@@ -155,7 +164,7 @@ func (logger *MemLogger) handleCommitLogRequest(request LogCommitArgs) {
 
 func (logger *MemLogger) handleTxnLogRequest(request LogTxnArgs) {
 	if shared.IsLogDisabled {
-		request.ReplyChan <- StableClkUpdatesPair{stableClock: clocksi.NewClockSiTimestamp(0), upds: []PairClockUpdates{}}
+		request.ReplyChan <- StableClkUpdatesPair{stableClock: clocksi.NewClockSiTimestampFromId(0), upds: []PairClockUpdates{}}
 		return
 	}
 	var txns []PairClockUpdates

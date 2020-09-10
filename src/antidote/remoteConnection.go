@@ -48,6 +48,7 @@ const (
 	//defaultListenerSize = 100
 	clockTopic        = "clk"
 	joinTopic         = "join"
+	remoteIDContent   = "remoteID"
 	joinContent       = "join"
 	replyJoinContent  = "replyJoin"
 	requestBktContent = "requestBkt"
@@ -249,13 +250,7 @@ func (remote *RemoteConn) startReceiver() {
 	fmt.Println("[RC] Receiver started")
 	for data := range remote.recCh {
 		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Received something!")
-		/*
-			//TODO: Maybe analyze data.routingKey to avoid decoding the protobuf if it was sent by this own replica? RoutingKey no longer has information about the sender though...
-			if data.CorrelationId == remote.replicaString {
-				//fmt.Println("Ignored, own received.")
-				tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Ignored received request as it was sent by myself")
-			} else {
-		*/
+
 		switch data.RoutingKey {
 		case clockTopic:
 			remote.handleReceivedStableClock(data.Body)
@@ -315,7 +310,6 @@ func (remote *RemoteConn) handleReceivedStableClock(data []byte) {
 	}
 	clkReq := protoToStableClock(protobuf)
 	tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Received remote stableClock:", *clkReq)
-	//TODO: Avoid receiving own messages?
 	if clkReq.SenderID == remote.replicaID {
 		fmt.Println("ALSO NOT SUPPOSED TO HAPPEN NOW!")
 		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Ignored received stableClock as it was sent by myself.")
@@ -373,6 +367,11 @@ func (remote *RemoteConn) GetNextRemoteRequest() (request ReplicatorMsg) {
 
 /***** JOINING LOGIC *****/
 
+func (remote *RemoteConn) SendRemoteID(idData []byte) {
+	remote.sendCh.Publish(exchangeName, joinTopic, false, false,
+		amqp.Publishing{CorrelationId: remote.replicaString, ContentType: remoteIDContent, Body: idData})
+}
+
 func (remote *RemoteConn) SendJoin(joinData []byte) {
 	fmt.Println("[RC]Sending join as", remote.replicaID, remote.connID)
 	remote.sendCh.Publish(exchangeName, joinTopic, false, false,
@@ -409,6 +408,9 @@ func (remote *RemoteConn) SendReplyEmpty() {
 
 func (remote *RemoteConn) handleReceivedJoinTopic(msgType string, data []byte) {
 	switch msgType {
+	case remoteIDContent:
+		fmt.Println("Join msg is a remoteID")
+		remote.handleRemoteID(data)
 	case joinContent:
 		fmt.Println("Join msg is a join")
 		remote.handleJoin(data)
@@ -425,6 +427,12 @@ func (remote *RemoteConn) handleReceivedJoinTopic(msgType string, data []byte) {
 		fmt.Println("Join msg is a replyEmpty")
 		remote.handleReplyEmpty(data)
 	}
+}
+
+func (remote *RemoteConn) handleRemoteID(data []byte) {
+	protobuf := &proto.ProtoRemoteID{}
+	remote.decodeProtobuf(protobuf, data, "Failed to decode bytes of received protoRemoteID. Error:")
+	remote.listenerChan <- &RemoteID{SenderID: int16(protobuf.GetReplicaID())}
 }
 
 func (remote *RemoteConn) handleJoin(data []byte) {

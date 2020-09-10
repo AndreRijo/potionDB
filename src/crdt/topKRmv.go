@@ -11,6 +11,7 @@ import (
 )
 
 //TODO: updsNotYetApplied
+//TODO: Keep a sorted elems. Build it on first query, cache it until a change to elems happens.
 
 type TopKRmvCrdt struct {
 	*genericInversibleCRDT
@@ -29,6 +30,10 @@ type TopKRmvCrdt struct {
 	//a) the value is < smallestScore and thus shouldn't be in top
 	//b) the value is >= smallestScore yet a higher value for the same ID is already on top, albeit with a smaller TS.
 	notInTop map[int32]setTopKElement
+
+	//Buffer for getTopN and getTopAbove.
+	//Each time an upd is done it gets nilled, and is rebuilt on the first execution of one of those queries.
+	sortedElems []TopKScore
 }
 
 type TopKValueState struct {
@@ -188,7 +193,7 @@ func (elem TopKElement) isHigher(other TopKElement) bool {
 }
 
 func (elem TopKElement) isSmaller(other TopKElement) bool {
-	return other.isEqual(TopKElement{}) && other.isHigher(elem)
+	return other.isEqual(TopKElement{}) || other.isHigher(elem)
 }
 
 func (elem TopKElement) isEqual(other TopKElement) bool {
@@ -249,7 +254,8 @@ func (args GetTopKAboveValueArguments) GetREADType() proto.READType {
 }
 
 const (
-	defaultTopKSize = 100 //Default number of top positions
+	defaultTopKSize = 100  //Default number of top positions
+	cacheSortedSet  = true //If topN query should cache the sorted set of elems until an update is applied
 )
 
 func (crdt *TopKRmvCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
@@ -259,13 +265,15 @@ func (crdt *TopKRmvCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16)
 func (crdt *TopKRmvCrdt) InitializeWithSize(startTs *clocksi.Timestamp, replicaID int16, size int) (newCrdt CRDT) {
 	crdt = &TopKRmvCrdt{
 		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
-		vc:                    clocksi.NewClockSiTimestamp(replicaID),
-		replicaID:             replicaID,
-		maxElems:              size,
-		smallestScore:         TopKElement{Score: math.MinInt32},
-		elems:                 make(map[int32]TopKElement),
-		rems:                  make(map[int32]clocksi.Timestamp),
-		notInTop:              make(map[int32]setTopKElement),
+		vc:                    clocksi.NewClockSiTimestamp(),
+		//vc:                    clocksi.NewClockSiTimestamp(replicaID),
+		replicaID: replicaID,
+		maxElems:  size,
+		//smallestScore:         TopKElement{Score: math.MinInt32},
+		smallestScore: TopKElement{},
+		elems:         make(map[int32]TopKElement),
+		rems:          make(map[int32]clocksi.Timestamp),
+		notInTop:      make(map[int32]setTopKElement),
 	}
 	newCrdt = crdt
 	return
@@ -300,32 +308,57 @@ func (crdt *TopKRmvCrdt) getState(updsNotYetApplied []*UpdateArguments) (state S
 	return TopKValueState{Scores: values}
 }
 
+/*
+	Note: in the current implementation, at most N entries are returned, even if N+1 has the same value as N.
+*/
 func (crdt *TopKRmvCrdt) getTopN(numberEntries int32, updsNotYetApplied []*UpdateArguments) (state State) {
-	//TODO: Think of a way to make this more optimized
-	allValues := crdt.getState(updsNotYetApplied).(TopKValueState).Scores
-	sort.Slice(allValues, func(i, j int) bool { return allValues[i].Score > allValues[j].Score })
-	if numberEntries >= int32(len(allValues)) {
-		return TopKValueState{Scores: allValues}
+	/*
+		values := make([]TopKScore, numberEntries, numberEntries)
+		i := int32(0)
+		for _, elem := range crdt.elems {
+			values[i] = TopKScore{Id: elem.Id, Score: elem.Score, Data: elem.Data}
+			i++
+			if i == numberEntries {
+				break
+			}
+		}
+		return TopKValueState{Scores: values}
+	*/
+	if crdt.sortedElems == nil {
+		//TODO: May be an issue when updsNotYetApplied get considered.
+		crdt.sortedElems = crdt.getState(updsNotYetApplied).(TopKValueState).Scores
+		sort.Slice(crdt.sortedElems, func(i, j int) bool { return crdt.sortedElems[i].Score > crdt.sortedElems[j].Score })
 	}
-
-	//Include extra values until allValues[curr] < allValues[numberEntries - 1]
-	min := allValues[numberEntries-1]
-	//Include extra values until allValues[numberEntries - 1] < min
-	for ; numberEntries < int32(len(allValues)) && allValues[numberEntries] == min; numberEntries++ {
-
+	if numberEntries >= int32(len(crdt.sortedElems)) {
+		//TODO: Should I include notInTop?
+		return TopKValueState{Scores: crdt.sortedElems}
 	}
-	return TopKValueState{Scores: allValues[:numberEntries]}
+	return TopKValueState{Scores: crdt.sortedElems[:numberEntries]}
 }
 
 func (crdt *TopKRmvCrdt) getTopKAboveValue(minValue int32, updsNotYetApplied []*UpdateArguments) (state State) {
 	values := make([]TopKScore, len(crdt.elems))
 	actuallyAdded := 0
-	for _, elem := range crdt.elems {
-		if elem.Score >= minValue {
-			values[actuallyAdded] = TopKScore{Id: elem.Id, Score: elem.Score, Data: elem.Data}
-			actuallyAdded++
+	//Faster to do with sortedElems if it's available.
+	if crdt.sortedElems != nil {
+		for _, elem := range crdt.sortedElems {
+			if elem.Score >= minValue {
+				values[actuallyAdded] = TopKScore{Id: elem.Id, Score: elem.Score, Data: elem.Data}
+				actuallyAdded++
+			} else {
+				break
+			}
+		}
+	} else {
+		//Must go through all elems
+		for _, elem := range crdt.elems {
+			if elem.Score >= minValue {
+				values[actuallyAdded] = TopKScore{Id: elem.Id, Score: elem.Score, Data: elem.Data}
+				actuallyAdded++
+			}
 		}
 	}
+
 	return TopKValueState{Scores: values[:actuallyAdded]}
 }
 
@@ -439,6 +472,9 @@ func (crdt *TopKRmvCrdt) getTopKRemoveDownstreamArgs(remOp *TopKRemove) (args Do
 	return
 }
 
+//TODO: This is not 100% correct, as when some elements are removed from the top, others in notInTop get promoted to top.
+//Some removes in TopKRemoveAll may refer to such promoted elements and, with the current implementation, they would end in OptDownRems instead of DownRems
+//This also leads to possibly more adds being generated than the length of downRems.
 func (crdt *TopKRmvCrdt) getTopKRemoveAllDownstreamArgs(remOp *TopKRemoveAll) (args DownstreamArguments) {
 	inElems, inNotTop := false, false
 	nRem, nOpt := 0, 0
@@ -493,18 +529,24 @@ func (crdt *TopKRmvCrdt) applyDownstream(downstreamArgs UpdateArguments) (effect
 
 func (crdt *TopKRmvCrdt) applyAddAll(op *DownstreamTopKAddAll) (effect *Effect, otherDownstreamArgs DownstreamArguments) {
 	//All elems have the same ts and replicaID
-	firstElem := op.DownstreamAdds[0]
+	var firstElem TopKElement
+	if len(op.DownstreamAdds) > 0 {
+		firstElem = op.DownstreamAdds[0]
+	} else {
+		//May happen when applying locally the adds, as all the received values may be too small for the topK
+		firstElem = op.OptDownstreamAdds[0]
+	}
 	oldTs := crdt.vc.GetPos(firstElem.ReplicaID)
 	crdt.vc.UpdatePos(firstElem.ReplicaID, firstElem.Ts)
-	listEffect := TopKAddAllEffect{effects: make([]*Effect, len(op.DownstreamAdds))}
+	listEffect := TopKAddAllEffect{effects: make([]*Effect, len(op.DownstreamAdds)+len(op.OptDownstreamAdds))}
 	downRemoves := DownstreamTopKRemoveAll{Vc: make([]clocksi.Timestamp, len(op.DownstreamAdds)), DownRems: make([]int32, len(op.DownstreamAdds))}
-	nRemoves := 0
+	nRemoves, nEffects := 0, 0
 
 	currAdds := op.DownstreamAdds
 	//Must apply both down and opt (if the latter is even present)
 	//Simple for to execute the same set of operations for both down and opt.
 	for i := 0; i < 2; i++ {
-		for i, newElem := range currAdds {
+		for _, newElem := range currAdds {
 			var effectValue Effect
 			if newElem.Data == nil {
 				newElem.Data = &[]byte{}
@@ -531,6 +573,7 @@ func (crdt *TopKRmvCrdt) applyAddAll(op *DownstreamTopKAddAll) (effect *Effect, 
 						if crdt.smallestScore.isEqual(elem) {
 							crdt.findAndUpdateMin()
 						}
+						crdt.sortedElems = nil
 					} else {
 						effectValue = TopKAddNotTopEffect{TopKAddEffect: TopKAddEffect{TopKElement: newElem, oldTs: oldTs}}
 						//Store in notInTop as it might be relevant later on
@@ -552,6 +595,7 @@ func (crdt *TopKRmvCrdt) applyAddAll(op *DownstreamTopKAddAll) (effect *Effect, 
 						} else {
 							effectValue = TopKAddEffect{TopKElement: newElem, oldTs: oldTs}
 						}
+						crdt.sortedElems = nil
 					} else if newElem.isHigher(crdt.smallestScore) {
 						effectValue = TopKReplaceEffect{newElem: newElem, oldElem: crdt.smallestScore, oldMin: crdt.smallestScore, oldTs: oldTs}
 						//Take min out of top (and store in notInTop) to give space to the new elem with higher score
@@ -565,6 +609,7 @@ func (crdt *TopKRmvCrdt) applyAddAll(op *DownstreamTopKAddAll) (effect *Effect, 
 						delete(crdt.elems, crdt.smallestScore.Id)
 						crdt.elems[newElem.Id] = newElem
 						crdt.findAndUpdateMin()
+						crdt.sortedElems = nil
 					} else {
 						effectValue = TopKAddNotTopEffect{TopKAddEffect: TopKAddEffect{TopKElement: newElem, oldTs: oldTs}}
 						//effectValue = TopKAddEffect{TopKElement: op.TopKElement}
@@ -586,7 +631,8 @@ func (crdt *TopKRmvCrdt) applyAddAll(op *DownstreamTopKAddAll) (effect *Effect, 
 				effectValue = NoEffect{}
 				fmt.Println("[TOPKRMV]Apply add is returning a new remove.")
 			}
-			listEffect.effects[i] = &effectValue
+			listEffect.effects[nEffects] = &effectValue
+			nEffects++
 		}
 
 		currAdds = op.OptDownstreamAdds
@@ -617,6 +663,7 @@ func (crdt *TopKRmvCrdt) applyAdd(op *DownstreamTopKAdd) (effect *Effect, otherD
 		if hasId {
 			//Check if the "new elem" is > elem. If it is, add it. On the end, check if min should be updated.
 			if op.TopKElement.isHigher(elem) {
+				//fmt.Printf("[TOPK][ADD]Id already exists and new value is higher, number elems %d, max elems %d, min score %d\n", len(crdt.elems), crdt.maxElems, crdt.smallestScore.Score)
 				effectValue = TopKReplaceEffect{newElem: op.TopKElement, oldElem: elem, oldMin: crdt.smallestScore, oldTs: oldTs}
 				crdt.elems[op.Id] = op.TopKElement
 				//Different replicas, so we'll keep the old entry in notInTop (as it might be relevant again depending on concurrent removes)
@@ -632,7 +679,9 @@ func (crdt *TopKRmvCrdt) applyAdd(op *DownstreamTopKAdd) (effect *Effect, otherD
 				if crdt.smallestScore.isEqual(elem) {
 					crdt.findAndUpdateMin()
 				}
+				crdt.sortedElems = nil
 			} else {
+				//fmt.Printf("[TOPK][ADD]Id already exists but new value is lower, number elems %d, max elems %d, min score %d\n", len(crdt.elems), crdt.maxElems, crdt.smallestScore.Score)
 				effectValue = TopKAddNotTopEffect{TopKAddEffect: TopKAddEffect{TopKElement: op.TopKElement, oldTs: oldTs}}
 				//Store in notInTop as it might be relevant later on
 				entry, hasEntry := crdt.notInTop[op.Id]
@@ -645,6 +694,7 @@ func (crdt *TopKRmvCrdt) applyAdd(op *DownstreamTopKAdd) (effect *Effect, otherD
 		} else {
 			//Check if it should belong to topK (i.e. there's space or its score is > min)
 			if len(crdt.elems) < crdt.maxElems {
+				//fmt.Printf("[TOPK][ADD]Still has space for more elements, number elems %d, max elems %d, min score %d\n", len(crdt.elems), crdt.maxElems, crdt.smallestScore.Score)
 				crdt.elems[op.Id] = op.TopKElement
 				//Check if min should be updated
 				if (crdt.smallestScore.isEqual(TopKElement{}) || crdt.smallestScore.isHigher(op.TopKElement)) {
@@ -653,7 +703,9 @@ func (crdt *TopKRmvCrdt) applyAdd(op *DownstreamTopKAdd) (effect *Effect, otherD
 				} else {
 					effectValue = TopKAddEffect{TopKElement: op.TopKElement, oldTs: oldTs}
 				}
+				crdt.sortedElems = nil
 			} else if op.TopKElement.isHigher(crdt.smallestScore) {
+				//fmt.Printf("[TOPK][ADD]Doesn't have space for more elements, but new is higher than smallest score. Number elems %d, max elems %d, min score %d\n", len(crdt.elems), crdt.maxElems, crdt.smallestScore.Score)
 				effectValue = TopKReplaceEffect{newElem: op.TopKElement, oldElem: crdt.smallestScore, oldMin: crdt.smallestScore, oldTs: oldTs}
 				//Take min out of top (and store in notInTop) to give space to the new elem with higher score
 				//Note that it's possible to have existing entries for this ID in notInTop. The opposite is also possible.
@@ -666,7 +718,9 @@ func (crdt *TopKRmvCrdt) applyAdd(op *DownstreamTopKAdd) (effect *Effect, otherD
 				delete(crdt.elems, crdt.smallestScore.Id)
 				crdt.elems[op.Id] = op.TopKElement
 				crdt.findAndUpdateMin()
+				crdt.sortedElems = nil
 			} else {
+				//fmt.Printf("[TOPK][ADD]Doesn't have space for more elements and new is smaller than smallest score. Number elems %d, max elems %d, min score %d\n", len(crdt.elems), crdt.maxElems, crdt.smallestScore.Score)
 				effectValue = TopKAddNotTopEffect{TopKAddEffect: TopKAddEffect{TopKElement: op.TopKElement, oldTs: oldTs}}
 				//effectValue = TopKAddEffect{TopKElement: op.TopKElement}
 				//Add to notInTop
@@ -689,9 +743,11 @@ func (crdt *TopKRmvCrdt) applyAdd(op *DownstreamTopKAdd) (effect *Effect, otherD
 }
 
 func (crdt *TopKRmvCrdt) applyRemoveAll(op *DownstreamTopKRemoveAll) (effect *Effect, otherDownstreamArgs DownstreamArguments) {
-	downAdds := DownstreamTopKAddAll{DownstreamAdds: make([]TopKElement, len(op.DownRems))}
-	nAdds := 0
-	listEffect := TopKRemoveAllEffect{effects: make([]*TopKRemoveEffect, len(op.DownRems))}
+	//NOTE: This is a temporary fix, the correct size should be just len(op.DownRems). Check getTopKRemoveAllDownstreamArgs for details.
+	downAdds := DownstreamTopKAddAll{DownstreamAdds: make([]TopKElement, len(op.DownRems)+len(op.OptDownRems))}
+	//downAdds := DownstreamTopKAddAll{DownstreamAdds: make([]TopKElement, len(op.DownRems))}
+	nAdds, nEffects := 0, 0
+	listEffect := TopKRemoveAllEffect{effects: make([]*TopKRemoveEffect, len(op.DownRems)+len(op.OptDownRems))}
 
 	//Need to apply the same algorithm for both downRems and optRems (if present)
 	currRems := op.DownRems
@@ -727,6 +783,7 @@ func (crdt *TopKRmvCrdt) applyRemoveAll(op *DownstreamTopKRemoveAll) (effect *Ef
 				delete(crdt.elems, remID)
 				remEffect.remElem = elem
 				remEffect.oldMin = crdt.smallestScore
+				crdt.sortedElems = nil
 
 				if len(crdt.elems) == crdt.maxElems-1 {
 					//Top-k was full previously, need to find the next highest value to replace (possibly in different ID)
@@ -743,6 +800,17 @@ func (crdt *TopKRmvCrdt) applyRemoveAll(op *DownstreamTopKRemoveAll) (effect *Ef
 					}
 					//Check that notInTop actually had elements.
 					if (!highestElem.isEqual(TopKElement{})) {
+						/*
+							if nAdds >= len(op.DownRems) {
+								fmt.Println("[TOPK]WARNING - TopKRmvAll trying to downstream more adds than the number of obligatory removes.")
+								fmt.Printf("[TOPK]Lens of adds so far, removes, optional removes: %d %d %d\n", nAdds, len(op.DownRems), len(op.OptDownRems))
+								fmt.Println("[TOPK]Removes:", op.DownRems)
+								fmt.Println("[TOPK]Optional removes:", op.OptDownRems)
+								fmt.Println("[TOPK]State:", crdt.elems)
+								fmt.Println("[TOPK]Min:", crdt.smallestScore)
+								fmt.Println("[TOPK]To remove:", remID)
+							}
+						*/
 						//Promote to top-k and set as min
 						crdt.elems[highestElem.Id] = highestElem
 						crdt.smallestScore = highestElem
@@ -794,11 +862,17 @@ func (crdt *TopKRmvCrdt) applyRemoveAll(op *DownstreamTopKRemoveAll) (effect *Ef
 				}
 
 			}
-			listEffect.effects[j] = &remEffect
+			listEffect.effects[nEffects] = &remEffect
+			nEffects++
 		}
 		currRems = op.OptDownRems
 	}
-	return
+	var effectI Effect = listEffect
+	if nAdds == 0 {
+		return &effectI, nil
+	}
+	downAdds.DownstreamAdds = downAdds.DownstreamAdds[0:nAdds]
+	return &effectI, downAdds
 }
 
 /*
@@ -843,6 +917,7 @@ func (crdt *TopKRmvCrdt) applyRemove(op *DownstreamTopKRemove) (effect *Effect, 
 		delete(crdt.elems, op.Id)
 		remEffect.remElem = elem
 		remEffect.oldMin = crdt.smallestScore
+		crdt.sortedElems = nil
 
 		if len(crdt.elems) == crdt.maxElems-1 {
 			//Top-k was full previously, need to find the next highest value to replace (possibly in different ID)

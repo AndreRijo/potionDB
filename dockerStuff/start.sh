@@ -23,7 +23,7 @@ rabbitmqctl set_permissions -p $RABBITMQ_VHOST test ".*" ".*" ".*";
 #/go/bin/monitor-fetch/main $1 ;
 #/opt/rabbitmq/sbin/cuttlefish -c /etc/rabbitmq/rabbitmq.conf -s /opt/rabbitmq/priv/schema/ ;
 
-/go/bin/main --config=$CONFIG --servers=$SERVERS --rabbitMQIP=$RABBITMQ --rabbitVHost=$RABBITMQ_VHOST;
+/go/bin/main --config=$CONFIG --servers=$SERVERS --rabbitMQIP=$RABBITMQ --rabbitVHost=$RABBITMQ_VHOST --buckets=$BUCKETS --disableReplicator=$DISABLE_REPLICATOR --disableLog=$DISABLE_LOG --disableReadWaiting=$DISABLE_READ_WAITING;
 )
 
 #srv=${SERVERS:-nil}

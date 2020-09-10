@@ -33,6 +33,10 @@ ENV CONFIG "/go/bin/configs/cluster/default"
 #ENV RABBITMQ_WAIT 10s
 #ENV RABBITMQ_WAIT 5s
 ENV RABBITMQ_VHOST /crdts
+ENV BUCKETS "none"
+ENV DISABLE_REPLICATOR "none"
+ENV DISABLE_LOG "none"
+ENV DISABLE_READ_WAITING "none"
 
 #Add config folders late to avoid having to rebuild multiple images
 ENV RABBITMQ_PID_FILE /var/lib/rabbitmq/mnesia/rabbitmq

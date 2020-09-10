@@ -3,6 +3,9 @@ package antidote
 //TODO: As of now, there's no filtering of buckets in the Materializer when replying to a RequestBucket.
 //I.e., crdts of all buckets are returned.
 //TODO: Think if, for joining replicas, there's any need for asking missing ops.
+//Note: If new replicas join while a lot of transactions are happening, the materializer may take wrong decisions.
+//This is due to the fact that clockSi, when comparing clocks, assumes both clocks have the same entries.
+//Also note that initialDummyTs isn't updated when new replicas are added via Join.
 
 import (
 	"clocksi"
@@ -26,6 +29,8 @@ type Replicator struct {
 	replicaID  int16
 	buckets    []string
 	JoinInfo
+	allReplicaIDs  []int16           //Stores the replicaIDs of all replicas
+	initialDummyTs clocksi.Timestamp //The initial TS used in txnCache to signal that all txns are to be replicated.
 }
 
 type JoinInfo struct {
@@ -55,6 +60,10 @@ type StableClock struct {
 type RemoteTxn struct {
 	clocksi.Timestamp
 	Upds map[int][]*UpdateObjectParams
+}
+
+type RemoteID struct {
+	SenderID int16
 }
 
 //All join-related requests include a field to identify in the remoteGroup which connection the reply should be sent to.
@@ -105,6 +114,10 @@ func (req StableClock) getSenderID() int16 {
 	return req.SenderID
 }
 
+func (req RemoteID) getSenderID() int16 {
+	return req.SenderID
+}
+
 func (req Join) getSenderID() int16 {
 	return req.SenderID
 }
@@ -125,6 +138,20 @@ func (req ReplyEmpty) getSenderID() int16 {
 	return 0
 }
 
+func (repl *Replicator) Reset() {
+	if !shared.IsReplDisabled {
+		repl.txnCache = make(map[int][]PairClockUpdates)
+		dummyTs := clocksi.NewClockSiTimestamp()
+		for id := 0; id < int(nGoRoutines); id++ {
+			cacheEntry := make([]PairClockUpdates, 1, cacheInitialSize)
+			//All txns have a clock higher than this, so the first request is the equivalent of "requesting all commited txns"
+			cacheEntry[0] = PairClockUpdates{clk: &dummyTs}
+			repl.txnCache[id] = cacheEntry
+		}
+		fmt.Println("[REPLICATOR]Reset complete.")
+	}
+}
+
 func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, replicaID int16) {
 	if !shared.IsReplDisabled {
 		if !repl.started {
@@ -133,24 +160,19 @@ func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, rep
 			repl.localPartitions = loggers
 			//bucketsToListen := make([]string, 1)
 			//bucketsToListen[0] = "*"
-			var bucketsToListen []string
-			stringBuckets, has := tools.SharedConfig.GetAndHasConfig("buckets")
-			if !has {
-				bucketsToListen = []string{"*"}
-			} else {
-				bucketsToListen = strings.Split(stringBuckets, " ")
-			}
+			bucketsToListen := repl.getBuckets()
+
 			remoteConn, err := CreateRemoteGroupStruct(bucketsToListen, replicaID)
 			//TODO: Not ignore err
 			ignore(err)
 			repl.remoteConn = remoteConn
 			repl.txnCache = make(map[int][]PairClockUpdates)
 			repl.buckets = bucketsToListen
-			dummyTs := clocksi.NewClockSiTimestamp(replicaID)
+			repl.initialDummyTs = clocksi.NewClockSiTimestampFromId(replicaID)
 			for id := 0; id < int(nGoRoutines); id++ {
 				cacheEntry := make([]PairClockUpdates, 1, cacheInitialSize)
 				//All txns have a clock higher than this, so the first request is the equivalent of "requesting all commited txns"
-				cacheEntry[0] = PairClockUpdates{clk: &dummyTs}
+				cacheEntry[0] = PairClockUpdates{clk: &repl.initialDummyTs}
 				repl.txnCache[id] = cacheEntry
 			}
 			repl.replicaID = replicaID
@@ -160,15 +182,45 @@ func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, rep
 				repl.JoinInfo = JoinInfo{holdMsgs: make([]ReplicatorMsg, 0, joinHoldInitialSize), allDone: false, nHoldJoins: 0}
 				repl.joinGroup()
 			} else {
+				//Wait for replicaIDs of existing replicas
+				repl.JoinInfo.waitFor = int(remoteConn.nReplicas)
+				remoteConn.sendReplicaID()
 				go repl.receiveRemoteTxns()
 				go repl.replicateCycle()
+				//If there's no other replica, we can start right away
+				if len(remoteConn.conns) == 0 {
+					fmt.Println("[REPLICATOR] PotionDB in single server mode.")
+					repl.initialDummyTs.Update()
+					repl.allDone = true
+					go repl.tm.SendRemoteMsg(TMStart{}) //Different thread to avoid blocking
+				}
 			}
 		}
+	} else {
+		fmt.Println("[REPLICATOR] Warning - replicator is disabled. PotionDB started in single server mode.")
+		go tm.SendRemoteMsg(TMStart{})
+	}
+}
+
+func (repl *Replicator) getBuckets() []string {
+	stringBuckets, has := tools.SharedConfig.GetAndHasConfig("buckets")
+	if !has {
+		return []string{"*"}
+	} else {
+		return strings.Split(stringBuckets, " ")
 	}
 }
 
 func (repl *Replicator) replicateCycle() {
+	for {
+		if repl.JoinInfo.allDone {
+			break
+		} else {
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
 	count, start, finish, toSleep := time.Duration(0), int64(0), int64(0), time.Duration(0)
+	previousLen := 0
 	for {
 		start = time.Now().UnixNano()
 		tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "starting replicateCycle")
@@ -188,9 +240,10 @@ func (repl *Replicator) replicateCycle() {
 			time.Sleep(toSleep * time.Millisecond)
 		}
 		//time.Sleep(tsSendDelay * time.Millisecond)
-		if count*tsSendDelay%60000 == 0 && len(toSend) == 0 {
+		if len(toSend) == 0 && (previousLen > 0 || count*tsSendDelay%60000 == 0) {
 			fmt.Println("[REPLICATOR]No ops to send.")
 		}
+		previousLen = len(toSend)
 		//ignore(toSend)
 	}
 }
@@ -204,14 +257,6 @@ func (repl *Replicator) getNewTxns() {
 		partEntry := repl.txnCache[id]
 		replyChans[id] = make(chan StableClkUpdatesPair)
 		lastClk := *partEntry[len(partEntry)-1].clk
-		/*
-			var lastClk clocksi.Timestamp
-			if len(partEntry) > 0 {
-				lastClk = *partEntry[len(partEntry)-1].clk
-			} else {
-				lastClk = repl.lastSentClk
-			}
-		*/
 		part.SendLoggerRequest(LoggerRequest{
 			LogRequestArgs: LogTxnArgs{
 				lastClock: lastClk,
@@ -305,6 +350,7 @@ func (repl *Replicator) sendTxns(toSend []RemoteTxn) {
 	//Separate each txn into partitions
 	//TODO: Batch of transactions for the same partition? Not simple due to clock updates.
 	//startTime := time.Now().UnixNano()
+	//TODO: It seems like in some situations multiple stable clocks are sent in a row. I should look into this.
 	count := 0
 	for _, txn := range toSend {
 		for partId, upds := range txn.Upds {
@@ -343,6 +389,14 @@ func (repl *Replicator) handleRemoteRequest(remoteReq ReplicatorMsg) {
 			Upds:        typedReq.Upds,
 			Timestamp:   typedReq.Timestamp,
 		})
+	case *RemoteID:
+		repl.waitFor--
+		repl.tm.SendRemoteMsg(TMReplicaID{ReplicaID: typedReq.SenderID})
+		if repl.waitFor == 0 {
+			repl.initialDummyTs.Update()
+			repl.allDone = true
+			repl.tm.SendRemoteMsg(TMStart{})
+		}
 	case *Join:
 		go repl.handleJoin(typedReq)
 	case *RequestBucket:
@@ -377,6 +431,7 @@ func (repl *Replicator) handleJoin(req *Join) {
 		reply := <-joinChan
 		replyJoin.Clks[reply.partID] = reply.Timestamp
 	}
+	repl.tm.SendRemoteMsg(TMReplicaID{ReplicaID: req.SenderID})
 	repl.remoteConn.SendReplyJoin(replyJoin, sendTo)
 }
 
@@ -394,12 +449,12 @@ func (repl *Replicator) handleRequestBucket(req *RequestBucket) {
 
 /***** New server logic *****/
 
-//TODO: Empty case/first replica to replicate a set of buckets
 func (repl *Replicator) handleReplyJoin(req *ReplyJoin) {
 	fmt.Println("Handling replyJoin")
 	repl.holdReplyJoins[repl.nHoldJoins] = req
 	repl.waitFor--
 	repl.nHoldJoins++
+	repl.tm.SendRemoteMsg(TMReplicaID{ReplicaID: req.SenderID})
 	if repl.waitFor == 0 {
 		//Got all the replies, so we can now ask for the buckets
 		repl.askBuckets()

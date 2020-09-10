@@ -10,8 +10,10 @@ import (
 )
 
 type Timestamp interface {
-	//Creates a new timestamp representing the initial value.
-	NewTimestamp(id int16) (newTs Timestamp)
+	//Creates a new timestamp representing the initial value, with all known replicaIDs set to 0.
+	NewTimestamp() (newTs Timestamp)
+	//Creates a new timestamp whose only entry is id
+	NewTimestampFromId(id int16) (newTs Timestamp)
 	//Gets a timestamp that is more recent than the actual one
 	NextTimestamp(id int16) (newTs Timestamp)
 	//Gets a timestamp that increments the id value by one
@@ -38,6 +40,8 @@ type Timestamp interface {
 	IsEqual(otherTs Timestamp) (compResult bool)
 	//Returns true when Compare(otherTs) would return ConcurrentTs.
 	IsConcurrent(otherTs Timestamp) (compResult bool)
+	//For two given concurrent timestamps, it applies a tiebreaker algorithm to decide if ts is smaller than otherTs.
+	IsSmallerConcurrent(otherTs Timestamp) (isSmaller bool)
 	//Compares a position in both timestamps. This operation has no meaning if the Timestamp implementation isn't based on vector clocks or other position based system
 	//Returns concurrent if one of the clocks doesn't contain the reffered position
 	ComparePos(id int16, otherTs Timestamp) (compResult TsResult)
@@ -52,6 +56,8 @@ type Timestamp interface {
 	//Returns the timestamp resulting of merging this timestamp and the argument timestamp
 	//In a vector clock, it represents keeping the highest value of each position
 	Merge(otherTs Timestamp) (mergedTs Timestamp)
+	//Adds entries for all replicas in knownIDs that aren't already existent in the Timestamp. This operation only makes sense for vector clock implementations.
+	Update()
 	//Converts the timestamp to a byte array
 	ToBytes() (bytes []byte)
 	//Gets the timestamp that is represented in the byte array
@@ -88,7 +94,8 @@ const (
 
 var (
 	//Useful for comparations or other situations in which we need a temporary, non-significant, timestamp
-	DummyTs = NewClockSiTimestamp(0)
+	DummyTs  = NewClockSiTimestampFromId(0)
+	knownIDs = make([]int16, 0, 5) //Known replicaIDs. All new ClockSiTimestamps generated with NewClockSiTimestamp() will contain entries for these IDs
 )
 
 func prepareDummyHighTs() (ts Timestamp) {
@@ -98,17 +105,34 @@ func prepareDummyHighTs() (ts Timestamp) {
 	return clockSiTs
 }
 
-//Creates a new timestamp. This gives the same result as doing: newTs = ClockSiTimestamp{}.NewTimestamp().
-//Use whichever option feels more natural.
-func NewClockSiTimestamp(id int16) (ts Timestamp) {
-	return ClockSiTimestamp{}.NewTimestamp(id)
+func AddNewID(id int16) {
+	knownIDs = append(knownIDs, id)
 }
 
-func (ts ClockSiTimestamp) NewTimestamp(id int16) (newTs Timestamp) {
+//Creates a new timestamp. This gives the same result as doing: newTs = ClockSiTimestamp{}.NewTimestamp().
+//Use whichever option feels more natural.
+func NewClockSiTimestampFromId(id int16) (ts Timestamp) {
+	return ClockSiTimestamp{}.NewTimestampFromId(id)
+}
+
+func (ts ClockSiTimestamp) NewTimestampFromId(id int16) (newTs Timestamp) {
 	vc := make(map[int16]int64)
 	vc[id] = 0
-	ts = ClockSiTimestamp{VectorClock: vc}
-	return ts
+	//ts = ClockSiTimestamp{VectorClock: vc}
+	//return ts
+	return ClockSiTimestamp{VectorClock: vc}
+}
+
+func NewClockSiTimestamp() (ts Timestamp) {
+	return ClockSiTimestamp{}.NewTimestamp()
+}
+
+func (ts ClockSiTimestamp) NewTimestamp() (newTs Timestamp) {
+	vc := make(map[int16]int64)
+	for _, id := range knownIDs {
+		vc[id] = 0
+	}
+	return ClockSiTimestamp{VectorClock: vc}
 }
 
 func (ts ClockSiTimestamp) NextTimestamp(id int16) (newTs Timestamp) {
@@ -343,6 +367,33 @@ func (ts ClockSiTimestamp) Merge(otherTs Timestamp) (mergedTs Timestamp) {
 	}
 
 	return ClockSiTimestamp{VectorClock: vc}
+}
+
+func (ts ClockSiTimestamp) IsSmallerConcurrent(otherTs Timestamp) (isSmaller bool) {
+	//Note: Assuming both are concurrent
+	isSmaller = false
+	smallestId := int16(math.MaxInt16)
+	otherTsVc := otherTs.(ClockSiTimestamp).VectorClock
+
+	for id, value := range ts.VectorClock {
+		if id < smallestId {
+			if value < otherTsVc[id] {
+				smallestId, isSmaller = id, true
+			} else if value > otherTsVc[id] {
+				smallestId, isSmaller = id, false
+			}
+		}
+	}
+
+	return isSmaller
+}
+
+func (ts ClockSiTimestamp) Update() {
+	for _, id := range knownIDs {
+		if _, has := ts.VectorClock[id]; !has {
+			ts.VectorClock[id] = 0
+		}
+	}
 }
 
 func (ts ClockSiTimestamp) ToBytes() (bytes []byte) {

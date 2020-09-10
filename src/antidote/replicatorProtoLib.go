@@ -8,8 +8,6 @@ import (
 	pb "github.com/golang/protobuf/proto"
 )
 
-//TODO: Define here the generic conversions for the replicator protobufs
-
 /*****ANTIDOTE -> PROTO*****/
 
 func createProtoStableClock(replicaID int16, ts int64) (protobuf *proto.ProtoStableClock) {
@@ -33,6 +31,10 @@ func createProtoDownstreamUpds(upds []*UpdateObjectParams) (protobufs []*proto.P
 		}
 	}
 	return protobufs
+}
+
+func createProtoRemoteID(replicaID int16) (protobuf *proto.ProtoRemoteID) {
+	return &proto.ProtoRemoteID{ReplicaID: pb.Int32(int32(replicaID))}
 }
 
 func createProtoJoin(buckets []string, replicaID int16, ip string) (protobuf *proto.ProtoJoin) {
@@ -92,6 +94,10 @@ func protoToDownstreamUpds(protobufs []*proto.ProtoDownstreamUpd) (upds []*Updat
 		upds[i] = upd
 	}
 	return upds
+}
+
+func protoToRemoteID(protobuf *proto.ProtoRemoteID) (remoteID int16) {
+	return int16(protobuf.GetReplicaID())
 }
 
 func protoToJoin(protobuf *proto.ProtoJoin) (buckets []string, senderID int16, ip string) {

@@ -13,7 +13,7 @@ func TestTopKRmv1(t *testing.T) {
 	crdtR2 := (&TopKRmvCrdt{}).Initialize(nil, 777).(*TopKRmvCrdt)
 	newDownstreamR1 := make([]DownstreamArguments, 0, 10)
 	newDownstreamR2 := make([]DownstreamArguments, 0, 10)
-	dummyTs := clocksi.NewClockSiTimestamp(0)
+	dummyTs := clocksi.NewClockSiTimestampFromId(0)
 
 	addR1_1 := crdtR1.getTopKAddDownstreamArgs(&TopKAdd{TopKScore: TopKScore{Id: 0, Score: 100}})
 	newDownstreamR1 = addDownIfNotEmpty(newDownstreamR1, crdtR1.Downstream(dummyTs, addR1_1))
@@ -54,7 +54,7 @@ func TestTopKRmv2(t *testing.T) {
 	crdtR2 := (&TopKRmvCrdt{}).Initialize(nil, 777).(*TopKRmvCrdt)
 	newDownstreamR1 := make([]DownstreamArguments, 0, 10)
 	newDownstreamR2 := make([]DownstreamArguments, 0, 10)
-	dummyTs := clocksi.NewClockSiTimestamp(0)
+	dummyTs := clocksi.NewClockSiTimestampFromId(0)
 
 	addR1_1 := crdtR1.getTopKAddDownstreamArgs(&TopKAdd{TopKScore: TopKScore{Id: 0, Score: 100}})
 	newDownstreamR1 = addDownIfNotEmpty(newDownstreamR1, crdtR1.Downstream(dummyTs, addR1_1))

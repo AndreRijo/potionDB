@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"clocksi"
+	"fmt"
 	"proto"
 )
 
@@ -94,6 +95,16 @@ type ArgsError struct {
 	err  string
 	args UpdateArguments
 }
+
+type UnknownCrdtTypeError struct {
+	proto.CRDTType
+}
+
+func (err UnknownCrdtTypeError) Error() (errString string) {
+	return fmt.Sprint("Unknown/unsupported CRDT type:", err.CRDTType)
+}
+
+/***** Actual code *****/
 
 func (crdt genericCRDT) initialize() (newCrdt genericCRDT) {
 	return genericCRDT{}
