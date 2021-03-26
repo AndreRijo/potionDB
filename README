@@ -1,0 +1,9 @@
+To run
+
+export GOPATH=$(pwd)
+go get github.com/golang/protobuf/proto
+go get github.com/twmb/murmur3
+go get github.com/streadway/amqp
+
+go run src/main/...
+
