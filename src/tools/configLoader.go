@@ -39,6 +39,7 @@ func (config *ConfigLoader) LoadConfigs(folder string) {
 	}
 	filesToRead := config.getConfigFiles()
 	for _, filePath := range filesToRead {
+		fmt.Println("Reading config file", filePath)
 		config.readConfigFile(filePath)
 	}
 	fmt.Println("Finished reading configs")
