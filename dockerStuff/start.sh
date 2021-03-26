@@ -7,14 +7,9 @@
 #echo $CONFIG ;
 #echo $SERVERS ;
 #echo $RABBITMQ ;
-#sleep $RABBITMQ_WAIT ;
-#rabbitmqctl wait --timeout 60 $RABBITMQ_PID_FILE ; 
-#rabbitmqctl await_startup ;
-rabbitmqctl wait $RABBITMQ_PID_FILE ;  
-#sleep 5s ; 
+sleep $RABBITMQ_WAIT ; 
 rabbitmqctl add_vhost $RABBITMQ_VHOST ;
-#sleep 12s ;
-#sleep 3s
+sleep 5s ;
 rabbitmqctl add_user test test ; 
 rabbitmqctl set_user_tags test administrator;
 rabbitmqctl set_permissions -p $RABBITMQ_VHOST test ".*" ".*" ".*";

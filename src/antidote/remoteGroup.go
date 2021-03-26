@@ -33,7 +33,7 @@ const (
 //docker run -d --hostname RMQ1 --name rabbitmq1 -p 5672:5672 rabbitmq:latest
 
 func CreateRemoteGroupStruct(bucketsToListen []string, replicaID int16) (group *RemoteGroup, err error) {
-	myInstanceIP := tools.SharedConfig.GetConfig("localRabbitMQAddress")
+	myInstanceIP := tools.SharedConfig.GetOrDefault("localRabbitMQAddress", "localhost:5672")
 	othersIPList := strings.Split(tools.SharedConfig.GetConfig("remoteRabbitMQAddresses"), " ")
 	if len(othersIPList) == 1 && len(othersIPList[0]) < 2 {
 		othersIPList = []string{}
