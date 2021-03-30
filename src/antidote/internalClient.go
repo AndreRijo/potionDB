@@ -132,7 +132,45 @@ func (ic InternalClient) FullRead() crdt.StateReadArguments {
 	return crdt.StateReadArguments{}
 }
 
-//MAP
+//Counter
+
+func (ic InternalClient) CounterIncUpd(value int32) crdt.Increment {
+	return crdt.Increment{Change: value}
+}
+
+func (ic InternalClient) CounterDecUpd(value int32) crdt.Decrement {
+	return crdt.Decrement{Change: value}
+}
+
+//Register
+
+func (ic InternalClient) SetValueUpd(value interface{}) crdt.SetValue {
+	return crdt.SetValue{NewValue: value}
+}
+
+//Set
+
+func (ic InternalClient) SetAddUpd(element string) crdt.Add {
+	return crdt.Add{Element: crdt.Element(element)}
+}
+
+func (ic InternalClient) SetRemUpd(element string) crdt.Remove {
+	return crdt.Remove{Element: crdt.Element(element)}
+}
+
+func (ic InternalClient) SetAddAllUpd(toAdd []crdt.Element) crdt.AddAll {
+	return crdt.AddAll{Elems: toAdd}
+}
+
+func (ic InternalClient) SetRemAllUpd(toRem []crdt.Element) crdt.RemoveAll {
+	return crdt.RemoveAll{Elems: toRem}
+}
+
+func (ic InternalClient) SetLookup(element string) crdt.LookupReadArguments {
+	return crdt.LookupReadArguments{Elem: crdt.Element(element)}
+}
+
+//ORMap
 func (ic InternalClient) MapAddUpd(key, element string) crdt.MapAdd {
 	return crdt.MapAdd{Key: key, Value: crdt.Element(element)}
 }
@@ -164,6 +202,84 @@ func (ic InternalClient) MapGetKeys() crdt.GetKeysArguments {
 //Read multiple keys
 func (ic InternalClient) MapGetValues(keys []string) crdt.GetValuesArguments {
 	return crdt.GetValuesArguments{Keys: keys}
+}
+
+//RRMap
+//Note: for removes use the operation from the ORMap. RWMap supports the same queries as ORMap and two new ones.
+
+//InnerUpd is an update to a CRDT. E.g., Increment, MapAdd, etc.
+func (ic InternalClient) RWMapUpdateUpd(key string, innerUpd crdt.UpdateArguments) crdt.EmbMapUpdate {
+	return crdt.EmbMapUpdate{Key: key, Upd: innerUpd}
+}
+
+func (ic InternalClient) RWMapUpdateAllUpd(upds map[string]crdt.UpdateArguments) crdt.EmbMapUpdateAll {
+	return crdt.EmbMapUpdateAll{Upds: upds}
+}
+
+//InnerReadArgs is a read to a CRDT. E.g., Lookup, GetKeys, etc. StateReadArguments can also be used
+func (ic InternalClient) RWMapGetValue(key string, innerReadArgs crdt.ReadArguments) crdt.EmbMapGetValueArguments {
+	return crdt.EmbMapGetValueArguments{Key: key, Args: innerReadArgs}
+}
+
+//For multiple keys
+func (ic InternalClient) RWMapGetMultipleValues(args map[string]crdt.ReadArguments) crdt.EmbMapPartialArguments {
+	return crdt.EmbMapPartialArguments{Args: args}
+}
+
+//TopK
+
+//Note: data is optional
+func (ic InternalClient) TopKAddUpd(id, score int32, data *[]byte) crdt.TopKAdd {
+	return crdt.TopKAdd{TopKScore: ic.CreateTopKScore(id, score, data)}
+}
+
+func (ic InternalClient) TopKRemUpd(id int32) crdt.TopKRemove {
+	return crdt.TopKRemove{Id: id}
+}
+
+//Auxiliary for TopKAddAll
+func (ic InternalClient) CreateTopKScore(id, score int32, data *[]byte) crdt.TopKScore {
+	return crdt.TopKScore{Id: id, Score: score, Data: data}
+}
+
+func (ic InternalClient) TopKAddAllUpd(scores []crdt.TopKScore) crdt.TopKAddAll {
+	return crdt.TopKAddAll{Scores: scores}
+}
+
+func (ic InternalClient) TopKRmvAllUpd(ids []int32) crdt.TopKRemoveAll {
+	return crdt.TopKRemoveAll{Ids: ids}
+}
+
+func (ic InternalClient) TopKGetTopN(nEntries int32) crdt.GetTopNArguments {
+	return crdt.GetTopNArguments{NumberEntries: nEntries}
+}
+
+func (ic InternalClient) TopKGetTopAbove(minValue int32) crdt.GetTopKAboveValueArguments {
+	return crdt.GetTopKAboveValueArguments{MinValue: minValue}
+}
+
+//Avg
+
+func (ic InternalClient) AvgAddUpd(value int64) crdt.AddValue {
+	return crdt.AddValue{Value: value}
+}
+
+func (ic InternalClient) AvgAddMultipleUpd(sumValue, nAdds int64) crdt.AddMultipleValue {
+	return crdt.AddMultipleValue{SumValue: sumValue, NAdds: nAdds}
+}
+
+func (ic InternalClient) AvgGetFull() crdt.AvgGetFullArguments {
+	return crdt.AvgGetFullArguments{}
+}
+
+//MaxMin
+
+func (ic InternalClient) MaxMinAddMaxUpd(value int64) crdt.MaxAddValue {
+	return crdt.MaxAddValue{Value: value}
+}
+
+func (ic InternalClient) MaxMinAddMinUpd(value int64) crdt.MinAddValue {
+	return crdt.MinAddValue{Value: value}
 }
 
 //
