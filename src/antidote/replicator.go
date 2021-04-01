@@ -8,13 +8,13 @@ package antidote
 //Also note that initialDummyTs isn't updated when new replicas are added via Join.
 
 import (
-	"clocksi"
+	"potionDB/src/clocksi"
 	fmt "fmt"
-	"proto"
-	"shared"
+	"potionDB/src/proto"
+	"potionDB/src/shared"
 	"strings"
 	"time"
-	"tools"
+	"potionDB/src/tools"
 )
 
 type Replicator struct {

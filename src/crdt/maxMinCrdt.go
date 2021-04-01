@@ -4,9 +4,9 @@
 package crdt
 
 import (
-	"clocksi"
+	"potionDB/src/clocksi"
 	"math"
-	"proto"
+	"potionDB/src/proto"
 
 	pb "github.com/golang/protobuf/proto"
 )

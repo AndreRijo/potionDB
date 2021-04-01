@@ -1,13 +1,13 @@
 package antidote
 
 import (
-	"clocksi"
-	"crdt"
+	"potionDB/src/clocksi"
+	"potionDB/src/crdt"
 	fmt "fmt"
 	math "math"
-	"proto"
-	"shared"
-	"tools"
+	"potionDB/src/proto"
+	"potionDB/src/shared"
+	"potionDB/src/tools"
 
 	hashFunc "github.com/twmb/murmur3"
 )

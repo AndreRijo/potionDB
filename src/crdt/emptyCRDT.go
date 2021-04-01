@@ -4,8 +4,8 @@
 package crdt
 
 import (
-	"clocksi"
-	"proto"
+	"potionDB/src/clocksi"
+	"potionDB/src/proto"
 )
 
 type EmptyCrdt struct{}

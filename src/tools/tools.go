@@ -1,7 +1,7 @@
 package tools
 
 import (
-	"crdt"
+	"potionDB/src/crdt"
 	"fmt"
 	"net"
 	"os"

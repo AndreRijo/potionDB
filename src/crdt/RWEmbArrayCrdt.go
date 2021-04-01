@@ -2,8 +2,8 @@ package crdt
 
 /*
 import (
-	"clocksi"
-	"proto"
+	"potionDB/src/clocksi"
+	"potionDB/src/proto"
 )
 
 const ()
