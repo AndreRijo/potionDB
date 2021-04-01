@@ -1,8 +1,8 @@
 package crdt
 
 import (
-	"clocksi"
-	"proto"
+	"potionDB/src/clocksi"
+	"potionDB/src/proto"
 )
 
 //This file contains the conversion to and from protobufs of ops, read args and states

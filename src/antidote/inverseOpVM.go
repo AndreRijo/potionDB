@@ -1,8 +1,8 @@
 package antidote
 
 import (
-	"clocksi"
-	"crdt"
+	"potionDB/src/clocksi"
+	"potionDB/src/crdt"
 )
 
 //Implements VersionManager interface defined in versionManager.go

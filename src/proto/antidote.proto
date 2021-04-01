@@ -1,7 +1,7 @@
 // Java package specifiers
 option java_package = "com.basho.riak.protobuf";
 option java_outer_classname = "AntidotePB";
-option go_package = "proto";
+option go_package = "potionDB/src/proto";
 
 
 enum CRDT_type {

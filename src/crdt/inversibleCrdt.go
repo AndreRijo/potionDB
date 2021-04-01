@@ -1,8 +1,8 @@
 package crdt
 
 import (
-	"clocksi"
-	"shared"
+	"potionDB/src/clocksi"
+	"potionDB/src/shared"
 )
 
 type InversibleCRDT interface {

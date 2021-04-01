@@ -1,9 +1,9 @@
 package crdt
 
 import (
-	"clocksi"
+	"potionDB/src/clocksi"
 	"fmt"
-	"proto"
+	"potionDB/src/proto"
 )
 
 type CRDT interface {
