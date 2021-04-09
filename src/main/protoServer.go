@@ -93,6 +93,19 @@ func main() {
 	go debugMemory(configs)
 	stopProfiling(configs)
 
+	//Code to send a ping, feel free to delete
+	go func() {
+		//Change the port/ip in case you're using something different. Also one of the replicas is going to send a ping to himself
+		time.Sleep(20 * time.Second)
+		conn, err := net.Dial("tcp", "127.0.0.1:8088")
+		tools.CheckErr("Network connection establishment err", err)
+		antidote.SendProto(antidote.Ping, &proto.Ping{ServerID: pb.Int32(int32(id))}, conn)
+		protoType, protobuf, _ := antidote.ReceiveProto(conn)
+		if protoType == antidote.Pong {
+			fmt.Printf("Received Pong from %d!\n", *protobuf.(*proto.Pong).ServerID)
+		}
+	}()
+
 	go antidote.InitializeAdmin(tm)
 
 	for {
@@ -177,12 +190,27 @@ func processConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID
 			replyType = antidote.ResetServerReply
 			reply = handleResetServer(tm)
 		default:
-			tools.FancyErrPrint(tools.PROTO_PRINT, replicaID, "Received unknown proto, ignored... sort of")
-			fmt.Println("I don't know how to handle this proto", protoType)
+			replyType, reply = handleServerToServerMsg(protoType, protobuf, replicaID)
 		}
 		tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Sending reply proto")
-		antidote.SendProto(replyType, reply, conn)
+		if reply != nil {
+			antidote.SendProto(replyType, reply, conn)
+		}
 	}
+}
+
+func handleServerToServerMsg(protoType byte, protobuf pb.Message, replicaID int16) (replyType byte, reply pb.Message) {
+	//Here you can add the new messages of server to server communication
+	switch protoType {
+	case antidote.Ping:
+		fmt.Printf("Received Ping from %d!\n", *protobuf.(*proto.Ping).ServerID)
+		replyType, reply = antidote.Pong, &proto.Pong{ServerID: pb.Int32(int32(replicaID))}
+	default:
+		tools.FancyErrPrint(tools.PROTO_PRINT, replicaID, "Received unknown proto, ignored... sort of")
+		fmt.Println("I don't know how to handle this proto", protoType)
+	}
+	return replyType, reply
+
 }
 
 //TODO: Error cases in which it should return ApbErrorResp

@@ -1,11 +1,11 @@
 package antidote
 
 import (
-	"potionDB/src/clocksi"
-	"potionDB/src/crdt"
 	"encoding/binary"
 	"io"
 	"math/rand"
+	"potionDB/src/clocksi"
+	"potionDB/src/crdt"
 	"potionDB/src/proto"
 	"potionDB/src/tools"
 
@@ -64,7 +64,7 @@ func SendProto(code byte, protobf pb.Message, writer io.Writer) {
 	copy(buffer[5:], toSend)
 	_, err = writer.Write(buffer)
 	tools.CheckErr("Sending protobuf err: %s\n", err)
-	//fmt.Println("Protobuf sent succesfully!\n")
+	//fmt.Println("Protobuf sent succesfully!")
 }
 
 func ReceiveProto(in io.Reader) (msgType byte, protobuf pb.Message, err error) {
@@ -349,6 +349,10 @@ func unmarshallProto(code byte, msgBuf []byte) (protobuf pb.Message) {
 		protobuf = &proto.ApbResetServerResp{}
 	case ErrorReply:
 		protobuf = &proto.ApbErrorResp{}
+	default:
+		if code > 200 {
+			protobuf = getSSProtoStruct(code, msgBuf)
+		}
 	}
 	//fmt.Println(code)
 	err := pb.Unmarshal(msgBuf[:], protobuf)
