@@ -1,0 +1,11 @@
+option go_package = "potionDB/src/proto";
+
+//protoc -I=. --go_out=. ./server.proto --go_opt=paths=source_relative
+
+message Ping {
+    required int32 serverID = 1;    //This is just to include some data in the example
+}
+
+message Pong {
+    required int32 serverID = 2;
+}
