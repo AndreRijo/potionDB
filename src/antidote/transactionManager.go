@@ -3,13 +3,15 @@ package antidote
 //TODO: Read-write lock for the clock? That might help when doing queries-only.
 
 import (
-	"potionDB/src/clocksi"
-	"potionDB/src/crdt"
 	fmt "fmt"
 	"math/rand"
+	"net"
+	"potionDB/src/clocksi"
+	"potionDB/src/crdt"
 	"potionDB/src/proto"
-	"sync"
 	"potionDB/src/tools"
+	"strconv"
+	"sync"
 )
 
 /////*****************TYPE DEFINITIONS***********************/////
@@ -643,17 +645,57 @@ func (tm *TransactionManager) handleTMRead(request TransactionManagerRequest) {
 	var currRequest MaterializerRequest
 	readChans := make([]chan crdt.State, len(readArgs.ReadParams))
 	states := make([]crdt.State, len(readArgs.ReadParams))
+
+	adminmap := AdminRead().States
+	remoteObjs := make(map[string][]ReadObjectParams)
+	fmt.Println("Map:", adminmap)
+
 	for i, currRead := range readArgs.ReadParams {
 		readChans[i] = make(chan crdt.State, 1)
+		fmt.Println("Bucket: ", currRead.Bucket)
 
-		currRequest = MaterializerRequest{
-			MatRequestArgs: MatReadArgs{MatReadCommonArgs: MatReadCommonArgs{
-				Timestamp:        tsToUse,
-				ReadObjectParams: currRead,
-				ReplyChan:        readChans[i],
-			}},
+		var replicas []crdt.Element
+		rep := adminmap[currRead.Bucket]
+		if rep != nil {
+			replicas = rep.(crdt.SetAWValueState).Elems
 		}
-		tm.mat.SendRequest(currRequest)
+		rep = adminmap["*"]
+		if rep != nil {
+			replicas = append(replicas, rep.(crdt.SetAWValueState).Elems...)
+		}
+		fmt.Println("Replicas:", replicas)
+
+		fmt.Println("Contains: ", contains(replicas, strconv.FormatInt(int64(tm.replicaID), 10)))
+		if contains(replicas, strconv.FormatInt(int64(tm.replicaID), 10)) {
+
+			currRequest = MaterializerRequest{
+				MatRequestArgs: MatReadArgs{MatReadCommonArgs: MatReadCommonArgs{
+					Timestamp:        tsToUse,
+					ReadObjectParams: currRead,
+					ReplyChan:        readChans[i],
+				}},
+			}
+			tm.mat.SendRequest(currRequest)
+		} else {
+			remoteObjs[string(replicas[0])] = append(remoteObjs[string(replicas[0])], currRead)
+			fmt.Println("Remote:", remoteObjs)
+		}
+	}
+	for k, v := range remoteObjs {
+		fmt.Printf("key[%s] value[%s]\n", k, v)
+
+		//TODO: ir buscar os ips pelos replicaIDs
+		conn, err := net.Dial("tcp", "192.168.68.114:8088")
+		tools.CheckErr("Network connection establishment err", err)
+		SendProto(StaticReadObjs, CreateStaticReadObjs(nil, v), conn)
+		fmt.Println("ENVIEI A MENSAGEM!")
+
+		//id, err :=  strconv.ParseInt(k, 10, 32)
+		//conn, err := net.Dial("tcp", "192.168.68.114:8088")
+		//tools.CheckErr("Network connection establishment err", err)
+		//SendProto(Ping, &proto.Ping{ServerID: pb.Int32(int32(id))}, conn)
+		//fmt.Println("ENVIEI A MENSAGEM!")
+		//time.Sleep(10 * time.Second)
 	}
 
 	for i, readChan := range readChans {
@@ -663,6 +705,15 @@ func (tm *TransactionManager) handleTMRead(request TransactionManagerRequest) {
 
 	readArgs.ReplyChan <- states
 	//++fmt.Println(tm.replicaID, "TM - finished handling read.")
+}
+
+func contains(s []crdt.Element, e string) bool {
+	for _, a := range s {
+		if string(a) == e {
+			return true
+		}
+	}
+	return false
 }
 
 func (tm *TransactionManager) handleTMUpdate(request TransactionManagerRequest, txnPartitions *ongoingTxn) {

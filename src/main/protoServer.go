@@ -97,7 +97,7 @@ func main() {
 	go func() {
 		//Change the port/ip in case you're using something different. Also one of the replicas is going to send a ping to himself
 		time.Sleep(20 * time.Second)
-		conn, err := net.Dial("tcp", "127.0.0.1:8088")
+		conn, err := net.Dial("tcp", "192.168.68.114:8087")
 		tools.CheckErr("Network connection establishment err", err)
 		antidote.SendProto(antidote.Ping, &proto.Ping{ServerID: pb.Int32(int32(id))}, conn)
 		protoType, protobuf, _ := antidote.ReceiveProto(conn)
@@ -124,6 +124,8 @@ Note that this is the same interaction type as in antidote.
 conn - the TCP connection between the client and this server.
 */
 func processConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID int16) {
+	fmt.Println("CHEGUEI PROCESS_CONNECTION!")
+
 	tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Accepted connection.")
 	tmChan := tm.CreateClientHandler()
 	//TODO: Change this to a random ID generated inside the transaction. This ID should be different from transaction to transaction
@@ -150,38 +152,47 @@ func processConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID
 
 		switch protoType {
 		case antidote.ReadObjs:
+			fmt.Println("CHEGUEI READ_OBJS!")
 			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbReadObjects")
 			replyType = antidote.ReadObjsReply
 			reply = handleReadObjects(protobuf.(*proto.ApbReadObjects), tmChan, clientId)
 		case antidote.Read:
+			fmt.Println("CHEGUEI READ!")
 			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbRead")
 			replyType = antidote.ReadObjsReply
 			reply = handleRead(protobuf.(*proto.ApbRead), tmChan, clientId)
 		case antidote.UpdateObjs:
+			fmt.Println("CHEGUEI UPDATE_OBJS!")
 			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbUpdateObjects")
 			replyType = antidote.OpReply
 			reply = handleUpdateObjects(protobuf.(*proto.ApbUpdateObjects), tmChan, clientId)
 		case antidote.StartTrans:
+			fmt.Println("CHEGUEI START_TRANS!")
 			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbStartTransaction")
 			replyType = antidote.StartTransReply
 			reply = handleStartTxn(protobuf.(*proto.ApbStartTransaction), tmChan, clientId)
 		case antidote.AbortTrans:
+			fmt.Println("CHEGUEI ABORT_TRANS!")
 			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbAbortTransaction")
 			replyType = antidote.CommitTransReply
 			reply = handleAbortTxn(protobuf.(*proto.ApbAbortTransaction), tmChan, clientId)
 		case antidote.CommitTrans:
+			fmt.Println("CHEGUEI COMMIT_TRANS!")
 			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbCommitTransaction")
 			replyType = antidote.CommitTransReply
 			reply = handleCommitTxn(protobuf.(*proto.ApbCommitTransaction), tmChan, clientId)
 		case antidote.StaticUpdateObjs:
+			fmt.Println("CHEGUEI STATIC_UPDATE_OBJS!")
 			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbStaticUpdateObjects")
 			replyType = antidote.CommitTransReply
 			reply = handleStaticUpdateObjects(protobuf.(*proto.ApbStaticUpdateObjects), tmChan, clientId)
 		case antidote.StaticReadObjs:
+			fmt.Println("CHEGUEI STATIC_READ_OBJS!")
 			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbStaticReadObjects")
 			replyType = antidote.StaticReadObjsReply
 			reply = handleStaticReadObjects(protobuf.(*proto.ApbStaticReadObjects), tmChan, clientId)
 		case antidote.StaticRead:
+			fmt.Println("CHEGUEI STATIC_READ!")
 			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbStaticRead")
 			replyType = antidote.StaticReadObjsReply
 			reply = handleStaticRead(protobuf.(*proto.ApbStaticRead), tmChan, clientId)
