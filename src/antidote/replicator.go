@@ -8,13 +8,13 @@ package antidote
 //Also note that initialDummyTs isn't updated when new replicas are added via Join.
 
 import (
-	"potionDB/src/clocksi"
 	fmt "fmt"
+	"potionDB/src/clocksi"
 	"potionDB/src/proto"
 	"potionDB/src/shared"
+	"potionDB/src/tools"
 	"strings"
 	"time"
-	"potionDB/src/tools"
 )
 
 type Replicator struct {
@@ -204,6 +204,7 @@ func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, rep
 
 func (repl *Replicator) getBuckets() []string {
 	stringBuckets, has := tools.SharedConfig.GetAndHasConfig("buckets")
+	stringBuckets = stringBuckets + " admin"
 	if !has {
 		return []string{"*"}
 	} else {

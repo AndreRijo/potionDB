@@ -645,27 +645,23 @@ func (tm *TransactionManager) handleTMRead(request TransactionManagerRequest) {
 	var currRequest MaterializerRequest
 	readChans := make([]chan crdt.State, len(readArgs.ReadParams))
 	states := make([]crdt.State, len(readArgs.ReadParams))
-
-	adminmap := AdminRead().States
 	remoteObjs := make(map[string][]ReadObjectParams)
-	fmt.Println("Map:", adminmap)
+	remoteIndex := make([]int, len(readArgs.ReadParams))
+	remoteCounter := 0
 
 	for i, currRead := range readArgs.ReadParams {
 		readChans[i] = make(chan crdt.State, 1)
-		fmt.Println("Bucket: ", currRead.Bucket)
 
 		var replicas []crdt.Element
-		rep := adminmap[currRead.Bucket]
+		rep := adminMap[currRead.Bucket]
 		if rep != nil {
 			replicas = rep.(crdt.SetAWValueState).Elems
 		}
-		rep = adminmap["*"]
+		rep = adminMap["*"]
 		if rep != nil {
 			replicas = append(replicas, rep.(crdt.SetAWValueState).Elems...)
 		}
-		fmt.Println("Replicas:", replicas)
 
-		fmt.Println("Contains: ", contains(replicas, strconv.FormatInt(int64(tm.replicaID), 10)))
 		if contains(replicas, strconv.FormatInt(int64(tm.replicaID), 10)) {
 
 			currRequest = MaterializerRequest{
@@ -673,29 +669,38 @@ func (tm *TransactionManager) handleTMRead(request TransactionManagerRequest) {
 					Timestamp:        tsToUse,
 					ReadObjectParams: currRead,
 					ReplyChan:        readChans[i],
-				}},
+				}, TransactionId: request.TransactionId},
 			}
 			tm.mat.SendRequest(currRequest)
 		} else {
-			remoteObjs[string(replicas[0])] = append(remoteObjs[string(replicas[0])], currRead)
-			fmt.Println("Remote:", remoteObjs)
+			if replicas != nil {
+				remoteObjs[string(replicas[0])] = append(remoteObjs[string(replicas[0])], currRead)
+				remoteIndex[remoteCounter] = i
+				remoteCounter++
+			}
 		}
 	}
+	remoteReads := 0
 	for k, v := range remoteObjs {
-		fmt.Printf("key[%s] value[%s]\n", k, v)
+		k := k
+		v := v
+		go func() {
+			conn, err := net.Dial("tcp", string(repIP[k]))
+			tools.CheckErr("Network connection establishment err", err)
+			SendProto(StaticReadObjs, CreateStaticReadObjs(nil, v), conn)
+			protoType, protobuf, _ := ReceiveProto(conn)
+			if protoType == StaticReadObjsReply {
+				protoValues := protobuf.(*proto.ApbStaticReadObjectsResp).GetObjects().Objects
 
-		//TODO: ir buscar os ips pelos replicaIDs
-		conn, err := net.Dial("tcp", "192.168.68.114:8088")
-		tools.CheckErr("Network connection establishment err", err)
-		SendProto(StaticReadObjs, CreateStaticReadObjs(nil, v), conn)
-		fmt.Println("ENVIEI A MENSAGEM!")
-
-		//id, err :=  strconv.ParseInt(k, 10, 32)
-		//conn, err := net.Dial("tcp", "192.168.68.114:8088")
-		//tools.CheckErr("Network connection establishment err", err)
-		//SendProto(Ping, &proto.Ping{ServerID: pb.Int32(int32(id))}, conn)
-		//fmt.Println("ENVIEI A MENSAGEM!")
-		//time.Sleep(10 * time.Second)
+				for _, protoValue := range protoValues {
+					mapProto := protoValue.GetPartread().GetMap().GetGetvalue()
+					innerCrdtType, innerReadType := mapProto.GetCrdttype(), mapProto.GetParttype()
+					protoState := crdt.ReadRespProtoToAntidoteState(mapProto.GetValue(), innerCrdtType, innerReadType)
+					readChans[remoteIndex[remoteReads]] <- protoState
+					remoteReads++
+				}
+			}
+		}()
 	}
 
 	for i, readChan := range readChans {
@@ -705,15 +710,6 @@ func (tm *TransactionManager) handleTMRead(request TransactionManagerRequest) {
 
 	readArgs.ReplyChan <- states
 	//++fmt.Println(tm.replicaID, "TM - finished handling read.")
-}
-
-func contains(s []crdt.Element, e string) bool {
-	for _, a := range s {
-		if string(a) == e {
-			return true
-		}
-	}
-	return false
 }
 
 func (tm *TransactionManager) handleTMUpdate(request TransactionManagerRequest, txnPartitions *ongoingTxn) {

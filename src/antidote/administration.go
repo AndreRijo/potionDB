@@ -4,18 +4,27 @@ import (
 	"fmt"
 	"potionDB/src/crdt"
 	"potionDB/src/proto"
+	"potionDB/src/tools"
 	"strconv"
 	"time"
 )
 
-var ic InternalClient
+var (
+	ic       InternalClient
+	adminMap map[string]crdt.State
+	repIP    map[string]crdt.Element
+)
 
 func InitializeAdmin(tm *TransactionManager) {
 	ic = InternalClient{}.Initialize(tm)
 	AdminUpdate(tm.replicator.getBuckets(), tm.replicaID)
-	AdminRead()
-	time.Sleep(10 * time.Second)
-	AdminRead()
+	RepIPUpdate(tm.replicaID)
+	time.Sleep(5 * time.Second)
+	for {
+		adminMap = AdminRead().States
+		repIP = RepIPRead().Values
+		time.Sleep(30 * time.Second)
+	}
 }
 
 func AdminUpdate(buckets []string, replicaID int16) {
@@ -36,39 +45,26 @@ func AdminRead() crdt.EmbMapEntryState {
 	return mapFullState
 }
 
-func PrintMap(adminmap crdt.EmbMapEntryState, replicaID int16) {
-	admin := adminmap.States
-	replicas := admin["*"].(crdt.SetAWValueState).Elems
-	fmt.Println(contains(replicas, strconv.FormatInt(int64(replicaID), 10)))
-	fmt.Println(contains(replicas, "11111"))
-	for j, rep := range replicas {
-		fmt.Println(j, rep)
-	}
-
+func RepIPUpdate(replicaID int16) {
+	objId := CreateKeyParams("repIPKey", proto.CRDTType_ORMAP, "admin")
+	op := ic.MapAddUpd(strconv.FormatInt(int64(replicaID), 10), tools.SharedConfig.GetConfig("localPotionDBAddress"))
+	ic.DoSingleUpdate(objId, op)
 }
 
-func AdminReadByBucket(bucket string) []crdt.EmbMapGetValueState {
-	readBuf := ic.CreateReadBuf(1)
-	objId := CreateKeyParams("adminKey", proto.CRDTType_RRMAP, "admin")
-	readBuf = ic.AddRead(objId, ic.RWMapGetValue(bucket, ic.FullRead()), readBuf)
-	states := ic.DoRead(readBuf)
-	var values []crdt.EmbMapGetValueState
-	for _, state := range states {
-		fmt.Println(state.(crdt.EmbMapGetValueState).State)
-		values = append(values, state.(crdt.EmbMapGetValueState))
-	}
-	return values
+func RepIPRead() crdt.MapEntryState {
+	objId := CreateKeyParams("repIPKey", proto.CRDTType_ORMAP, "admin")
+	read := ic.FullRead()
+	state := ic.DoSingleRead(objId, read)
+	mapFullState := state.(crdt.MapEntryState)
+	fmt.Println("[REPLICAS_IP]:", mapFullState.Values)
+	return mapFullState
 }
 
-func AdminReadByBucketList(bucket string) {
-	readBuf := ic.CreateReadBuf(1)
-	objId := CreateKeyParams("adminKey", proto.CRDTType_RRMAP, "admin")
-	readBuf = ic.AddRead(objId, ic.RWMapGetValue(bucket, ic.FullRead()), readBuf)
-	states := ic.DoRead(readBuf)
-
-	replicas := make([]crdt.State, 0)
-	for _, state := range states {
-		replicas = append(replicas, state.(crdt.EmbMapGetValueState).State)
+func contains(s []crdt.Element, e string) bool {
+	for _, a := range s {
+		if string(a) == e {
+			return true
+		}
 	}
-	fmt.Println(replicas)
+	return false
 }
