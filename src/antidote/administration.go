@@ -20,6 +20,7 @@ var (
 
 func InitializeAdmin(tm *TransactionManager) {
 	ic = InternalClient{}.Initialize(tm)
+	remoteWrites = make(map[string][]UpdateObjectParams)
 	replicaID = tm.replicaID
 	AdminUpdate(tm.replicator.getBuckets(), tm.replicaID)
 	RepIPUpdate(tm.replicaID)

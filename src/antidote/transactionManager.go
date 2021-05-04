@@ -798,7 +798,6 @@ func groupReads(reads []KeyParams) (readsPerPartition [][]KeyParams) {
 func groupWrites(updates []*UpdateObjectParams) (updsPerPartition [][]*UpdateObjectParams) {
 	updsPerPartition = make([][]*UpdateObjectParams, nGoRoutines)
 	var currChanKey uint64
-	remoteWrites = make(map[string][]UpdateObjectParams)
 
 	for _, upd := range updates {
 
