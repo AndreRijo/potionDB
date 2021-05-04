@@ -646,6 +646,7 @@ func (tm *TransactionManager) handleTMRead(request TransactionManagerRequest) {
 	readChans := make([]chan crdt.State, len(readArgs.ReadParams))
 	states := make([]crdt.State, len(readArgs.ReadParams))
 	remoteObjs := make(map[string][]ReadObjectParams)
+	remoteCRDTs := make(map[string][]proto.CRDTType)
 	remoteIndex := make([]int, len(readArgs.ReadParams))
 	remoteCounter := 0
 
@@ -675,6 +676,7 @@ func (tm *TransactionManager) handleTMRead(request TransactionManagerRequest) {
 		} else {
 			if replicas != nil {
 				remoteObjs[string(replicas[0])] = append(remoteObjs[string(replicas[0])], currRead)
+				remoteCRDTs[string(replicas[0])] = append(remoteCRDTs[string(replicas[0])], currRead.CrdtType)
 				remoteIndex[remoteCounter] = i
 				remoteCounter++
 			}
@@ -691,18 +693,15 @@ func (tm *TransactionManager) handleTMRead(request TransactionManagerRequest) {
 			protoType, protobuf, _ := ReceiveProto(conn)
 			if protoType == StaticReadObjsReply {
 				protoValues := protobuf.(*proto.ApbStaticReadObjectsResp).GetObjects().Objects
-
-				for _, protoValue := range protoValues {
-					mapProto := protoValue.GetPartread().GetMap().GetGetvalue()
-					innerCrdtType, innerReadType := mapProto.GetCrdttype(), mapProto.GetParttype()
-					protoState := crdt.ReadRespProtoToAntidoteState(mapProto.GetValue(), innerCrdtType, innerReadType)
+				for i, protoValue := range protoValues {
+					//fmt.Println("[PROTO_VALUE]:", protoValue)
+					protoState := crdt.ReadRespProtoToAntidoteState(protoValue, remoteCRDTs[k][i], proto.READType_FULL)
 					readChans[remoteIndex[remoteReads]] <- protoState
 					remoteReads++
 				}
 			}
 		}()
 	}
-
 	for i, readChan := range readChans {
 		states[i] = <-readChan
 		close(readChan)
@@ -799,15 +798,36 @@ func groupReads(reads []KeyParams) (readsPerPartition [][]KeyParams) {
 func groupWrites(updates []*UpdateObjectParams) (updsPerPartition [][]*UpdateObjectParams) {
 	updsPerPartition = make([][]*UpdateObjectParams, nGoRoutines)
 	var currChanKey uint64
+	remoteWrites = make(map[string][]UpdateObjectParams)
 
 	for _, upd := range updates {
-		currChanKey = GetChannelKey(upd.KeyParams)
-		if updsPerPartition[currChanKey] == nil {
-			updsPerPartition[currChanKey] = make([]*UpdateObjectParams, 0, len(updates)*2/int(nGoRoutines))
-		}
-		updsPerPartition[currChanKey] = append(updsPerPartition[currChanKey], upd)
-	}
 
+		var replicas []crdt.Element
+		rep := adminMap[upd.Bucket]
+		if rep != nil {
+			replicas = rep.(crdt.SetAWValueState).Elems
+		}
+		rep = adminMap["*"]
+		if rep != nil {
+			replicas = append(replicas, rep.(crdt.SetAWValueState).Elems...)
+		}
+
+		//fmt.Println("[CONTAINS]:", adminMap == nil || contains(replicas, strconv.FormatInt(int64(replicaID), 10)))
+		if adminMap == nil || contains(replicas, strconv.FormatInt(int64(replicaID), 10)) {
+			currChanKey = GetChannelKey(upd.KeyParams)
+			if updsPerPartition[currChanKey] == nil {
+				updsPerPartition[currChanKey] = make([]*UpdateObjectParams, 0, len(updates)*2/int(nGoRoutines))
+			}
+			updsPerPartition[currChanKey] = append(updsPerPartition[currChanKey], upd)
+
+		} else {
+			if replicas != nil {
+				remoteWrites[string(replicas[0])] = append(remoteWrites[string(replicas[0])], *upd)
+				//fmt.Println("[REMOTE]:", remoteWrites[string(replicas[0])])
+			}
+		}
+	}
+	//fmt.Println("[REMOTE_WRITES]:", remoteWrites)
 	return
 }
 
@@ -831,6 +851,25 @@ func (tm *TransactionManager) handleTMStartTxn(request TransactionManagerRequest
 
 func (tm *TransactionManager) handleTMCommit(request TransactionManagerRequest, txnPartitions *ongoingTxn) {
 	//++fmt.Printf("%d TM%d - Started handling commit.\n", tm.replicaID, txnPartitions.debugID)
+
+	//fmt.Println("CHEGUEI AO HANDLE_TM_COMMIT")
+	for k, v := range remoteWrites {
+		k := k
+		v := v
+		go func() {
+			conn, err := net.Dial("tcp", string(repIP[k]))
+			//fmt.Println("ENVIEI MENSAGEM PARA O ", string(repIP[k]))
+			tools.CheckErr("Network connection establishment err", err)
+			SendProto(StaticUpdateObjs, CreateStaticUpdateObjs(nil, v), conn)
+			protoType, _, _ := ReceiveProto(conn)
+			if protoType == CommitTransReply {
+				delete(remoteWrites, k)
+			} else {
+				fmt.Errorf("Proto type received was %v and should have been CommitTransReply", protoType)
+			}
+		}()
+	}
+
 	commitArgs := request.Args.(TMCommitArgs)
 
 	//PREPARE

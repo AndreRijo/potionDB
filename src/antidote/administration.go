@@ -5,18 +5,22 @@ import (
 	"potionDB/src/crdt"
 	"potionDB/src/proto"
 	"potionDB/src/tools"
+	"reflect"
 	"strconv"
 	"time"
 )
 
 var (
-	ic       InternalClient
-	adminMap map[string]crdt.State
-	repIP    map[string]crdt.Element
+	ic           InternalClient
+	adminMap     map[string]crdt.State
+	repIP        map[string]crdt.Element
+	replicaID    int16
+	remoteWrites map[string][]UpdateObjectParams
 )
 
 func InitializeAdmin(tm *TransactionManager) {
 	ic = InternalClient{}.Initialize(tm)
+	replicaID = tm.replicaID
 	AdminUpdate(tm.replicator.getBuckets(), tm.replicaID)
 	RepIPUpdate(tm.replicaID)
 	time.Sleep(5 * time.Second)
@@ -41,7 +45,10 @@ func AdminRead() crdt.EmbMapEntryState {
 	read := ic.FullRead()
 	state := ic.DoSingleRead(objId, read)
 	mapFullState := state.(crdt.EmbMapEntryState)
-	fmt.Println("[ADMIN_MAP]: ", mapFullState.States)
+	res := reflect.DeepEqual(mapFullState.States, adminMap)
+	if !res {
+		fmt.Println("[ADMIN_MAP]: ", mapFullState.States)
+	}
 	return mapFullState
 }
 
@@ -56,7 +63,10 @@ func RepIPRead() crdt.MapEntryState {
 	read := ic.FullRead()
 	state := ic.DoSingleRead(objId, read)
 	mapFullState := state.(crdt.MapEntryState)
-	fmt.Println("[REPLICAS_IP]:", mapFullState.Values)
+	res := reflect.DeepEqual(mapFullState.Values, repIP)
+	if !res {
+		fmt.Println("[REPLICAS_IP]:", mapFullState.Values)
+	}
 	return mapFullState
 }
 
