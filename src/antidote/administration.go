@@ -2,6 +2,8 @@ package antidote
 
 import (
 	"fmt"
+	"net"
+	"potionDB/src/clocksi"
 	"potionDB/src/crdt"
 	"potionDB/src/proto"
 	"potionDB/src/tools"
@@ -10,17 +12,33 @@ import (
 	"time"
 )
 
+type ReadRemotePair struct {
+	readObjs ReadObjectParams
+	index    int
+}
+
+type State struct {
+	remoteWrites  map[string][]UpdateObjectParams
+	rmtUpdOnGoing map[string][]UpdateObjectParams
+	rmtTxn        map[string][]byte
+}
+
 var (
-	ic           InternalClient
-	adminMap     map[string]crdt.State
-	repIP        map[string]crdt.Element
-	replicaID    int16
-	remoteWrites map[string][]UpdateObjectParams
+	ic        InternalClient
+	replicaID int16
+	adminMap  map[string]crdt.State
+	repIP     map[string]crdt.Element
+	remoteTS  map[string]clocksi.Timestamp
+	state     map[TransactionId]State
+	conns     map[string]net.Conn
 )
 
 func InitializeAdmin(tm *TransactionManager) {
 	ic = InternalClient{}.Initialize(tm)
-	remoteWrites = make(map[string][]UpdateObjectParams)
+	remoteTS = make(map[string]clocksi.Timestamp)
+	conns = make(map[string]net.Conn)
+	state = make(map[TransactionId]State)
+
 	replicaID = tm.replicaID
 	AdminUpdate(tm.replicator.getBuckets(), tm.replicaID)
 	RepIPUpdate(tm.replicaID)
