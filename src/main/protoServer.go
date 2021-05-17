@@ -106,6 +106,8 @@ func main() {
 		}
 	}()
 
+	go antidote.InitializeAdmin(tm)
+
 	for {
 		conn, err := server.Accept()
 		tools.CheckErr(tools.NEW_CONN_ERROR, err)
