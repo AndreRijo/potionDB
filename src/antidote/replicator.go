@@ -8,13 +8,13 @@ package antidote
 //Also note that initialDummyTs isn't updated when new replicas are added via Join.
 
 import (
-	"potionDB/src/clocksi"
 	fmt "fmt"
+	"potionDB/src/clocksi"
 	"potionDB/src/proto"
 	"potionDB/src/shared"
+	"potionDB/src/tools"
 	"strings"
 	"time"
-	"potionDB/src/tools"
 )
 
 type Replicator struct {
@@ -55,6 +55,11 @@ type NewReplicatorRequest struct {
 type StableClock struct {
 	SenderID int16
 	Ts       int64
+}
+
+type FullStableClock struct {
+	SenderID int16
+	Clk      clocksi.Timestamp
 }
 
 type RemoteTxn struct {
@@ -106,11 +111,19 @@ const (
 	DO_JOIN             = "doJoin"
 )
 
+var (
+	fullReplClock = false
+)
+
 func (req NewReplicatorRequest) getSenderID() int16 {
 	return req.SenderID
 }
 
 func (req StableClock) getSenderID() int16 {
+	return req.SenderID
+}
+
+func (req FullStableClock) getSenderID() int16 {
 	return req.SenderID
 }
 
@@ -155,6 +168,7 @@ func (repl *Replicator) Reset() {
 func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, replicaID int16) {
 	if !shared.IsReplDisabled {
 		if !repl.started {
+			fullReplClock = tools.SharedConfig.GetBoolConfig("fullReplClk", false)
 			repl.tm = tm
 			repl.started = true
 			repl.localPartitions = loggers
@@ -242,6 +256,15 @@ func (repl *Replicator) replicateCycle() {
 		//time.Sleep(tsSendDelay * time.Millisecond)
 		if len(toSend) == 0 && (previousLen > 0 || count*tsSendDelay%60000 == 0) {
 			fmt.Println("[REPLICATOR]No ops to send.")
+			//request latest clock to TM
+			clkCh := make(chan clocksi.Timestamp)
+			repl.tm.SendRemoteMsg(TMRequestTMClock{ReplyChan: clkCh})
+			clk := <-clkCh
+			if fullReplClock {
+				repl.remoteConn.SendFullStableClk(clk)
+			} else {
+				repl.remoteConn.SendStableClk(clk.GetPos(repl.replicaID))
+			}
 		}
 		previousLen = len(toSend)
 		//ignore(toSend)
@@ -359,7 +382,11 @@ func (repl *Replicator) sendTxns(toSend []RemoteTxn) {
 		}
 		count++
 		//TODO: This might not even be necessary to be sent - probably it is enough to send this when there's no upds to send.
-		repl.remoteConn.SendStableClk(txn.Timestamp.GetPos(repl.replicaID))
+		if fullReplClock {
+			repl.remoteConn.SendFullStableClk(txn.Timestamp)
+		} else {
+			repl.remoteConn.SendStableClk(txn.Timestamp.GetPos(repl.replicaID))
+		}
 		//fmt.Println("Sending txns")
 	}
 	//endTime := time.Now().UnixNano()
@@ -381,6 +408,11 @@ func (repl *Replicator) handleRemoteRequest(remoteReq ReplicatorMsg) {
 		repl.tm.SendRemoteMsg(TMRemoteClk{
 			ReplicaID: typedReq.SenderID,
 			StableTs:  typedReq.Ts,
+		})
+	case *FullStableClock:
+		repl.tm.SendRemoteMsg(TMFullRemoteClk{
+			ReplicaID: typedReq.SenderID,
+			StableClk: typedReq.Clk,
 		})
 	case *NewReplicatorRequest:
 		repl.tm.SendRemoteMsg(TMRemotePartTxn{

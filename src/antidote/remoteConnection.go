@@ -3,10 +3,11 @@ package antidote
 import (
 	fmt "fmt"
 	"net"
+	"potionDB/src/clocksi"
 	"potionDB/src/proto"
+	"potionDB/src/tools"
 	"strconv"
 	"time"
-	"potionDB/src/tools"
 
 	pb "github.com/golang/protobuf/proto"
 	"github.com/streadway/amqp"
@@ -247,6 +248,16 @@ func (remote *RemoteConn) SendStableClk(ts int64) {
 	remote.sendCh.Publish(exchangeName, clockTopic, false, false, amqp.Publishing{CorrelationId: remote.replicaString, Body: data})
 }
 
+func (remote *RemoteConn) SendFullStableClk(clk clocksi.Timestamp) {
+	tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Sending full stable clk:", clk.ToString())
+	protobuf := createProtoFullStableClock(remote.replicaID, clk)
+	data, err := pb.Marshal(protobuf)
+	if err != nil {
+		tools.FancyErrPrint(tools.REMOTE_PRINT, remote.replicaID, "Failed to generate bytes of fullStableClk request to send. Error:", err)
+	}
+	remote.sendCh.Publish(exchangeName, clockTopic, false, false, amqp.Publishing{CorrelationId: remote.replicaString, Body: data})
+}
+
 //This should not be called externally.
 func (remote *RemoteConn) startReceiver() {
 	fmt.Println("[RC] Receiver started")
@@ -255,7 +266,11 @@ func (remote *RemoteConn) startReceiver() {
 
 		switch data.RoutingKey {
 		case clockTopic:
-			remote.handleReceivedStableClock(data.Body)
+			if fullReplClock {
+				remote.handleReceivedFullStableClock(data.Body)
+			} else {
+				remote.handleReceivedStableClock(data.Body)
+			}
 		case joinTopic:
 			remote.handleReceivedJoinTopic(data.ContentType, data.Body)
 		default:
@@ -311,6 +326,33 @@ func (remote *RemoteConn) handleReceivedStableClock(data []byte) {
 		tools.FancyErrPrint(tools.REMOTE_PRINT, remote.replicaID, "Failed to decode bytes of received stableClock. Error:", err)
 	}
 	clkReq := protoToStableClock(protobuf)
+	tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Received remote stableClock:", *clkReq)
+	if clkReq.SenderID == remote.replicaID {
+		fmt.Println("ALSO NOT SUPPOSED TO HAPPEN NOW!")
+		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Ignored received stableClock as it was sent by myself.")
+	} else {
+		//We also need to send a request with the last partition ops, if there's any
+		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Processing received stableClock.")
+		holdOperations, hasOps := remote.holdOperations[clkReq.SenderID]
+		if hasOps {
+			tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Merging previous requests before sending stableClock to replicator.")
+			partReq := remote.getMergedReplicatorRequest(holdOperations, clkReq.SenderID)
+			remote.listenerChan <- partReq
+		} else {
+			tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "No previous request.")
+		}
+		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Sending stableClock to replicator.")
+		remote.listenerChan <- clkReq
+	}
+}
+
+func (remote *RemoteConn) handleReceivedFullStableClock(data []byte) {
+	protobuf := &proto.ProtoFullStableClock{}
+	err := pb.Unmarshal(data, protobuf)
+	if err != nil {
+		tools.FancyErrPrint(tools.REMOTE_PRINT, remote.replicaID, "Failed to decode bytes of received fullStableClock. Error:", err)
+	}
+	clkReq := protoToFullStableClock(protobuf)
 	tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Received remote stableClock:", *clkReq)
 	if clkReq.SenderID == remote.replicaID {
 		fmt.Println("ALSO NOT SUPPOSED TO HAPPEN NOW!")

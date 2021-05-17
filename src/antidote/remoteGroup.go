@@ -2,8 +2,9 @@ package antidote
 
 import (
 	fmt "fmt"
-	"strings"
+	"potionDB/src/clocksi"
 	"potionDB/src/tools"
+	"strings"
 
 	pb "github.com/golang/protobuf/proto"
 )
@@ -130,6 +131,10 @@ func (group *RemoteGroup) SendPartTxn(request *NewReplicatorRequest) {
 
 func (group *RemoteGroup) SendStableClk(ts int64) {
 	group.ourConn.SendStableClk(ts)
+}
+
+func (group *RemoteGroup) SendFullStableClk(clk clocksi.Timestamp) {
+	group.ourConn.SendFullStableClk(clk)
 }
 
 func (group *RemoteGroup) GetNextRemoteRequest() (request ReplicatorMsg) {

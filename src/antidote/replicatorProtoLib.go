@@ -14,6 +14,10 @@ func createProtoStableClock(replicaID int16, ts int64) (protobuf *proto.ProtoSta
 	return &proto.ProtoStableClock{SenderID: pb.Int32(int32(replicaID)), ReplicaTs: &ts}
 }
 
+func createProtoFullStableClock(replicaID int16, clk clocksi.Timestamp) (protobuf *proto.ProtoFullStableClock) {
+	return &proto.ProtoFullStableClock{SenderID: pb.Int32(int32(replicaID)), Timestamp: clk.ToBytes()}
+}
+
 func createProtoReplicatePart(replicaID int16, partitionID int64, timestamp clocksi.Timestamp, upds []*UpdateObjectParams) (protobuf *proto.ProtoReplicatePart) {
 	return &proto.ProtoReplicatePart{
 		SenderID:    pb.Int32(int32(replicaID)),
@@ -70,6 +74,10 @@ func createProtoPartitions(partCRDTs []*proto.ProtoCRDT) (protobuf *proto.ProtoP
 
 func protoToStableClock(protobuf *proto.ProtoStableClock) (stableClk *StableClock) {
 	return &StableClock{SenderID: int16(protobuf.GetSenderID()), Ts: protobuf.GetReplicaTs()}
+}
+
+func protoToFullStableClock(protobuf *proto.ProtoFullStableClock) (stableClk *FullStableClock) {
+	return &FullStableClock{SenderID: int16(protobuf.GetSenderID()), Clk: clocksi.ClockSiTimestamp{}.FromBytes(protobuf.Timestamp)}
 }
 
 func protoToReplicatorRequest(protobuf *proto.ProtoReplicatePart) (request *NewReplicatorRequest) {

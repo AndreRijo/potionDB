@@ -8,6 +8,11 @@ message ProtoStableClock {
     required int64 replicaTs = 2;
 }
 
+message ProtoFullStableClock {
+    required int32 senderID = 1;
+    required bytes timestamp = 2;
+}
+
 message ProtoReplicatePart {
     required int32 senderID = 1;
     required ProtoRemoteTxn txn = 2;

@@ -439,6 +439,8 @@ func loadConfigs() (configs *tools.ConfigLoader) {
 	replicaID := flag.String("id", "F", "replicaID that uniquely identifies this replica.")
 	doJoin := flag.String("doJoin", "F", "if this replica should query others about the current state before starting to accept client requests")
 	stringBuckets := flag.String("buckets", "none", "list of buckets for the server to replicate.")
+	fullReplClks := flag.String("fullReplClk", "none", "if PotionDB should use full clocks when replicating (true)"+
+		"or just the necessary entry (false). False by default.")
 	disableRepl := flag.String("disableReplicator", "none", "if replicator should be disabled. False by default.")
 	disableLog := flag.String("disableLog", "none", "if logging of operations should be disabled. False by default.")
 	disableReadWaiting := flag.String("disableReadWaiting", "none", "if reads should wait until the materializer's clock is >= to the read's")
@@ -495,6 +497,9 @@ func loadConfigs() (configs *tools.ConfigLoader) {
 			fmt.Println(bks)
 		}
 		configs.ReplaceConfig("buckets", bks)
+	}
+	if *fullReplClks != "none" {
+		configs.ReplaceConfig("fullReplClk", *fullReplClks)
 	}
 	if *disableRepl != "none" {
 		configs.ReplaceConfig("disableReplicator", *disableRepl)

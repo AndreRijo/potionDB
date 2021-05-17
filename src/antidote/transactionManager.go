@@ -3,13 +3,13 @@ package antidote
 //TODO: Read-write lock for the clock? That might help when doing queries-only.
 
 import (
-	"potionDB/src/clocksi"
-	"potionDB/src/crdt"
 	fmt "fmt"
 	"math/rand"
+	"potionDB/src/clocksi"
+	"potionDB/src/crdt"
 	"potionDB/src/proto"
-	"sync"
 	"potionDB/src/tools"
+	"sync"
 )
 
 /////*****************TYPE DEFINITIONS***********************/////
@@ -95,6 +95,11 @@ type TMRemoteClk struct {
 	StableTs  int64
 }
 
+type TMFullRemoteClk struct {
+	ReplicaID int16
+	StableClk clocksi.Timestamp
+}
+
 type TMRemotePartTxn struct {
 	PartitionID int64
 	ReplicaID   int16
@@ -110,6 +115,10 @@ type TMGetSnapshot struct {
 type TMApplySnapshot struct {
 	clocksi.Timestamp
 	PartStates [][]*proto.ProtoCRDT
+}
+
+type TMRequestTMClock struct {
+	ReplyChan chan clocksi.Timestamp
 }
 
 type TMReplicaID struct {
@@ -263,6 +272,10 @@ func (req TMRemoteClk) getReplicaID() (id int16) {
 	return req.ReplicaID
 }
 
+func (req TMFullRemoteClk) getReplicaID() (id int16) {
+	return req.ReplicaID
+}
+
 func (req TMRemotePartTxn) getReplicaID() (id int16) {
 	return req.ReplicaID
 }
@@ -276,6 +289,10 @@ func (args TMApplySnapshot) getReplicaID() (id int16) {
 }
 
 func (args TMStart) getReplicaID() (id int16) {
+	return 0 //Irrelevant
+}
+
+func (req TMRequestTMClock) getReplicaID() (id int16) {
 	return 0 //Irrelevant
 }
 
@@ -407,6 +424,8 @@ func (tm *TransactionManager) handleRemoteMsgs() {
 		switch typedReq := request.(type) {
 		case TMRemoteClk:
 			tm.applyRemoteClk(&typedReq)
+		case TMFullRemoteClk:
+			tm.applyFullRemoteClk(&typedReq)
 		case TMRemotePartTxn:
 			tm.applyRemoteTxn(&typedReq)
 		case TMGetSnapshot:
@@ -416,7 +435,13 @@ func (tm *TransactionManager) handleRemoteMsgs() {
 		case TMReplicaID:
 			fmt.Println("Adding ID", typedReq.ReplicaID)
 			clocksi.AddNewID(typedReq.ReplicaID)
+		case TMRequestTMClock:
+			tm.localClock.Lock()
+			replyClk := tm.localClock.Timestamp.Copy()
+			tm.localClock.Unlock()
+			typedReq.ReplyChan <- replyClk
 		case TMStart:
+			tm.localClock.Update()
 			tm.mat.SendRequestToAllChannels(MaterializerRequest{MatRequestArgs: MatWaitForReplicasArgs{}})
 			tm.waitStartChan <- true
 		}
@@ -888,6 +913,11 @@ func (tm *TransactionManager) applyRemoteClk(request *TMRemoteClk) {
 	} else {
 		tm.downstreamQueue[request.ReplicaID] = append(tm.downstreamQueue[request.ReplicaID], request)
 	}
+}
+
+func (tm *TransactionManager) applyFullRemoteClk(request *TMFullRemoteClk) {
+	//fmt.Printf("Received remote clock: %s, local clock: %s\n", request.StableClk.ToString(), tm.localClock.ToString())
+	tm.applyRemoteClk(&TMRemoteClk{ReplicaID: request.ReplicaID, StableTs: request.StableClk.GetPos(request.ReplicaID)})
 }
 
 func (tm *TransactionManager) applyRemoteTxn(request *TMRemotePartTxn) {
