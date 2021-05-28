@@ -218,6 +218,7 @@ func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, rep
 
 func (repl *Replicator) getBuckets() []string {
 	stringBuckets, has := tools.SharedConfig.GetAndHasConfig("buckets")
+	stringBuckets = stringBuckets + " admin"
 	if !has {
 		return []string{"*"}
 	} else {

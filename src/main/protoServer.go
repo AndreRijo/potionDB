@@ -97,7 +97,7 @@ func main() {
 	go func() {
 		//Change the port/ip in case you're using something different. Also one of the replicas is going to send a ping to himself
 		time.Sleep(20 * time.Second)
-		conn, err := net.Dial("tcp", "127.0.0.1:8088")
+		conn, err := net.Dial("tcp", "192.168.68.114:8087")
 		tools.CheckErr("Network connection establishment err", err)
 		antidote.SendProto(antidote.Ping, &proto.Ping{ServerID: pb.Int32(int32(id))}, conn)
 		protoType, protobuf, _ := antidote.ReceiveProto(conn)
@@ -124,6 +124,7 @@ Note that this is the same interaction type as in antidote.
 conn - the TCP connection between the client and this server.
 */
 func processConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID int16) {
+
 	tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Accepted connection.")
 	tmChan := tm.CreateClientHandler()
 	//TODO: Change this to a random ID generated inside the transaction. This ID should be different from transaction to transaction
