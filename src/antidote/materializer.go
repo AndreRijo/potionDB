@@ -105,6 +105,11 @@ type MatCommitedClkArgs struct {
 	ReplyChan chan TimestampPartIdPair
 }
 
+type MatGetCrdtArgs struct {
+	KeyParams []KeyParams
+	ReplyChan chan []*proto.ProtoState
+}
+
 //Used to get a snapshot of CRDTs, which is needed by the joining mechanism
 type MatGetSnapshotArgs struct {
 	clocksi.Timestamp
@@ -200,6 +205,7 @@ const (
 	applySnapshotMatRequest MatRequestType = 13
 	resetMatRequest         MatRequestType = 14
 	waitForReplicasRequest  MatRequestType = 15
+	getCrdtMatRequest       MatRequestType = 16
 	versionMatRequest       MatRequestType = 255
 
 	//Number of goroutines in the pool to access the database. Each goroutine has a (automatically assigned) range of keys that it can access.
@@ -325,6 +331,14 @@ func (args MatCommitedClkArgs) getRequestType() (requestType MatRequestType) {
 
 func (args MatCommitedClkArgs) getChannel() (channelId uint64) {
 	return 0 //commitedClkMatRequest is always sent to all partitions
+}
+
+func (args MatGetCrdtArgs) getRequestType() (requestType MatRequestType) {
+	return getCrdtMatRequest
+}
+
+func (args MatGetCrdtArgs) getChannel() (channelId uint64) {
+	return GetChannelKey(args.KeyParams[0])
 }
 
 func (args MatGetSnapshotArgs) getRequestType() (requestType MatRequestType) {
@@ -580,6 +594,8 @@ func handleMatRequest(request MaterializerRequest, partitionData *partitionData)
 		handleMatPrepareRemote(request, partitionData)
 	case commitedClkMatRequest:
 		handleMatCommitedClk(request, partitionData)
+	case getCrdtMatRequest:
+		handleMatGetCrdt(request, partitionData)
 	case getSnapshotMatRequest:
 		handleMatGetSnapshot(request, partitionData)
 	case applySnapshotMatRequest:
@@ -1309,6 +1325,23 @@ func handleMatClkPosUpd(request MaterializerRequest, partitionData *partitionDat
 	//TODO: [MIX] Added this
 	checkAndApplyPendingCommit(partitionData)
 	//addAction("clkPosEnd", partitionData)
+}
+
+func handleMatGetCrdt(request MaterializerRequest, partitionData *partitionData) {
+	args := request.MatRequestArgs.(MatGetCrdtArgs)
+	results := make([]*proto.ProtoState, len(args.KeyParams))
+	var obj VersionManager
+	var hasKey bool
+
+	for i, keyP := range args.KeyParams {
+		obj, hasKey = partitionData.db[getHash(getCombinedKey(keyP))]
+		if !hasKey {
+			obj = initializeVersionManager(keyP.CrdtType, partitionData)
+		}
+		results[i] = obj.GetLatestCRDT().(crdt.ProtoCRDT).ToProtoState()
+	}
+
+	args.ReplyChan <- results
 }
 
 func handleMatGetSnapshot(request MaterializerRequest, partitionData *partitionData) {
