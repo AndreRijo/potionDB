@@ -14,13 +14,14 @@ enum CRDT_type {
     RRMAP = 11;
     FATCOUNTER = 12;
     FLAG_EW = 13;
-    FLAG_DW = 14;
+    //FLAG_DW = 14;
     TOPK = 1;
     TOPK_RMV = 2;
     AVG = 7;
     LEADERBOARD = 9;
     MAXMIN = 0;
     ORMAP = 15;
+    TOPSUM = 14;
 }
 
 // Riak Error response
@@ -299,7 +300,7 @@ message ApbReadObjectResp {
     optional ApbGetMapResp map = 6;
     optional ApbGetFlagResp flag = 7;
     optional ApbGetMaxMinResp maxmin = 12;
-    optional ApbGetTopkResp topk = 13;
+    optional ApbGetTopkResp topk = 13;      //Also used for TopSum
     optional ApbGetLeaderboardResp leadb = 14;
     optional ApbGetAverageResp avg = 15;
 	optional ApbPartialReadResp partread = 8;	//Generic for non-full state reads from any CRDT
@@ -343,6 +344,28 @@ message ApbResetServer {
 
 message ApbResetServerResp {}
 
+//Triggers
+message ApbNewTrigger {
+    required ApbTriggerInfo source = 1;
+    required ApbTriggerInfo target = 2;
+    required bool isGeneric = 3;
+}
+
+message ApbTriggerInfo {
+    required ApbBoundObject obj = 1;
+    required int32 opType = 2;
+    required int32 nArgs = 3;
+    required bytes args = 4;            //gob
+}
+
+message ApbNewTriggerReply {}
+
+message ApbGetTriggers {}
+
+message ApbGetTriggersReply {
+    repeated ApbNewTrigger mapping = 1;
+    repeated ApbNewTrigger genericMapping = 2;
+}
 
 //Partial reading
 
@@ -357,7 +380,7 @@ enum READ_type {
 	GET_VALUES = 5;	//Return value for a given set of keys
 	//TopK
 	GET_N = 6;
-    GET_ABOVE_VALUE = 7;	//TODO: Both this and GET_N still need to be implemented in the topK.
+    GET_ABOVE_VALUE = 7;
     GET_FULL_AVG = 8;
 }
 

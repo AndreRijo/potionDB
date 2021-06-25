@@ -61,7 +61,7 @@ func main() {
 	configs := loadConfigs()
 	startProfiling(configs)
 
-	portString := configs.GetConfig(PORT_KEY)
+	portString := configs.GetOrDefault(PORT_KEY, "8887")
 	//tmpId, _ := strconv.ParseInt(portString, 0, 64)
 	//tmpId2, _ := strconv.ParseInt(configs.GetConfig("potionDBID"), 10, 64)
 	//id := int16((tmpId + tmpId2) % math.MaxInt16)
@@ -114,6 +114,7 @@ func processConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID
 	//TODO: Change this to a random ID generated inside the transaction. This ID should be different from transaction to transaction
 	//The current solution can give problems in the Materializer when a commited transaction is put on hold and another transaction from the same client arrives
 	var clientId antidote.ClientId = antidote.ClientId(rand.Uint64())
+	clientCI := antidote.CodingInfo{}.Initialize()
 
 	var replyType byte = 0
 	var reply pb.Message = nil
@@ -170,6 +171,14 @@ func processConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID
 			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbStaticRead")
 			replyType = antidote.StaticReadObjsReply
 			reply = handleStaticRead(protobuf.(*proto.ApbStaticRead), tmChan, clientId)
+		case antidote.NewTrigger:
+			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbNewTrigger")
+			replyType = antidote.NewTriggerReply
+			reply = handleNewTrigger(protobuf.(*proto.ApbNewTrigger), tmChan, clientId, clientCI)
+		case antidote.GetTriggers:
+			tools.FancyDebugPrint(tools.PROTO_PRINT, replicaID, "Received proto of type ApbGetTriggers")
+			replyType = antidote.GetTriggersReply
+			reply = handleGetTriggers(protobuf.(*proto.ApbGetTriggers), tmChan, clientId, clientCI)
 		case antidote.ResetServer:
 			fmt.Println("Starting to reset PotionDB")
 			replyType = antidote.ResetServerReply
@@ -342,6 +351,42 @@ func handleCommitTxn(proto *proto.ApbCommitTransaction,
 	return
 }
 
+func handleNewTrigger(proto *proto.ApbNewTrigger, tmChan chan antidote.TransactionManagerRequest,
+	clientId antidote.ClientId, ci antidote.CodingInfo) (respProto *proto.ApbNewTriggerReply) {
+
+	replyChan := make(chan bool)
+
+	tmChan <- createTMRequest(antidote.TMNewTriggerArgs{
+		ReplyChan: replyChan,
+		IsGeneric: proto.GetIsGeneric(),
+		Source:    antidote.ProtoTriggerInfoToAntidote(proto.GetSource(), ci),
+		Target:    antidote.ProtoTriggerInfoToAntidote(proto.GetTarget(), ci),
+	}, 0, nil)
+
+	<-replyChan
+
+	//TODO: Errors?
+	respProto = antidote.CreateNewTriggerReply()
+	return
+}
+
+func handleGetTriggers(proto *proto.ApbGetTriggers, tmChan chan antidote.TransactionManagerRequest,
+	clientId antidote.ClientId, ci antidote.CodingInfo) (respProto *proto.ApbGetTriggersReply) {
+
+	replyChan := make(chan *antidote.TriggerDB)
+	notifyChan := make(chan bool)
+
+	tmChan <- createTMRequest(antidote.TMGetTriggersArgs{ReplyChan: replyChan, WaitFor: notifyChan}, 0, nil)
+
+	triggerDB := <-replyChan
+
+	triggerDB.DebugPrint("[PS]")
+	//TODO: Errors?
+	respProto = antidote.CreateGetTriggersReply(triggerDB, ci)
+	notifyChan <- true
+	return
+}
+
 func handleResetServer(tm *antidote.TransactionManager) (respProto *proto.ApbResetServerResp) {
 	tm.ResetServer()
 	fmt.Println("Forcing GB...")
@@ -417,7 +462,7 @@ func loadConfigs() (configs *tools.ConfigLoader) {
 
 	flag.Parse()
 	configs = &tools.ConfigLoader{}
-	fmt.Println("Using config file:", *configFolder)
+	//fmt.Println("Using config file:", *configFolder)
 	configs.LoadConfigs(*configFolder)
 
 	//If flags are present, override configs

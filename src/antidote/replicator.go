@@ -9,6 +9,7 @@ package antidote
 
 import (
 	"clocksi"
+	"crdt"
 	fmt "fmt"
 	"proto"
 	"shared"
@@ -66,6 +67,11 @@ type RemoteID struct {
 	SenderID int16
 }
 
+type RemoteTrigger struct {
+	AutoUpdate
+	IsGeneric bool
+}
+
 //All join-related requests include a field to identify in the remoteGroup which connection the reply should be sent to.
 type Join struct {
 	SenderID   int16
@@ -116,6 +122,11 @@ func (req StableClock) getSenderID() int16 {
 
 func (req RemoteID) getSenderID() int16 {
 	return req.SenderID
+}
+
+//Sender ID is irrelevant. It's just here to implement the ReplicatorMsg interface.
+func (req RemoteTrigger) getSenderID() int16 {
+	return -1
 }
 
 func (req Join) getSenderID() int16 {
@@ -184,6 +195,7 @@ func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, rep
 			} else {
 				//Wait for replicaIDs of existing replicas
 				repl.JoinInfo.waitFor = int(remoteConn.nReplicas)
+				crdt.NReplicas = int32(remoteConn.nReplicas + 1)
 				remoteConn.sendReplicaID()
 				go repl.receiveRemoteTxns()
 				go repl.replicateCycle()
@@ -375,6 +387,7 @@ func (repl *Replicator) receiveRemoteTxns() {
 	}
 }
 
+//TODO: Maybe one day have a direct communication channel between TM and ReplicatorGroup?
 func (repl *Replicator) handleRemoteRequest(remoteReq ReplicatorMsg) {
 	switch typedReq := remoteReq.(type) {
 	case *StableClock:
@@ -397,8 +410,11 @@ func (repl *Replicator) handleRemoteRequest(remoteReq ReplicatorMsg) {
 			repl.allDone = true
 			repl.tm.SendRemoteMsg(TMStart{})
 		}
+	case *RemoteTrigger:
+		repl.tm.SendRemoteMsg(TMRemoteTrigger{AutoUpdate: typedReq.AutoUpdate, IsGeneric: typedReq.IsGeneric})
 	case *Join:
 		go repl.handleJoin(typedReq)
+		crdt.NReplicas++
 	case *RequestBucket:
 		go repl.handleRequestBucket(typedReq)
 	case *ReplyJoin:
@@ -410,6 +426,7 @@ func (repl *Replicator) handleRemoteRequest(remoteReq ReplicatorMsg) {
 	default:
 		tools.FancyErrPrint(tools.REPL_PRINT, repl.replicaID, "failed to process remoteConnection message - unknown msg type.")
 		tools.FancyErrPrint(tools.REPL_PRINT, repl.replicaID, typedReq)
+		fmt.Printf("%T\n", typedReq)
 	}
 
 	//time.Sleep(5000 * time.Millisecond)
@@ -493,6 +510,7 @@ func (repl *Replicator) joinGroup() {
 	fmt.Println("joinGroup")
 	go repl.queueRemoteRequests()
 	repl.waitFor = len(repl.remoteConn.conns)
+	crdt.NReplicas = int32(repl.waitFor + 1)
 	repl.holdReplyJoins = make([]*ReplyJoin, repl.waitFor)
 	fmt.Println("Requesting remoteGroup to send join")
 	repl.remoteConn.SendJoin(repl.buckets, repl.replicaID)

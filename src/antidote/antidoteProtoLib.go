@@ -1,9 +1,12 @@
 package antidote
 
 import (
+	"bytes"
 	"clocksi"
 	"crdt"
 	"encoding/binary"
+	"encoding/gob"
+	fmt "fmt"
 	"io"
 	"math/rand"
 	"proto"
@@ -37,6 +40,8 @@ const (
 	StaticUpdateObjs = 122
 	StaticReadObjs   = 123
 	ResetServer      = 12
+	NewTrigger       = 14
+	GetTriggers      = 15
 	//Replies
 	ConnectReplicaReply = 11
 	OpReply             = 111
@@ -45,8 +50,36 @@ const (
 	CommitTransReply    = 127
 	StaticReadObjsReply = 128
 	ResetServerReply    = 13
+	NewTriggerReply     = 16
+	GetTriggersReply    = 17
 	ErrorReply          = 0
 )
+
+//Used to store en/deCoders, and their buffers. Used on a per-client basis
+type CodingInfo struct {
+	encBuf, decBuf *bytes.Buffer
+	encoder        *gob.Encoder
+	decoder        *gob.Decoder
+}
+
+func (ci CodingInfo) Initialize() CodingInfo {
+	encBuf, decBuf := bytes.NewBuffer(make([]byte, 0, 1000)), bytes.NewBuffer(make([]byte, 0, 1000))
+	return CodingInfo{
+		encBuf: encBuf, decBuf: decBuf, encoder: gob.NewEncoder(encBuf), decoder: gob.NewDecoder(decBuf),
+	}
+}
+
+//Initializes enconder + encBuf only
+func (ci CodingInfo) EncInitialize() CodingInfo {
+	encBuf := bytes.NewBuffer(make([]byte, 0, 1000))
+	return CodingInfo{encBuf: encBuf, encoder: gob.NewEncoder(encBuf)}
+}
+
+//Initializes decoder + decBuf only
+func (ci CodingInfo) DecInitialize() CodingInfo {
+	decBuf := bytes.NewBuffer(make([]byte, 0, 1000))
+	return CodingInfo{decBuf: decBuf, decoder: gob.NewDecoder(decBuf)}
+}
 
 //: A lot of code repetition between ORMap and RRMap. Might be worth to later merge them
 
@@ -198,6 +231,28 @@ func CreateUpdateObjs(transId []byte, updates []UpdateObjectParams) (protobuf *p
 	return
 }
 
+func CreateNewTrigger(trigger AutoUpdate, isGeneric bool, ci CodingInfo) (protobuf *proto.ApbNewTrigger) {
+	return &proto.ApbNewTrigger{Source: createTriggerInfo(trigger.Trigger, ci),
+		Target: createTriggerInfo(trigger.Target, ci), IsGeneric: &isGeneric}
+}
+
+func createTriggerInfo(info Link, ci CodingInfo) (protobuf *proto.ApbTriggerInfo) {
+	for arg := range info.Arguments {
+		ci.encoder.Encode(arg)
+	}
+	argBytes := ci.encBuf.Bytes()
+	return &proto.ApbTriggerInfo{
+		Obj:    createBoundObject(info.Key, info.CrdtType, info.Bucket),
+		OpType: pb.Int32(int32(info.OpType)),
+		NArgs:  pb.Int32(int32(len(info.Arguments))),
+		Args:   argBytes,
+	}
+}
+
+func CreateGetTriggers() (protobuf *proto.ApbGetTriggers) {
+	return &proto.ApbGetTriggers{}
+}
+
 /*****REPLY/RESP PROTOS*****/
 
 func CreateStartTransactionResp(txnId TransactionId, ts clocksi.Timestamp) (protobuf *proto.ApbStartTransactionResp) {
@@ -243,11 +298,37 @@ func CreateReadObjectsResp(objectStates []crdt.State) (protobuf *proto.ApbReadOb
 	return
 }
 
-func CreateOperationResp() (protoBuf *proto.ApbOperationResp) {
-	protoBuf = &proto.ApbOperationResp{
+func CreateOperationResp() (protobuf *proto.ApbOperationResp) {
+	protobuf = &proto.ApbOperationResp{
 		Success: pb.Bool(true),
 	}
 	return
+}
+
+func CreateNewTriggerReply() (protobuf *proto.ApbNewTriggerReply) {
+	return &proto.ApbNewTriggerReply{}
+}
+
+func CreateGetTriggersReply(db *TriggerDB, ci CodingInfo) (protobuf *proto.ApbGetTriggersReply) {
+	mapp, genMap := db.Mapping, db.GenericMapping
+	mapSlice, genSlice := make([]*proto.ApbNewTrigger, db.getNTriggers()), make([]*proto.ApbNewTrigger, db.getNGenericTriggers())
+	i, j := 0, 0
+	db.DebugPrint("[APL]")
+	for _, upds := range mapp {
+		for _, upd := range upds {
+			fmt.Println("Adding non-generic to reply")
+			mapSlice[i] = CreateNewTrigger(upd, false, ci)
+			i++
+		}
+	}
+	for _, upds := range genMap {
+		for _, upd := range upds {
+			fmt.Println("Adding generic to reply")
+			genSlice[j] = CreateNewTrigger(upd, true, ci)
+			j++
+		}
+	}
+	return &proto.ApbGetTriggersReply{Mapping: mapSlice, GenericMapping: genSlice}
 }
 
 /***** PROTO -> ANTIDOTE *****/
@@ -311,6 +392,31 @@ func ProtoUpdateOpToAntidoteUpdate(protoUp []*proto.ApbUpdateOp) (upParams []*Up
 	return
 }
 
+func ProtoTriggerToAntidote(protoTrigger *proto.ApbNewTrigger, ci CodingInfo) AutoUpdate {
+	return AutoUpdate{
+		Trigger: ProtoTriggerInfoToAntidote(protoTrigger.Source, ci),
+		Target:  ProtoTriggerInfoToAntidote(protoTrigger.Target, ci),
+	}
+}
+
+func ProtoTriggerInfoToAntidote(protoTrigger *proto.ApbTriggerInfo, ci CodingInfo) Link {
+	boundObj, nArgs, argsBytes := protoTrigger.GetObj(), protoTrigger.GetNArgs(), protoTrigger.GetArgs()
+	ci.decBuf.Write(argsBytes)
+	args := make([]interface{}, nArgs)
+	for i := range args {
+		var arg interface{}
+		ci.decoder.Decode(arg)
+		args[i] = arg
+	}
+	ci.decBuf.Reset()
+
+	return Link{
+		KeyParams: CreateKeyParams(string(boundObj.GetKey()), boundObj.GetType(), string(boundObj.GetBucket())),
+		OpType:    OpType(protoTrigger.GetOpType()),
+		Arguments: args,
+	}
+}
+
 /*****HELPER CONVERSION*****/
 
 func unmarshallProto(code byte, msgBuf []byte) (protobuf pb.Message) {
@@ -335,6 +441,10 @@ func unmarshallProto(code byte, msgBuf []byte) (protobuf pb.Message) {
 		protobuf = &proto.ApbStaticRead{}
 	case ResetServer:
 		protobuf = &proto.ApbResetServer{}
+	case NewTrigger:
+		protobuf = &proto.ApbNewTrigger{}
+	case GetTriggers:
+		protobuf = &proto.ApbGetTriggers{}
 	case OpReply:
 		protobuf = &proto.ApbOperationResp{}
 	case StartTransReply:
@@ -347,6 +457,10 @@ func unmarshallProto(code byte, msgBuf []byte) (protobuf pb.Message) {
 		protobuf = &proto.ApbStaticReadObjectsResp{}
 	case ResetServerReply:
 		protobuf = &proto.ApbResetServerResp{}
+	case NewTriggerReply:
+		protobuf = &proto.ApbNewTriggerReply{}
+	case GetTriggersReply:
+		protobuf = &proto.ApbGetTriggersReply{}
 	case ErrorReply:
 		protobuf = &proto.ApbErrorResp{}
 	}

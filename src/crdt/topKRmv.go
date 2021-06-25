@@ -10,8 +10,8 @@ import (
 	pb "github.com/golang/protobuf/proto"
 )
 
+//TODO: On benchmarks/tests, ToUpdateObject() wasn't storing the *data.
 //TODO: updsNotYetApplied
-//TODO: Keep a sorted elems. Build it on first query, cache it until a change to elems happens.
 
 type TopKRmvCrdt struct {
 	*genericInversibleCRDT
@@ -32,7 +32,8 @@ type TopKRmvCrdt struct {
 	notInTop map[int32]setTopKElement
 
 	//Buffer for getTopN and getTopAbove.
-	//Each time an upd is done it gets nilled, and is rebuilt on the first execution of one of those queries.
+	//Each time the top is modified it gets nilled, and is rebuilt on the first execution of one of those queries.
+	//Note that changes to notInTop DOES NOT nil this buffer.
 	sortedElems []TopKScore
 }
 
@@ -1249,9 +1250,11 @@ func (crdtOp TopKAdd) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op U
 }
 
 func (crdtOp TopKAdd) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	return &proto.ApbUpdateOperation{Topkrmvop: &proto.ApbTopkRmvUpdate{
-		Adds: []*proto.ApbIntPair{&proto.ApbIntPair{PlayerId: pb.Int32(crdtOp.Id), Score: pb.Int32(crdtOp.Score)}},
-	}}
+	add := proto.ApbIntPair{PlayerId: pb.Int32(crdtOp.Id), Score: pb.Int32(crdtOp.Score)}
+	if crdtOp.Data != nil {
+		add.Data = *crdtOp.Data
+	}
+	return &proto.ApbUpdateOperation{Topkrmvop: &proto.ApbTopkRmvUpdate{Adds: []*proto.ApbIntPair{&add}}}
 }
 
 func (crdtOp TopKRemove) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -1275,7 +1278,11 @@ func (crdtOp TopKAddAll) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (o
 func (crdtOp TopKAddAll) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
 	protoAdds := make([]*proto.ApbIntPair, len(crdtOp.Scores))
 	for i, score := range crdtOp.Scores {
-		protoAdds[i] = &proto.ApbIntPair{PlayerId: pb.Int32(score.Id), Score: pb.Int32(score.Score)}
+		add := proto.ApbIntPair{PlayerId: pb.Int32(score.Id), Score: pb.Int32(score.Score)}
+		if score.Data != nil {
+			add.Data = *score.Data
+		}
+		protoAdds[i] = &add
 	}
 	return &proto.ApbUpdateOperation{Topkrmvop: &proto.ApbTopkRmvUpdate{Adds: protoAdds}}
 }
@@ -1362,6 +1369,7 @@ func (downOp DownstreamTopKRemove) ToReplicatorObj() (protobuf *proto.ProtoOpDow
 	return &proto.ProtoOpDownstream{TopkrmvOp: &proto.ProtoTopKRmvDownstream{Rems: &proto.ProtoTopKRmvRemove{
 		Ids: []int32{downOp.Id}, Vcs: [][]byte{downOp.Vc.ToBytes()}}}}
 }
+
 func (downOp DownstreamTopKAddAll) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
 	addProto := protobuf.GetTopkrmvOp().GetAdds()
 	downOp.DownstreamAdds = make([]TopKElement, len(addProto))

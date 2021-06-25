@@ -38,10 +38,12 @@ func (config *ConfigLoader) LoadConfigs(folder string) {
 		config.folder = folder
 	}
 	filesToRead := config.getConfigFiles()
+	filesRead := 0
 	for _, filePath := range filesToRead {
 		config.readConfigFile(filePath)
+		filesRead++
 	}
-	fmt.Println("Finished reading configs")
+	fmt.Printf("Finished reading %d config files from %s.\n", filesRead, folder)
 }
 
 func (config *ConfigLoader) GetConfig(key string) (value string) {

@@ -7,7 +7,7 @@
 #echo $CONFIG ;
 #echo $SERVERS ;
 #echo $RABBITMQ ;
-#sleep $RABBITMQ_WAIT ;
+sleep $RABBITMQ_WAIT ;
 #rabbitmqctl wait --timeout 60 $RABBITMQ_PID_FILE ; 
 #rabbitmqctl await_startup ;
 rabbitmqctl wait $RABBITMQ_PID_FILE ;  
@@ -19,7 +19,7 @@ rabbitmqctl add_user test test ;
 rabbitmqctl set_user_tags test administrator;
 rabbitmqctl set_permissions -p $RABBITMQ_VHOST test ".*" ".*" ".*";
 #sleep 3s;
-#sleep 2s;
+sleep 20s;
 #/go/bin/monitor-fetch/main $1 ;
 #/opt/rabbitmq/sbin/cuttlefish -c /etc/rabbitmq/rabbitmq.conf -s /opt/rabbitmq/priv/schema/ ;
 

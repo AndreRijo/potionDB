@@ -5,6 +5,10 @@ import (
 	"shared"
 )
 
+var (
+	NReplicas int32 //Information that may be used by CRDTs if needed. Note: doesn't update when a new replica joins the system besides the intended number. But is that even supported atm?
+)
+
 type Unique uint64
 
 /*
@@ -90,6 +94,8 @@ func InitializeCrdt(crdtType proto.CRDTType, replicaID int16) (newCrdt CRDT) {
 		newCrdt = (&MaxMinCrdt{}).Initialize(nil, replicaID)
 	case proto.CRDTType_RRMAP:
 		newCrdt = (&RWEmbMapCrdt{}).Initialize(nil, replicaID)
+	case proto.CRDTType_TOPSUM:
+		newCrdt = (&TopSumCrdt{}).Initialize(nil, replicaID)
 	default:
 		newCrdt = nil
 	}

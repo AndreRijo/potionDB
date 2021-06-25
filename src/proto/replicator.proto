@@ -33,6 +33,7 @@ message ProtoOpDownstream {
     optional ProtoAvgDownstream avgOp = 6;
     optional ProtoMaxMinDownstream maxminOp = 7;
     optional ProtoRWEmbMapDownstream rwembmapOp = 8;
+    optional ProtoTopSumDownstream topsumOp = 9;
     optional ProtoResetDownstream resetOp = 15;
 }
 
@@ -142,6 +143,17 @@ message ProtoEmbMapUpd {
     required ProtoOpDownstream upd = 3;
 }
 
+message ProtoTopSumElement {
+    required int32 id = 1;
+    required int32 score = 2;
+    optional bytes data = 3;
+}
+
+message ProtoTopSumDownstream {
+    repeated ProtoTopSumElement elems = 1;
+    required bool isPositive = 2;
+}
+
 message ProtoResetDownstream {
 }
 
@@ -207,6 +219,7 @@ message ProtoState {
     optional ProtoMaxMinState maxmin = 6;
     optional ProtoTopKState topk = 7;
     optional ProtoAvgState avg = 8;
+    optional ProtoTopSumState topsum = 9;
 }
 
 message ProtoReplyEmpty {
@@ -261,4 +274,14 @@ message ProtoTopKState {
     optional ProtoTopKElement smallest = 4;
     required int32 maxElems = 5;
     required bytes vc = 6;
+}
+
+//TODO: Same improvement as in TopKState.
+message ProtoTopSumState {
+    repeated ProtoTopSumElement elems = 1;
+    //note: this actually corresponds to notInTop - notPropagated (value-wise)
+    repeated ProtoTopSumElement notTop = 2; 
+    optional ProtoTopSumElement smallest = 3;
+    required int32 maxElems = 4;
+    //Note: notPropagated isn't included.
 }

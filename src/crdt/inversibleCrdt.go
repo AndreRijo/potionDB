@@ -5,6 +5,8 @@ import (
 	"shared"
 )
 
+//TODO: Returned Effect in CRDTs should not be a pointer to an interface
+
 type InversibleCRDT interface {
 	CRDT
 

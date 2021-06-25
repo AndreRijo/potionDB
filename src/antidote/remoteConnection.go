@@ -48,6 +48,7 @@ const (
 	//defaultListenerSize = 100
 	clockTopic        = "clk"
 	joinTopic         = "join"
+	triggerTopic      = "trigger"
 	remoteIDContent   = "remoteID"
 	joinContent       = "join"
 	replyJoinContent  = "replyJoin"
@@ -67,14 +68,9 @@ var ()
 //In the case of the connection to the local replica's RabbitMQ server, we don't consume the self messages (isSelfConn)
 func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16, connID int16, isSelfConn bool) (remote *RemoteConn, err error) {
 	//conn, err := amqp.Dial(protocol + prefix + ip + port)
-	prefix := tools.SharedConfig.GetConfig("rabbitMQUser")
-	vhost := tools.SharedConfig.GetConfig("rabbitVHost")
-	if prefix == "" {
-		prefix = "test"
-	}
-	if vhost == "" {
-		vhost = "/"
-	}
+	prefix := tools.SharedConfig.GetOrDefault("rabbitMQUser", "guest")
+	vhost := tools.SharedConfig.GetOrDefault("rabbitVHost", "/")
+
 	prefix = prefix + ":" + prefix + "@"
 	//conn, err := amqp.Dial(protocol + prefix + ip)
 	link := protocol + prefix + ip + "/" + vhost
@@ -109,7 +105,7 @@ func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16
 	}
 	joinQueue, err := sendCh.QueueDeclare(joinQueueName, false, true, false, false, nil)
 	if err != nil {
-		tools.FancyWarnPrint(tools.REMOTE_PRINT, replicaID, "failed to declare queue with rabbitMQ:", err)
+		tools.FancyWarnPrint(tools.REMOTE_PRINT, replicaID, "failed to declare join queue with rabbitMQ:", err)
 		return nil, err
 	}
 	//The previously declared queue will receive messages from any replica that publishes updates for objects in buckets in bucketsToListen
@@ -121,6 +117,8 @@ func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16
 	//We also need to associate stable clocks to the queue.
 	//TODO: Some kind of filtering for this
 	sendCh.QueueBind(replQueue.Name, clockTopic, exchangeName, false, nil)
+	//Triggers as well
+	sendCh.QueueBind(replQueue.Name, triggerTopic, exchangeName, false, nil)
 	//Associate join requests to the join queue.
 	sendCh.QueueBind(joinQueue.Name, joinTopic, exchangeName, false, nil)
 
@@ -245,6 +243,19 @@ func (remote *RemoteConn) SendStableClk(ts int64) {
 	remote.sendCh.Publish(exchangeName, clockTopic, false, false, amqp.Publishing{CorrelationId: remote.replicaString, Body: data})
 }
 
+func (remote *RemoteConn) SendTrigger(trigger AutoUpdate, isGeneric bool) {
+	//Create new gob encoder (TODO: Try making this a variable that is used ONLY for triggers)
+	//Also note that this TODO won't work with new replicas for sure.
+
+	ci := CodingInfo{}.EncInitialize()
+	protobuf := CreateNewTrigger(trigger, isGeneric, ci)
+	data, err := pb.Marshal(protobuf)
+	if err != nil {
+		tools.FancyErrPrint(tools.REMOTE_PRINT, remote.replicaID, "Failed to generate bytes of trigger request to send. Error:", err)
+	}
+	remote.sendCh.Publish(exchangeName, triggerTopic, false, false, amqp.Publishing{Body: data})
+}
+
 //This should not be called externally.
 func (remote *RemoteConn) startReceiver() {
 	fmt.Println("[RC] Receiver started")
@@ -256,6 +267,8 @@ func (remote *RemoteConn) startReceiver() {
 			remote.handleReceivedStableClock(data.Body)
 		case joinTopic:
 			remote.handleReceivedJoinTopic(data.ContentType, data.Body)
+		case triggerTopic:
+			remote.handleReceivedTrigger(data.Body)
 		default:
 			//Ops have a topic based on the partition ID + bucket
 			remote.handleReceivedOps(data.Body)
@@ -296,7 +309,7 @@ func (remote *RemoteConn) handleReceivedOps(data []byte) {
 			remote.listenerChan <- reqToSend
 		}
 	} else {
-		fmt.Println("NOT SUPPOSED TO HAPPEN NOW!")
+		fmt.Println("[RC]Received ops from self - is localRabbitMQ instance correctly configured?")
 		tools.FancyDebugPrint(tools.REMOTE_PRINT, remote.replicaID, "Ignored request from self.")
 	}
 	//tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "My replicaID:", remote.replicaID, "senderID:", request.SenderID)
@@ -311,7 +324,7 @@ func (remote *RemoteConn) handleReceivedStableClock(data []byte) {
 	clkReq := protoToStableClock(protobuf)
 	tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Received remote stableClock:", *clkReq)
 	if clkReq.SenderID == remote.replicaID {
-		fmt.Println("ALSO NOT SUPPOSED TO HAPPEN NOW!")
+		fmt.Println("[RC]Received clock from self - is localrabbitmq correctly configured?")
 		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Ignored received stableClock as it was sent by myself.")
 	} else {
 		//We also need to send a request with the last partition ops, if there's any
@@ -328,6 +341,33 @@ func (remote *RemoteConn) handleReceivedStableClock(data []byte) {
 		remote.listenerChan <- clkReq
 	}
 }
+
+func (remote *RemoteConn) handleReceivedTrigger(data []byte) {
+	protobuf, ci := &proto.ApbNewTrigger{}, CodingInfo{}.DecInitialize()
+	err := pb.Unmarshal(data, protobuf)
+	if err != nil {
+		tools.FancyErrPrint(tools.REMOTE_PRINT, remote.replicaID, "Failed to decode bytes of received trigger. Error:", err)
+	}
+	trigger := ProtoTriggerToAntidote(protobuf, ci)
+	remote.listenerChan <- &RemoteTrigger{AutoUpdate: trigger, IsGeneric: protobuf.GetIsGeneric()}
+}
+
+/*
+func (remote *RemoteConn) SendTrigger(trigger AutoUpdate, isGeneric bool) {
+	//protobuf := CreateNewTrigger(trigger, isGeneric)
+	//TODO
+	//Create new gob encoder (TODO: Try making this a variable that is used ONLY for triggers)
+	//Also note that this TODO won't work with new replicas for sure.
+
+	ci := CodingInfo{}.EncInitialize()
+	protobuf := CreateNewTrigger(trigger, isGeneric, ci)
+	data, err := pb.Marshal(protobuf)
+	if err != nil {
+		tools.FancyErrPrint(tools.REMOTE_PRINT, remote.replicaID, "Failed to generate bytes of trigger request to send. Error:", err)
+	}
+	remote.sendCh.Publish(exchangeName, triggerTopic, false, false, amqp.Publishing{Body: data})
+}
+*/
 
 func (remote *RemoteConn) getMergedReplicatorRequest(holdOps *HoldOperations, replicaID int16) (request *NewReplicatorRequest) {
 	tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Merging received replicator requests")
@@ -426,6 +466,8 @@ func (remote *RemoteConn) handleReceivedJoinTopic(msgType string, data []byte) {
 	case replyEmptyContent:
 		fmt.Println("Join msg is a replyEmpty")
 		remote.handleReplyEmpty(data)
+	default:
+		fmt.Printf("Unexpected join msg, ignored: %s\n", msgType)
 	}
 }
 

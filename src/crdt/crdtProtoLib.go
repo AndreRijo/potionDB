@@ -84,6 +84,8 @@ func UpdateProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation, crdtType pr
 		tmpUpd = AddMultipleValue{}.FromUpdateObject(protobuf)
 	case proto.CRDTType_MAXMIN:
 		tmpUpd = updateMaxMinProtoToAntidoteUpdate(protobuf)
+	case proto.CRDTType_TOPSUM:
+		tmpUpd = updateTopsProtoToAntidoteUpdate(protobuf)
 	}
 
 	return &tmpUpd
@@ -111,11 +113,13 @@ func PartialReadOpToAntidoteRead(protobuf *proto.ApbPartialReadArgs, crdtType pr
 	case proto.READType_GET_VALUES:
 		tmpRead = partialGetValuesOpToAntidoteRead(protobuf, crdtType)
 
-	//Topk
+	//Topk/TopSum
 	case proto.READType_GET_N:
 		tmpRead = GetTopNArguments{}.FromPartialRead(protobuf)
+		//tmpRead = partialGetNOpToAntidoteRead(protobuf, crdtType)
 	case proto.READType_GET_ABOVE_VALUE:
 		tmpRead = GetTopKAboveValueArguments{}.FromPartialRead(protobuf)
+		//tmpRead = partialGetAboveValueOpToAntidoteRead(protobuf, crdtType)
 
 	//Avg
 	case proto.READType_GET_FULL_AVG:
@@ -142,12 +146,14 @@ func ReadRespProtoToAntidoteState(protobuf *proto.ApbReadObjectResp, crdtType pr
 		state = MapEntryState{}.FromReadResp(protobuf)
 	case proto.CRDTType_RRMAP:
 		state = EmbMapEntryState{}.FromReadResp(protobuf)
-	case proto.CRDTType_TOPK_RMV:
+	case proto.CRDTType_TOPK_RMV, proto.CRDTType_TOPSUM:
 		state = TopKValueState{}.FromReadResp(protobuf)
 	case proto.CRDTType_AVG:
 		state = AvgState{}.FromReadResp(protobuf)
 	case proto.CRDTType_MAXMIN:
 		state = MaxMinState{}.FromReadResp(protobuf)
+		//case proto.CRDTType_TOPSUM:
+		//state = TopSValueState{}.FromReadResp(protobuf)
 	}
 
 	return
@@ -171,7 +177,8 @@ func partialReadRespProtoToAntidoteState(protobuf *proto.ApbReadObjectResp, crdt
 
 	//Topk
 	case proto.READType_GET_N, proto.READType_GET_ABOVE_VALUE:
-		state = TopKValueState{}.FromReadResp(protobuf)
+		//state = TopKValueState{}.FromReadResp(protobuf)
+		state = partialTopRespProtoToAntidoteState(protobuf, crdtType)
 
 	//Avg
 	case proto.READType_GET_FULL_AVG:
@@ -199,6 +206,9 @@ func DownstreamProtoToAntidoteDownstream(protobuf *proto.ProtoOpDownstream, crdt
 		downOp = AddMultipleValue{}.FromReplicatorObj(protobuf)
 	case proto.CRDTType_MAXMIN:
 		downOp = downstreamProtoMaxMinToAntidoteDownstream(protobuf)
+	case proto.CRDTType_TOPSUM:
+		//downOp = DownstreamTopSAdd{}.FromReplicatorObj(protobuf)
+		downOp = downstreamProtoTopSToAntidoteDownstream(protobuf)
 	}
 
 	return
@@ -222,6 +232,8 @@ func StateProtoToCrdt(protobuf *proto.ProtoState, crdtType proto.CRDTType, ts *c
 		crdt = (&AvgCrdt{}).FromProtoState(protobuf, ts, replicaID)
 	case proto.CRDTType_MAXMIN:
 		crdt = (&MaxMinCrdt{}).FromProtoState(protobuf, ts, replicaID)
+	case proto.CRDTType_TOPSUM:
+		crdt = (&TopSumCrdt{}).FromProtoState(protobuf, ts, replicaID)
 	}
 	return
 }
@@ -277,6 +289,20 @@ func updateMaxMinProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation) (op U
 	return MinAddValue{}.FromUpdateObject(protobuf)
 }
 
+func updateTopsProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
+	adds := protobuf.GetTopkrmvop().GetAdds()
+	if len(adds) == 1 {
+		if adds[0].GetScore() >= 0 {
+			return TopSAdd{}.FromUpdateObject(protobuf)
+		} else {
+			return TopSSub{}.FromUpdateObject(protobuf)
+		}
+	} else if adds[0].GetScore() >= 0 {
+		return TopSAddAll{}.FromUpdateObject(protobuf)
+	}
+	return TopSSubAll{}.FromUpdateObject(protobuf)
+}
+
 func partialHasKeyRespProtoToAntidoteState(protobuf *proto.ApbReadObjectResp, crdtType proto.CRDTType) (state State) {
 	if crdtType == proto.CRDTType_ORMAP {
 		return MapKeysState{}.FromReadResp(protobuf)
@@ -303,6 +329,13 @@ func partialGetValuesRespProtoToAntidoteState(protobuf *proto.ApbReadObjectResp,
 		return MapEntryState{}.FromReadResp(protobuf)
 	}
 	return EmbMapEntryState{}.FromReadResp(protobuf)
+}
+
+func partialTopRespProtoToAntidoteState(protobuf *proto.ApbReadObjectResp, crdtType proto.CRDTType) (state State) {
+	if crdtType == proto.CRDTType_TOPK_RMV {
+		return TopKValueState{}.FromReadResp(protobuf)
+	}
+	return TopSValueState{}.FromReadResp(protobuf)
 }
 
 func partialGetValueOpToAntidoteRead(protobuf *proto.ApbPartialReadArgs, crdtType proto.CRDTType) (readArgs ReadArguments) {
@@ -366,6 +399,19 @@ func downstreamProtoMaxMinToAntidoteDownstream(protobuf *proto.ProtoOpDownstream
 		return MaxAddValue{}.FromReplicatorObj(protobuf)
 	}
 	return MinAddValue{}.FromReplicatorObj(protobuf)
+}
+
+func downstreamProtoTopSToAntidoteDownstream(protobuf *proto.ProtoOpDownstream) (downOp DownstreamArguments) {
+	topSum := protobuf.GetTopsumOp()
+	if len(topSum.GetElems()) == 1 {
+		if topSum.GetIsPositive() {
+			return DownstreamTopSAdd{}.FromReplicatorObj(protobuf)
+		}
+		return DownstreamTopSSub{}.FromReplicatorObj(protobuf)
+	} else if topSum.GetIsPositive() {
+		return DownstreamTopSAddAll{}.FromReplicatorObj(protobuf)
+	}
+	return DownstreamTopSSubAll{}.FromReplicatorObj(protobuf)
 }
 
 /***OTHER HELPERS***/
