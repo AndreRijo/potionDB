@@ -1,5 +1,5 @@
 import "antidote.proto";
-option go_package = "proto";
+option go_package = "potionDB/src/proto";
 
 //protoc -I=. --go_out=. ./replicator.proto
 

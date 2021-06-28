@@ -1,9 +1,9 @@
 package antidote
 
 import (
-	"clocksi"
-	"crdt"
-	"proto"
+	"potionDB/src/clocksi"
+	"potionDB/src/crdt"
+	"potionDB/src/proto"
 
 	pb "github.com/golang/protobuf/proto"
 )

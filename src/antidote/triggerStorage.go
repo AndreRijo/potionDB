@@ -2,7 +2,7 @@ package antidote
 
 import (
 	fmt "fmt"
-	"proto"
+	"potionDB/src/proto"
 	"regexp"
 )
 

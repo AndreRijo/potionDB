@@ -1,8 +1,8 @@
 package crdt
 
 import (
-	"clocksi"
-	"shared"
+	"potionDB/src/clocksi"
+	"potionDB/src/shared"
 )
 
 //TODO: Returned Effect in CRDTs should not be a pointer to an interface

@@ -1,8 +1,8 @@
 package crdt
 
 import (
-	"proto"
-	"shared"
+	"potionDB/src/proto"
+	"potionDB/src/shared"
 )
 
 var (

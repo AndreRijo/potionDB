@@ -11,10 +11,7 @@ package main
 //TODO: Reuse of canals? Creating a new canal for each read/write seems like a waste... Should I ask the advisors?
 
 import (
-	"antidote"
 	"bufio"
-	"clocksi"
-	"crdt"
 	"flag"
 	"fmt"
 	"math"
@@ -22,16 +19,19 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"proto"
+	"potionDB/src/antidote"
+	"potionDB/src/clocksi"
+	"potionDB/src/crdt"
+	"potionDB/src/proto"
+	"potionDB/src/shared"
+	"potionDB/src/tools"
 	"runtime"
 	"runtime/debug"
 	"runtime/pprof"
-	"shared"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
-	"tools"
 
 	pb "github.com/golang/protobuf/proto"
 )

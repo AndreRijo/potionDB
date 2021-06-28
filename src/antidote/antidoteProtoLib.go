@@ -2,15 +2,15 @@ package antidote
 
 import (
 	"bytes"
-	"clocksi"
-	"crdt"
+	"potionDB/src/clocksi"
+	"potionDB/src/crdt"
 	"encoding/binary"
 	"encoding/gob"
 	fmt "fmt"
 	"io"
 	"math/rand"
-	"proto"
-	"tools"
+	"potionDB/src/proto"
+	"potionDB/src/tools"
 
 	pb "github.com/golang/protobuf/proto"
 )

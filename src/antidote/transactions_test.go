@@ -1,11 +1,11 @@
 package antidote
 
 import (
-	"clocksi"
-	"crdt"
+	"potionDB/src/clocksi"
+	"potionDB/src/crdt"
 	fmt "fmt"
 	"math/rand"
-	"proto"
+	"potionDB/src/proto"
 	"testing"
 	"time"
 )

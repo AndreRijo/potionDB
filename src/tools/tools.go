@@ -1,10 +1,10 @@
 package tools
 
 import (
-	"crdt"
 	"fmt"
 	"net"
 	"os"
+	"potionDB/src/crdt"
 	"reflect"
 	"runtime"
 	"sort"

@@ -11,13 +11,13 @@ package antidote
 //This'll have to be dealt it in some special way...
 
 import (
-	"clocksi"
-	"crdt"
+	"potionDB/src/clocksi"
+	"potionDB/src/crdt"
 	fmt "fmt"
 	"math/rand"
-	"proto"
+	"potionDB/src/proto"
 	"sync"
-	"tools"
+	"potionDB/src/tools"
 )
 
 /////*****************TYPE DEFINITIONS***********************/////

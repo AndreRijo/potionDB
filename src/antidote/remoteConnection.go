@@ -3,10 +3,10 @@ package antidote
 import (
 	fmt "fmt"
 	"net"
-	"proto"
+	"potionDB/src/proto"
 	"strconv"
 	"time"
-	"tools"
+	"potionDB/src/tools"
 
 	pb "github.com/golang/protobuf/proto"
 	"github.com/streadway/amqp"
