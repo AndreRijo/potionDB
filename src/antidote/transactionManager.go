@@ -385,8 +385,9 @@ func (tm *TransactionManager) listenForProtobufRequests(channel chan Transaction
 	txnPartitions.debugID = rand.Intn(10)
 	for !stop {
 		request := <-channel
-		stop = tm.
-    Request(request, txnPartitions)
+		//stop = tm.
+		//Request(request, txnPartitions)
+		stop = tm.handleTMRequest(request, txnPartitions)
 	}
 
 	tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "connection lost, shutting down goroutine for client.")
