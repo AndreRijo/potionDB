@@ -90,6 +90,15 @@ func (config *ConfigLoader) GetFloatConfig(key string, def float64) float64 {
 	return result
 }
 
+//Uses a whitespace to slice the string into different substrings
+func (config *ConfigLoader) GetStringSliceConfig(key string, def string) []string {
+	value, has := config.configs[key]
+	if has {
+		return strings.Split(value, " ")
+	}
+	return strings.Split(def, " ")
+}
+
 func (config *ConfigLoader) ReplaceConfig(key string, value string) {
 	config.configs[key] = value
 }

@@ -82,6 +82,8 @@ func main() {
 		fmt.Println("All replicaIDs are now known, starting PotionDB.")
 	}
 
+	handleTC(configs)
+
 	server, err := net.Listen("tcp", "0.0.0.0:"+strings.TrimSpace(portString))
 
 	tools.CheckErr(tools.PORT_ERROR, err)
@@ -459,6 +461,8 @@ func loadConfigs() (configs *tools.ConfigLoader) {
 	disableRepl := flag.String("disableReplicator", "none", "if replicator should be disabled. False by default.")
 	disableLog := flag.String("disableLog", "none", "if logging of operations should be disabled. False by default.")
 	disableReadWaiting := flag.String("disableReadWaiting", "none", "if reads should wait until the materializer's clock is >= to the read's")
+	useTC := flag.String("useTC", "none", "defines if traffic control should be applied to the connections."+
+		"If true, the IPs and latencies must be defined in the configuration file.")
 
 	flag.Parse()
 	configs = &tools.ConfigLoader{}
@@ -522,11 +526,22 @@ func loadConfigs() (configs *tools.ConfigLoader) {
 	if *disableReadWaiting != "none" {
 		configs.ReplaceConfig("disableReadWaiting", *disableReadWaiting)
 	}
+	if *useTC != "none" {
+		configs.ReplaceConfig("useTC", *useTC)
+	}
 	shared.IsReplDisabled = configs.GetBoolConfig("disableReplicator", false)
 	shared.IsLogDisabled = configs.GetBoolConfig("disableLog", false)
 	shared.IsReadWaitingDisabled = configs.GetBoolConfig("disableReadWaiting", false)
 
 	return
+}
+
+func handleTC(configs *tools.ConfigLoader) {
+	if configs.GetBoolConfig("useTC", false) {
+		tc := tools.MakeTcInfo(configs.GetStringSliceConfig("tcIPs", ""), configs.GetIntConfig("tcMyPos", 5),
+			configs.GetStringSliceConfig("tcLatency", "10 10 10 10 10"))
+		tc.FireTcCommands()
+	}
 }
 
 /*
