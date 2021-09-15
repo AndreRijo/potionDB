@@ -463,6 +463,8 @@ func loadConfigs() (configs *tools.ConfigLoader) {
 	disableReadWaiting := flag.String("disableReadWaiting", "none", "if reads should wait until the materializer's clock is >= to the read's")
 	useTC := flag.String("useTC", "none", "defines if traffic control should be applied to the connections."+
 		"If true, the IPs and latencies must be defined in the configuration file.")
+	tcIp := flag.String("tcIPs", "none", "defines the list of IPs for TC purposes. Must be actual IP addresses instead of aliases.")
+	localPotionDBAddress := flag.String("selfIP", "none", "the ip:port of this replica. Used for administration purposes.")
 
 	flag.Parse()
 	configs = &tools.ConfigLoader{}
@@ -528,6 +530,17 @@ func loadConfigs() (configs *tools.ConfigLoader) {
 	}
 	if *useTC != "none" {
 		configs.ReplaceConfig("useTC", *useTC)
+	}
+	if *tcIp != "none" {
+		ips := *tcIp
+		if ips[0] == '[' {
+			ips = strings.Replace(ips[1:len(ips)-1], ",", " ", -1)
+			fmt.Println(ips)
+		}
+		configs.ReplaceConfig("tcIPs", ips)
+	}
+	if *localPotionDBAddress != "none" {
+		configs.ReplaceConfig("localPotionDBAddress", *localPotionDBAddress)
 	}
 	shared.IsReplDisabled = configs.GetBoolConfig("disableReplicator", false)
 	shared.IsLogDisabled = configs.GetBoolConfig("disableLog", false)

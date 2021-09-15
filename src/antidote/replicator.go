@@ -7,15 +7,18 @@ package antidote
 //This is due to the fact that clockSi, when comparing clocks, assumes both clocks have the same entries.
 //Also note that initialDummyTs isn't updated when new replicas are added via Join.
 
+//TODO: In this version of PotionDB, Join no longer needs the list of buckets - it can use the one from RemoteID.
+//However, this is a temporary solution for requesting remote objects
+
 import (
+	fmt "fmt"
 	"potionDB/src/clocksi"
 	"potionDB/src/crdt"
-	fmt "fmt"
 	"potionDB/src/proto"
 	"potionDB/src/shared"
+	"potionDB/src/tools"
 	"strings"
 	"time"
-	"potionDB/src/tools"
 )
 
 type Replicator struct {
@@ -65,6 +68,8 @@ type RemoteTxn struct {
 
 type RemoteID struct {
 	SenderID int16
+	Buckets  []string
+	IP       string
 }
 
 type RemoteTrigger struct {
@@ -196,7 +201,7 @@ func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, rep
 				//Wait for replicaIDs of existing replicas
 				repl.JoinInfo.waitFor = int(remoteConn.nReplicas)
 				crdt.NReplicas = int32(remoteConn.nReplicas + 1)
-				remoteConn.sendReplicaID()
+				remoteConn.sendReplicaID(bucketsToListen, tools.SharedConfig.GetOrDefault("localPotionDBAddress", "localhost:8087"))
 				go repl.receiveRemoteTxns()
 				go repl.replicateCycle()
 				//If there's no other replica, we can start right away
@@ -404,7 +409,8 @@ func (repl *Replicator) handleRemoteRequest(remoteReq ReplicatorMsg) {
 		})
 	case *RemoteID:
 		repl.waitFor--
-		repl.tm.SendRemoteMsg(TMReplicaID{ReplicaID: typedReq.SenderID})
+		fmt.Println("ID received from RabbitMQ: ", typedReq)
+		repl.tm.SendRemoteMsg(TMReplicaID{ReplicaID: typedReq.SenderID, IP: typedReq.IP, Buckets: typedReq.Buckets})
 		if repl.waitFor == 0 {
 			repl.initialDummyTs.Update()
 			repl.allDone = true

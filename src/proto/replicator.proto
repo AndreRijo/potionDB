@@ -161,6 +161,8 @@ message ProtoResetDownstream {
 
 message ProtoRemoteID {
     required int32 replicaID = 1;
+    repeated string myBuckets = 2;
+    required string myIP = 3;
 }
 
 message ProtoJoin {

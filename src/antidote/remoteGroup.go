@@ -2,8 +2,8 @@ package antidote
 
 import (
 	fmt "fmt"
-	"strings"
 	"potionDB/src/tools"
+	"strings"
 
 	pb "github.com/golang/protobuf/proto"
 )
@@ -153,9 +153,9 @@ func (group *RemoteGroup) listenToRemoteConn(channel chan ReplicatorMsg) {
 	}
 }
 
-func (group *RemoteGroup) sendReplicaID() {
+func (group *RemoteGroup) sendReplicaID(buckets []string, ip string) {
 	//Same msg for everyone, so we prepare it here
-	protobuf := createProtoRemoteID(group.replicaID)
+	protobuf := createProtoRemoteID(group.replicaID, buckets, ip)
 	data, err := pb.Marshal(protobuf)
 	if err != nil {
 		tools.FancyErrPrint(tools.REMOTE_PRINT, group.replicaID, "Failed to generate bytes of RemoteID msg:", err)

@@ -33,8 +33,8 @@ func createProtoDownstreamUpds(upds []*UpdateObjectParams) (protobufs []*proto.P
 	return protobufs
 }
 
-func createProtoRemoteID(replicaID int16) (protobuf *proto.ProtoRemoteID) {
-	return &proto.ProtoRemoteID{ReplicaID: pb.Int32(int32(replicaID))}
+func createProtoRemoteID(replicaID int16, myBuckets []string, myIP string) (protobuf *proto.ProtoRemoteID) {
+	return &proto.ProtoRemoteID{ReplicaID: pb.Int32(int32(replicaID)), MyBuckets: myBuckets, MyIP: &myIP}
 }
 
 func createProtoJoin(buckets []string, replicaID int16, ip string) (protobuf *proto.ProtoJoin) {

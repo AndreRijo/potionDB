@@ -62,7 +62,7 @@ func (crdt *CounterCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, repl
 }
 
 func (crdt *CounterCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateArguments) (state State) {
-	if updsNotYetApplied == nil || len(updsNotYetApplied) > 0 {
+	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
 		return crdt.GetValue()
 	}
 	counterState := crdt.GetValue().(CounterState)

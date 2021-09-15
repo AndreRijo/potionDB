@@ -7,12 +7,12 @@ FROM golang as base
 #RUN go get github.com/streadway/amqp
 
 # Adding src and building
-ADD src/ /go/potionDB/src/
-ADD go.mod /go/potionDB
-ADD go.sum /go/potionDB
+ADD go.mod /go/potionDB/
+ADD go.sum /go/potionDB/
 #RUN go install -race main
 #RUN go install main
 RUN cd potionDB && go mod download
+ADD src/ /go/potionDB/src/
 RUN cd potionDB/src/main && go build
 
 
@@ -44,6 +44,8 @@ ENV BUCKETS "none"
 ENV DISABLE_REPLICATOR "none"
 ENV DISABLE_LOG "none"
 ENV DISABLE_READ_WAITING "none"
+#If rabbitMQ takes a long time to start, add some delay to PotionDB startup
+ENV POTIONDB_WAIT 0s
 
 #Add config folders late to avoid having to rebuild multiple images
 ENV RABBITMQ_PID_FILE /var/lib/rabbitmq/mnesia/rabbitmq

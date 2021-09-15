@@ -17,12 +17,13 @@ rabbitmqctl add_vhost $RABBITMQ_VHOST ;
 rabbitmqctl add_user test test ; 
 rabbitmqctl set_user_tags test administrator;
 rabbitmqctl set_permissions -p $RABBITMQ_VHOST test ".*" ".*" ".*";
-#sleep 3s;
-sleep 20s;
+sleep 3s;
+sleep $POTIONDB_WAIT ; 
+#sleep 20s;
 #/go/bin/monitor-fetch/main $1 ;
 #/opt/rabbitmq/sbin/cuttlefish -c /etc/rabbitmq/rabbitmq.conf -s /opt/rabbitmq/priv/schema/ ;
 
-/go/bin/main --config=$CONFIG --servers=$SERVERS --rabbitMQIP=$RABBITMQ --rabbitVHost=$RABBITMQ_VHOST --buckets=$BUCKETS --disableReplicator=$DISABLE_REPLICATOR --disableLog=$DISABLE_LOG --disableReadWaiting=$DISABLE_READ_WAITING;
+/go/bin/main --config=$CONFIG --servers=$SERVERS --rabbitMQIP=$RABBITMQ --rabbitVHost=$RABBITMQ_VHOST --buckets=$BUCKETS --disableReplicator=$DISABLE_REPLICATOR --disableLog=$DISABLE_LOG --disableReadWaiting=$DISABLE_READ_WAITING --useTC=$USE_TC --tcIPs=$TC_IPS;
 )
 
 #srv=${SERVERS:-nil}

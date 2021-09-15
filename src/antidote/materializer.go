@@ -1,10 +1,10 @@
 package antidote
 
 import (
-	"potionDB/src/clocksi"
-	"potionDB/src/crdt"
 	fmt "fmt"
 	math "math"
+	"potionDB/src/clocksi"
+	"potionDB/src/crdt"
 	"potionDB/src/proto"
 	"potionDB/src/shared"
 	"potionDB/src/tools"

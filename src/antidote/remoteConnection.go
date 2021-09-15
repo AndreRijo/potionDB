@@ -4,9 +4,9 @@ import (
 	fmt "fmt"
 	"net"
 	"potionDB/src/proto"
+	"potionDB/src/tools"
 	"strconv"
 	"time"
-	"potionDB/src/tools"
 
 	pb "github.com/golang/protobuf/proto"
 	"github.com/streadway/amqp"
@@ -474,7 +474,7 @@ func (remote *RemoteConn) handleReceivedJoinTopic(msgType string, data []byte) {
 func (remote *RemoteConn) handleRemoteID(data []byte) {
 	protobuf := &proto.ProtoRemoteID{}
 	remote.decodeProtobuf(protobuf, data, "Failed to decode bytes of received protoRemoteID. Error:")
-	remote.listenerChan <- &RemoteID{SenderID: int16(protobuf.GetReplicaID())}
+	remote.listenerChan <- &RemoteID{SenderID: int16(protobuf.GetReplicaID()), Buckets: protobuf.GetMyBuckets(), IP: protobuf.GetMyIP()}
 }
 
 func (remote *RemoteConn) handleJoin(data []byte) {
