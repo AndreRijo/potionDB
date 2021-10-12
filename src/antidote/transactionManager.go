@@ -95,6 +95,8 @@ type TMGetTriggersArgs struct {
 	ReplyChan chan *TriggerDB
 }
 
+type TMServerConn struct{}
+
 /*****Remote/Replicator interaction structs*****/
 
 //Used by the Replication Layer. Use a different thread to handle this
@@ -213,10 +215,11 @@ type TransactionId struct {
 type TransactionId uint64
 
 type ongoingRemote struct {
-	originalClk  clocksi.Timestamp
-	conns        []net.Conn
-	nConns       int //when nConns = len(conns), can skip checking to start connections
+	originalClk clocksi.Timestamp
+	conns       []net.Conn
+	//nConns       int //when nConns = len(conns), can skip checking to start connections
 	txnDataToUse [][]byte
+	nTxnsStarted int //Number of connections with a txn started (txnDataToUse[i] != nil). When it's equal to len(conns), can skip a check to start txn.
 }
 
 type ongoingTxn struct {
@@ -279,6 +282,7 @@ const (
 	abortTMRequest        TMRequestType = 6
 	newTriggerTMRequest   TMRequestType = 7
 	getTriggersTMRequest  TMRequestType = 8
+	serverConnRequest     TMRequestType = 80
 	lostConnRequest       TMRequestType = 255
 
 	downstreamOpsChBufferSize int = 100 //Default buffer size for the downstreamOpsCh
@@ -336,6 +340,10 @@ func (args TMGetTriggersArgs) getRequestType() (requestType TMRequestType) {
 	return getTriggersTMRequest
 }
 
+func (args TMServerConn) getRequestType() (requestType TMRequestType) {
+	return serverConnRequest
+}
+
 //TMRemoteMsg
 
 func (req TMRemoteClk) getReplicaID() (id int16) {
@@ -381,11 +389,33 @@ func (set partSet) add(partId uint64) {
 */
 
 func (txnPartitions *ongoingTxn) reset() {
-	//TODO
 	txnPartitions.TransactionId = 0
 	//txnPartitions.partSet = nil
 	txnPartitions.partitions = make([]bool, nGoRoutines)
-	txnPartitions.ongoingRemote = ongoingRemote{}
+	//txnPartitions.ongoingRemote = ongoingRemote{}
+	txnPartitions.ongoingRemote.reset()
+}
+
+func (remote *ongoingRemote) initializeConnections(remoteIPs []string) {
+	remote.conns = make([]net.Conn, len(remoteIPs))
+	var err error
+	//Sending reqs
+	//fmt.Println("[remote]Initializing connections")
+	for i := range remote.conns {
+		remote.conns[i], err = net.Dial("tcp", remoteIPs[i])
+		tools.CheckErr("Network connection establishment err on ongoingRemote.initializeConnections()", err)
+		SendProto(ServerConn, CreateServerConn(), remote.conns[i])
+	}
+}
+
+func (remote *ongoingRemote) closeConnections() {
+	for _, conn := range remote.conns {
+		conn.Close()
+	}
+}
+
+func (remote *ongoingRemote) reset() {
+	remote.originalClk, remote.txnDataToUse, remote.nTxnsStarted = nil, nil, 0
 }
 
 /////*****************TRANSACTION MANAGER CODE***********************/////
@@ -471,6 +501,13 @@ func (tm *TransactionManager) listenForProtobufRequests(channel chan Transaction
 	var txnPartitions *ongoingTxn = &ongoingTxn{}
 	txnPartitions.partitions = make([]bool, nGoRoutines)
 	txnPartitions.debugID = rand.Intn(10)
+	txnPartitions.ongoingRemote = ongoingRemote{}
+
+	firstReq := <-channel
+	if firstReq.Args.getRequestType() != serverConnRequest {
+		txnPartitions.initializeConnections(tm.remoteIPs)
+		stop = tm.handleTMRequest(firstReq, txnPartitions)
+	}
 	for !stop {
 		request := <-channel
 		stop = tm.handleTMRequest(request, txnPartitions)
@@ -485,9 +522,9 @@ func (tm *TransactionManager) handleTMRequest(request TransactionManagerRequest,
 
 	switch request.Args.getRequestType() {
 	case readStaticTMRequest:
-		tm.handleStaticTMRead(request)
+		tm.handleStaticTMRead(request, &txnPartitions.ongoingRemote)
 	case updateStaticTMRequest:
-		tm.handleStaticTMUpdate(request)
+		tm.handleStaticTMUpdate(request, &txnPartitions.ongoingRemote)
 	case readTMRequest:
 		tm.handleTMRead(request, txnPartitions)
 	case updateTMRequest:
@@ -504,6 +541,8 @@ func (tm *TransactionManager) handleTMRequest(request TransactionManagerRequest,
 		tm.handleGetTriggers(request)
 	case lostConnRequest:
 		shouldStop = true
+		txnPartitions.closeConnections()
+		txnPartitions = nil
 	}
 	//remoteTxnRequest is handled separatelly
 
@@ -532,7 +571,7 @@ func (tm *TransactionManager) handleRemoteMsgs() {
 	}
 }
 
-func (tm *TransactionManager) handleStaticTMRead(request TransactionManagerRequest) {
+func (tm *TransactionManager) handleStaticTMRead(request TransactionManagerRequest, ongoingRemote *ongoingRemote) {
 	readArgs := request.Args.(TMStaticReadArgs)
 	//tsToUse := request.Timestamp
 	tm.localClock.Lock()
@@ -613,7 +652,7 @@ func (tm *TransactionManager) handleStaticTMRead(request TransactionManagerReque
 	}
 
 	if hasRemote {
-		go tm.handleRemoteStaticReads(tsToUse, reqsPerServer, remoteReqsToChan, readChans)
+		go tm.handleRemoteStaticReads(tsToUse, reqsPerServer, remoteReqsToChan, readChans, ongoingRemote)
 	}
 
 	/*
@@ -649,7 +688,7 @@ func (tm *TransactionManager) handleStaticTMRead(request TransactionManagerReque
 }
 
 //TODO: Separate in parts?
-func (tm *TransactionManager) handleStaticTMUpdate(request TransactionManagerRequest) {
+func (tm *TransactionManager) handleStaticTMUpdate(request TransactionManagerRequest, ongoingRemote *ongoingRemote) {
 	updateArgs := request.Args.(TMStaticUpdateArgs)
 
 	newTxnId := TransactionId(rand.Uint64())
@@ -721,7 +760,7 @@ func (tm *TransactionManager) handleStaticTMUpdate(request TransactionManagerReq
 
 	//Request for remote operations. Wait for remote commit
 	if hasRemote {
-		tm.handleRemoteStaticUpds(copyClk, reqsPerServer)
+		tm.handleRemoteStaticUpds(copyClk, reqsPerServer, ongoingRemote)
 	}
 
 	//4th step: send ok to client
@@ -748,27 +787,6 @@ func (tm *TransactionManager) handleStaticTMUpdate(request TransactionManagerReq
 					- commit(highest timestamp)
 			4th step: send ok to client
 	*/
-}
-
-//Only for non-static transactions
-func (tm *TransactionManager) startTxnForRemote(txnPartitions *ongoingTxn, toContact []bool) {
-	indexesToWait := make([]int, 0, len(toContact))
-	for i, hasTo := range toContact {
-		if hasTo && txnPartitions.conns[i] == nil {
-			conn, err := net.Dial("tcp", tm.remoteIPs[i])
-			tools.CheckErr("Network connection establishment err on remote read", err)
-			txnPartitions.conns[i] = conn
-			SendProto(StartTrans, CreateStartTransaction(txnPartitions.originalClk.ToBytes()), conn)
-			indexesToWait = append(indexesToWait, i)
-			txnPartitions.nConns++
-		}
-	}
-
-	for _, index := range indexesToWait {
-		_, replyProto, _ := ReceiveProto(txnPartitions.conns[index])
-		txnPartitions.txnDataToUse[index] = replyProto.(*proto.ApbStartTransactionResp).GetTransactionDescriptor()
-	}
-
 }
 
 //TODO: Group reads that go for the same partition
@@ -996,7 +1014,7 @@ func (tm *TransactionManager) handleTMStartTxn(request TransactionManagerRequest
 	txnPartitions.TransactionId = TransactionId(rand.Uint64())
 
 	//Remote data
-	txnPartitions.conns = make([]net.Conn, len(tm.remoteIPs))
+	//txnPartitions.conns = make([]net.Conn, len(tm.remoteIPs))
 	txnPartitions.txnDataToUse = make([][]byte, len(tm.remoteIPs))
 
 	if doCompactHistory {
@@ -1022,7 +1040,8 @@ func (tm *TransactionManager) handleTMCommit(request TransactionManagerRequest, 
 	//TODO: Use bounded channels and send the same channel to every partition?
 	var currChan chan clocksi.Timestamp
 	remoteChan := make(chan bool, 1)
-	if txnPartitions.nConns > 0 {
+	//if txnPartitions.nConns > 0 {
+	if txnPartitions.nTxnsStarted > 0 {
 		go tm.handleRemoteCommit(txnPartitions, remoteChan)
 	}
 
@@ -1078,7 +1097,8 @@ func (tm *TransactionManager) handleTMCommit(request TransactionManagerRequest, 
 		delete(tm.ongoingReads, txnPartitions.TransactionId)
 	}
 
-	if txnPartitions.nConns > 0 {
+	//if txnPartitions.nConns > 0 {
+	if txnPartitions.nTxnsStarted > 0 {
 		<-remoteChan //Wait for remote commits to be confirmed.
 	}
 
@@ -1104,7 +1124,8 @@ func (tm *TransactionManager) handleTMAbort(request TransactionManagerRequest, t
 		tm.clocksArray.Delete(tm.ongoingReads[txnPartitions.TransactionId])
 	}
 
-	if txnPartitions.nConns > 0 {
+	//if txnPartitions.nConns > 0 {
+	if txnPartitions.nTxnsStarted > 0 {
 		remoteChan := make(chan bool, 1)
 		tm.handleRemoteAbort(txnPartitions, remoteChan)
 		<-remoteChan
@@ -1122,20 +1143,25 @@ type RemoteInfo struct {
 */
 
 func (tm *TransactionManager) getReadLocation(bkt string) (isRemote bool, remoteIndex int) {
-	if tm.hasAll {
+	if tm.hasAll || bkt == "" {
+		//fmt.Println("[ReadLoc]Read for", bkt, "this replica has all or bkt is empty.")
 		return false, 0
 	}
 	for _, localBkt := range tm.ownBuckets {
 		if bkt == localBkt {
+			//fmt.Println("[ReadLoc]Read for", bkt, "found local matching bucket", localBkt)
 			return false, 0
 		}
 	}
 	serverMap, has := tm.bucketToIndex[bkt]
 	if !has {
 		//Must use a server with *
+
+		//fmt.Println("[ReadLoc]Read for", bkt, "unknown bucket, trying to match with '*'")
 		serverMap = tm.bucketToIndex["*"]
 	}
-	//TODO
+
+	//fmt.Println("[ReadLoc]Read for", bkt, "sending to first server of this bucket", serverMap)
 	return true, serverMap[0]
 }
 
@@ -1590,11 +1616,37 @@ func (tm *TransactionManager) doHistoryCompact() {
 
 //Remote handling functions
 
+//Only for non-static transactions
+func (tm *TransactionManager) startTxnForRemote(txnPartitions *ongoingTxn, toContact []bool) {
+	indexesToWait := make([]int, 0, len(toContact))
+	for i, hasTo := range toContact {
+		if hasTo && txnPartitions.conns[i] == nil {
+			/*
+					conn, err := net.Dial("tcp", tm.remoteIPs[i])
+					tools.CheckErr("Network connection establishment err on remote read", err)
+					txnPartitions.conns[i] = conn
+				SendProto(StartTrans, CreateStartTransaction(txnPartitions.originalClk.ToBytes()), conn)
+			*/
+			SendProto(StartTrans, CreateStartTransaction(txnPartitions.originalClk.ToBytes()), txnPartitions.conns[i])
+			indexesToWait = append(indexesToWait, i)
+			//txnPartitions.nConns++
+			txnPartitions.nTxnsStarted++
+		}
+	}
+
+	for _, index := range indexesToWait {
+		_, replyProto, _ := ReceiveProto(txnPartitions.conns[index])
+		txnPartitions.txnDataToUse[index] = replyProto.(*proto.ApbStartTransactionResp).GetTransactionDescriptor()
+	}
+
+}
+
 //Note: Done by a separate goroutine
 func (tm *TransactionManager) handleRemoteReads(txnPartitions *ongoingTxn, reqsPerServer [][]ReadObjectParams,
 	remoteReqsToChan [][]int, readChans []chan crdt.State) {
 
-	if txnPartitions.nConns < len(reqsPerServer) {
+	//if txnPartitions.nConns < len(reqsPerServer) {
+	if txnPartitions.nTxnsStarted < len(reqsPerServer) {
 		toContact, has := make([]bool, len(reqsPerServer)), false
 		for i, reqs := range reqsPerServer {
 			if len(reqs) > 0 {
@@ -1605,6 +1657,7 @@ func (tm *TransactionManager) handleRemoteReads(txnPartitions *ongoingTxn, reqsP
 			tm.startTxnForRemote(txnPartitions, toContact)
 		}
 	}
+
 	for i, reqs := range reqsPerServer {
 		if len(reqs) > 0 {
 			SendProto(ReadObjs, CreateReadObjs(txnPartitions.txnDataToUse[i], reqs), txnPartitions.conns[i])
@@ -1626,20 +1679,22 @@ func (tm *TransactionManager) handleRemoteReads(txnPartitions *ongoingTxn, reqsP
 			}
 		}
 	}
-
 }
 
 func (tm *TransactionManager) handleRemoteStaticReads(ts clocksi.Timestamp, reqsPerServer [][]ReadObjectParams,
-	remoteReqsToChan [][]int, readChans []chan crdt.State) {
+	remoteReqsToChan [][]int, readChans []chan crdt.State, ongoingRemote *ongoingRemote) {
 
-	conns := make([]net.Conn, len(reqsPerServer))
+	//conns := make([]net.Conn, len(reqsPerServer))
 	//Sending reqs
 	for i, reqs := range reqsPerServer {
 		if len(reqs) > 0 {
-			conn, err := net.Dial("tcp", tm.remoteIPs[i])
-			tools.CheckErr("Network connection establishment err on remote read", err)
-			conns[i] = conn
-			SendProto(StaticReadObjs, CreateStaticReadObjs(ts.ToBytes(), reqs), conn)
+			/*
+				conn, err := net.Dial("tcp", tm.remoteIPs[i])
+				tools.CheckErr("Network connection establishment err on remote read", err)
+				conns[i] = conn
+				SendProto(StaticReadObjs, CreateStaticReadObjs(ts.ToBytes(), reqs), conn)
+			*/
+			SendProto(StaticReadObjs, CreateStaticReadObjs(ts.ToBytes(), reqs), ongoingRemote.conns[i])
 		}
 	}
 
@@ -1647,7 +1702,8 @@ func (tm *TransactionManager) handleRemoteStaticReads(ts clocksi.Timestamp, reqs
 	var currReqs []ReadObjectParams
 	var currIndexes []int
 	//Receiving replies and redirecting to state
-	for i, conn := range conns {
+	//for i, conn := range conns {
+	for i, conn := range ongoingRemote.conns {
 		currReqs, currIndexes = reqsPerServer[i], remoteReqsToChan[i]
 		if len(currReqs) > 0 {
 			_, protobuf, _ := ReceiveProto(conn)
@@ -1656,13 +1712,15 @@ func (tm *TransactionManager) handleRemoteStaticReads(ts clocksi.Timestamp, reqs
 				readParams = currReqs[j]
 				readChans[currIndexes[j]] <- crdt.ReadRespProtoToAntidoteState(obj, readParams.CrdtType, readParams.ReadArgs.GetREADType())
 			}
-			conns[i].Close()
+			//conns[i].Close()
 		}
 	}
 }
 
 func (tm *TransactionManager) handleRemoteUpds(txnPartitions *ongoingTxn, reqsPerServer [][]UpdateObjectParams) {
-	if txnPartitions.nConns < len(reqsPerServer) {
+
+	//if txnPartitions.nConns < len(reqsPerServer) {
+	if txnPartitions.nTxnsStarted < len(reqsPerServer) {
 		toContact, has := make([]bool, len(reqsPerServer)), false
 		for i, reqs := range reqsPerServer {
 			if len(reqs) > 0 {
@@ -1673,6 +1731,7 @@ func (tm *TransactionManager) handleRemoteUpds(txnPartitions *ongoingTxn, reqsPe
 			tm.startTxnForRemote(txnPartitions, toContact)
 		}
 	}
+
 	//Sending reqs
 	for i, reqs := range reqsPerServer {
 		if len(reqs) > 0 {
@@ -1692,13 +1751,15 @@ func (tm *TransactionManager) handleRemoteUpds(txnPartitions *ongoingTxn, reqsPe
 //Note: done by a separate goroutine
 func (tm *TransactionManager) handleRemoteCommit(txnPartitions *ongoingTxn, remoteChan chan bool) {
 	for i, conn := range txnPartitions.conns {
-		if conn != nil {
+		//if conn != nil {
+		if txnPartitions.txnDataToUse[i] != nil {
 			SendProto(CommitTrans, CreateCommitTransaction(txnPartitions.txnDataToUse[i]), conn)
 		}
 	}
 
-	for _, conn := range txnPartitions.conns {
-		if conn != nil {
+	for i, conn := range txnPartitions.conns {
+		//if conn != nil {
+		if txnPartitions.txnDataToUse[i] != nil {
 			ReceiveProto(conn) //Waits until the other server acks the commit
 			conn.Close()
 		}
@@ -1709,13 +1770,15 @@ func (tm *TransactionManager) handleRemoteCommit(txnPartitions *ongoingTxn, remo
 
 func (tm *TransactionManager) handleRemoteAbort(txnPartitions *ongoingTxn, remoteChan chan bool) {
 	for i, conn := range txnPartitions.conns {
-		if conn != nil {
+		//if conn != nil {
+		if txnPartitions.txnDataToUse[i] != nil {
 			SendProto(CommitTrans, CreateCommitTransaction(txnPartitions.txnDataToUse[i]), conn)
 		}
 	}
 
-	for _, conn := range txnPartitions.conns {
-		if conn != nil {
+	for i, conn := range txnPartitions.conns {
+		//if conn != nil {
+		if txnPartitions.txnDataToUse[i] != nil {
 			ReceiveProto(conn) //Waits until the other server acks the abort
 			conn.Close()
 		}
@@ -1723,24 +1786,29 @@ func (tm *TransactionManager) handleRemoteAbort(txnPartitions *ongoingTxn, remot
 	remoteChan <- true
 }
 
-func (tm *TransactionManager) handleRemoteStaticUpds(ts clocksi.Timestamp, reqsPerServer [][]UpdateObjectParams) {
-	conns := make([]net.Conn, len(reqsPerServer))
+func (tm *TransactionManager) handleRemoteStaticUpds(ts clocksi.Timestamp, reqsPerServer [][]UpdateObjectParams, ongoingRemote *ongoingRemote) {
+	//conns := make([]net.Conn, len(reqsPerServer))
 	//Sending reqs
 	for i, reqs := range reqsPerServer {
 		if len(reqs) > 0 {
-			conn, err := net.Dial("tcp", tm.remoteIPs[i])
-			tools.CheckErr("Network connection establishment err on remote read", err)
-			conns[i] = conn
-			SendProto(StaticUpdateObjs, CreateStaticUpdateObjs(ts.ToBytes(), reqs), conn)
+			/*
+				conn, err := net.Dial("tcp", tm.remoteIPs[i])
+				tools.CheckErr("Network connection establishment err on remote read", err)
+				conns[i] = conn
+				SendProto(StaticUpdateObjs, CreateStaticUpdateObjs(ts.ToBytes(), reqs), conn)
+			*/
+			SendProto(StaticUpdateObjs, CreateStaticUpdateObjs(ts.ToBytes(), reqs), ongoingRemote.conns[i])
 		}
 	}
 
 	var currReqs []UpdateObjectParams
-	for i, conn := range conns {
+	//for i, conn := range conns {
+	for i, conn := range ongoingRemote.conns {
 		currReqs = reqsPerServer[i]
 		if len(currReqs) > 0 {
 			ReceiveProto(conn) //Waits until the other server acks the write
-			conns[i].Close()
+			//conns[i].Close()
 		}
 	}
+
 }

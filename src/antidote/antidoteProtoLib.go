@@ -2,13 +2,13 @@ package antidote
 
 import (
 	"bytes"
-	"potionDB/src/clocksi"
-	"potionDB/src/crdt"
 	"encoding/binary"
 	"encoding/gob"
 	fmt "fmt"
 	"io"
 	"math/rand"
+	"potionDB/src/clocksi"
+	"potionDB/src/crdt"
 	"potionDB/src/proto"
 	"potionDB/src/tools"
 
@@ -42,6 +42,7 @@ const (
 	ResetServer      = 12
 	NewTrigger       = 14
 	GetTriggers      = 15
+	ServerConn       = 80
 	//Replies
 	ConnectReplicaReply = 11
 	OpReply             = 111
@@ -253,6 +254,10 @@ func CreateGetTriggers() (protobuf *proto.ApbGetTriggers) {
 	return &proto.ApbGetTriggers{}
 }
 
+func CreateServerConn() (protobuf *proto.ApbServerConn) {
+	return &proto.ApbServerConn{}
+}
+
 /*****REPLY/RESP PROTOS*****/
 
 func CreateStartTransactionResp(txnId TransactionId, ts clocksi.Timestamp) (protobuf *proto.ApbStartTransactionResp) {
@@ -445,6 +450,8 @@ func unmarshallProto(code byte, msgBuf []byte) (protobuf pb.Message) {
 		protobuf = &proto.ApbNewTrigger{}
 	case GetTriggers:
 		protobuf = &proto.ApbGetTriggers{}
+	case ServerConn:
+		protobuf = &proto.ApbServerConn{}
 	case OpReply:
 		protobuf = &proto.ApbOperationResp{}
 	case StartTransReply:

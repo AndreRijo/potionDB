@@ -47,6 +47,7 @@ func (tc TcInfo) FireTcCommands() {
 
 	netemCmds := make([]*exec.Cmd, len(tc.Latencies)-1)
 	filterCmds := make([]*exec.Cmd, len(tc.Latencies)-1)
+	testPings := make([]*exec.Cmd, len(tc.Latencies)-1)
 	i := 0
 	for i = tc.MyIpPos + 1; i < len(tc.Ips); i++ {
 		//Latency rule
@@ -59,6 +60,7 @@ func (tc TcInfo) FireTcCommands() {
 			"1:0", "prio", "1", "u32", "match", "ip", "dst", tc.Ips[i], "flowid", "1:"+strconv.Itoa(i+1))
 		//fmt.Printf("%s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s\n", "tc", "filter", "add", "dev", "eth0", "protocol", "ip", "parent",
 		//"1:0", "prio", "1", "u32", "match", "ip", "dst", tc.Ips[i], "flowid", "1:"+strconv.Itoa(i+1))
+		testPings[i-1] = exec.Command("ping", "-c", "1", tc.Ips[i])
 	}
 	for i = 0; i < tc.MyIpPos; i++ {
 		netemCmds[i] = exec.Command("tc", "qdisc", "add", "dev", "eth0", "parent", "1:"+strconv.Itoa(i+1),
@@ -69,6 +71,7 @@ func (tc TcInfo) FireTcCommands() {
 			"1:0", "prio", "1", "u32", "match", "ip", "dst", tc.Ips[i], "flowid", "1:"+strconv.Itoa(i+1))
 		//fmt.Printf("%s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s\n", "tc", "filter", "add", "dev", "eth0", "protocol", "ip", "parent",
 		//"1:0", "prio", "1", "u32", "match", "ip", "dst", tc.Ips[i], "flowid", "1:"+strconv.Itoa(i+1))
+		testPings[i] = exec.Command("ping", "-c", "1", tc.Ips[i])
 	}
 
 	//Associates every other IP to the non-modified band
@@ -83,6 +86,13 @@ func (tc TcInfo) FireTcCommands() {
 		filterCmds[i].Run()
 	}
 	catchAllCmd.Run()
+
+	/*
+		for i = 0; i < len(tc.Ips)-1; i++ {
+			output, err := testPings[i].Output()
+			fmt.Printf("%s; Error: %s\n", output, err)
+		}
+	*/
 	/*
 		startMsg, _ := startCmd.CombinedOutput()
 		netemMsgs, filterMsgs := make([][]byte, len(netemCmds)), make([][]byte, len(filterCmds))

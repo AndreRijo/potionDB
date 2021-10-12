@@ -185,6 +185,9 @@ func processConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID
 			fmt.Println("Starting to reset PotionDB")
 			replyType = antidote.ResetServerReply
 			reply = handleResetServer(tm)
+		case antidote.ServerConn:
+			handleServerConn(tmChan)
+			continue
 		default:
 			tools.FancyErrPrint(tools.PROTO_PRINT, replicaID, "Received unknown proto, ignored... sort of")
 			fmt.Println("I don't know how to handle this proto", protoType)
@@ -398,6 +401,10 @@ func handleResetServer(tm *antidote.TransactionManager) (respProto *proto.ApbRes
 	printMemStats(&runtime.MemStats{}, 0)
 
 	return &proto.ApbResetServerResp{}
+}
+
+func handleServerConn(tmChan chan antidote.TransactionManagerRequest) {
+	tmChan <- createTMRequest(antidote.TMServerConn{}, 0, nil)
 }
 
 func createTMRequest(args antidote.TMRequestArgs, txnId antidote.TransactionId,

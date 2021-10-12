@@ -183,6 +183,15 @@ func (crdtState AvgFullState) FromReadResp(protobuf *proto.ApbReadObjectResp) (s
 	return crdtState
 }
 
+func (crdtState AvgFullState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+	/*return &proto.ApbReadObjectResp{Partread: &proto.ApbPartialReadResp{Set: &proto.ApbSetPartialReadResp{
+		Lookup: &proto.ApbSetLookupReadResp{Has: pb.Bool(crdtState.HasElem)},
+	}}}*/
+	return &proto.ApbReadObjectResp{Partread: &proto.ApbPartialReadResp{Avg: &proto.ApbAvgPartialReadResp{
+		Getfull: &proto.ApbAvgGetFullReadResp{Sum: &crdtState.Sum, NAdds: &crdtState.NAdds},
+	}}}
+}
+
 func (args AvgGetFullArguments) FromPartialRead(protobuf *proto.ApbPartialReadArgs) (readArgs ReadArguments) {
 	return args
 }
