@@ -43,6 +43,7 @@ const (
 	NewTrigger       = 14
 	GetTriggers      = 15
 	ServerConn       = 80
+	S2S              = 81
 	//Replies
 	ConnectReplicaReply = 11
 	OpReply             = 111
@@ -53,6 +54,7 @@ const (
 	ResetServerReply    = 13
 	NewTriggerReply     = 16
 	GetTriggersReply    = 17
+	S2SReply            = 181
 	ErrorReply          = 0
 )
 
@@ -89,6 +91,24 @@ func (ci CodingInfo) DecInitialize() CodingInfo {
 //Every msg sent to antidote has a 5 byte uint header.
 //First 4 bytes: msgSize (uint32), 5th: msg type (byte)
 func SendProto(code byte, protobf pb.Message, writer io.Writer) {
+	err := SendProtoNoCheck(code, protobf, writer)
+	tools.CheckErr("Sending protobuf err:", err)
+	//fmt.Println("Protobuf sent succesfully!\n")
+}
+
+//TODO: Delete?
+func SendProtoMarshal(code byte, marshalProto []byte, writer io.Writer) error {
+	protoSize := len(marshalProto)
+	buffer := make([]byte, protoSize+5)
+	binary.BigEndian.PutUint32(buffer[0:4], uint32(protoSize+1))
+	buffer[4] = code
+	copy(buffer[5:], marshalProto)
+	_, err := writer.Write(buffer)
+	return err
+}
+
+//Exposes the error on sending instead of crashing
+func SendProtoNoCheck(code byte, protobf pb.Message, writer io.Writer) error {
 	toSend, err := pb.Marshal(protobf)
 	tools.CheckErr("Marshal err", err)
 	protoSize := len(toSend)
@@ -97,17 +117,26 @@ func SendProto(code byte, protobf pb.Message, writer io.Writer) {
 	buffer[4] = code
 	copy(buffer[5:], toSend)
 	_, err = writer.Write(buffer)
-	tools.CheckErr("Sending protobuf err: %s\n", err)
-	//fmt.Println("Protobuf sent succesfully!\n")
+	return err
 }
 
 func ReceiveProto(in io.Reader) (msgType byte, protobuf pb.Message, err error) {
 	msgType, msgBuf, err := readProtoFromNetwork(in)
+
 	if err != nil {
+		fmt.Printf("[WARNING]Returning error on ReceiveProto. MsgType: %v, msgBuf: %v, err: %s\n", msgType, msgBuf, err)
+		//debug.PrintStack()
 		return
 	}
+	//NEW
+	//tools.CheckErr("Receiving proto err:", err)
 	protobuf = unmarshallProto(msgType, msgBuf)
 	return
+}
+
+//TODO: Delete?
+func ReceiveProtoNoProcess(in io.Reader) {
+	readProtoFromNetwork(in)
 }
 
 func readProtoFromNetwork(in io.Reader) (msgType byte, msgData []byte, err error) {
@@ -452,6 +481,8 @@ func unmarshallProto(code byte, msgBuf []byte) (protobuf pb.Message) {
 		protobuf = &proto.ApbGetTriggers{}
 	case ServerConn:
 		protobuf = &proto.ApbServerConn{}
+	case S2S:
+		protobuf = &proto.S2SWrapper{}
 	case OpReply:
 		protobuf = &proto.ApbOperationResp{}
 	case StartTransReply:
@@ -468,6 +499,8 @@ func unmarshallProto(code byte, msgBuf []byte) (protobuf pb.Message) {
 		protobuf = &proto.ApbNewTriggerReply{}
 	case GetTriggersReply:
 		protobuf = &proto.ApbGetTriggersReply{}
+	case S2SReply:
+		protobuf = &proto.S2SWrapperReply{}
 	case ErrorReply:
 		protobuf = &proto.ApbErrorResp{}
 	}
@@ -538,5 +571,8 @@ func createPartialReads(readParams []ReadObjectParams) (protobufs []*proto.ApbPa
 
 func createPartialRead(key string, crdtType proto.CRDTType, bucket string, readArgs crdt.ReadArguments) (protobuf *proto.ApbPartialRead) {
 	readType := readArgs.GetREADType()
+	if readType == proto.READType_FULL {
+		return &proto.ApbPartialRead{Object: createBoundObject(key, crdtType, bucket), Readtype: &readType, Args: &proto.ApbPartialReadArgs{}}
+	}
 	return &proto.ApbPartialRead{Object: createBoundObject(key, crdtType, bucket), Readtype: &readType, Args: readArgs.(crdt.ProtoRead).ToPartialRead()}
 }

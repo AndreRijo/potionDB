@@ -1,6 +1,7 @@
 package crdt
 
 import (
+	"fmt"
 	"potionDB/src/clocksi"
 	"potionDB/src/proto"
 
@@ -71,11 +72,21 @@ func (crdt *AvgCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaI
 }
 
 func (crdt *AvgCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateArguments) (state State) {
-	if updsNotYetApplied == nil || len(updsNotYetApplied) > 0 {
-		return crdt.GetValue()
+	switch args.(type) {
+	case StateReadArguments:
+		return crdt.getValue(updsNotYetApplied)
+	case AvgGetFullArguments:
+		return crdt.getFullValue(updsNotYetApplied)
+	default:
+		fmt.Printf("[AVGCrdt]Unknown read type: %+v\n", args)
 	}
-	//var sum int64 = crdt.sum
-	//var nAdds int64 = crdt.nAdds
+	return nil
+}
+
+func (crdt *AvgCrdt) getValue(updsNotYetApplied []*UpdateArguments) (state State) {
+	if updsNotYetApplied == nil || len(updsNotYetApplied) > 0 {
+		return AvgState{Value: float64(crdt.sum) / float64(crdt.nAdds)}
+	}
 	sum, nAdds := crdt.sum, crdt.nAdds
 	for _, upd := range updsNotYetApplied {
 		typedUpd := (*upd).(AddMultipleValue)
@@ -85,8 +96,18 @@ func (crdt *AvgCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateArgumen
 	return AvgState{Value: float64(sum) / float64(nAdds)}
 }
 
-func (crdt *AvgCrdt) GetValue() (state State) {
-	return AvgState{Value: float64(crdt.sum) / float64(crdt.nAdds)}
+func (crdt *AvgCrdt) getFullValue(updsNotYetApplied []*UpdateArguments) (state State) {
+	if updsNotYetApplied == nil || len(updsNotYetApplied) > 0 {
+		return AvgFullState{Sum: crdt.sum, NAdds: crdt.nAdds}
+	}
+	sum, nAdds := crdt.sum, crdt.nAdds
+	for _, upd := range updsNotYetApplied {
+		typedUpd := (*upd).(AddMultipleValue)
+		sum += typedUpd.SumValue
+		nAdds += typedUpd.NAdds
+	}
+	fmt.Println("[AVGCRDT]GetFull, sum:", sum, "NAdds:", nAdds)
+	return AvgFullState{Sum: sum, NAdds: nAdds}
 }
 
 func (crdt *AvgCrdt) Update(args UpdateArguments) (downstreamArgs DownstreamArguments) {

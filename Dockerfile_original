@@ -7,14 +7,12 @@ FROM golang as base
 #RUN go get github.com/streadway/amqp
 
 # Adding src and building
-COPY potionDB/go.mod potionDB/go.sum /go/potionDB/
-#ADD potionDB/go.sum /go/potionDB/
-ADD tpch_data/tpch /go/tpch_data/tpch/
-ADD tpch_data/go.mod /go/tpch_data/
+ADD go.mod /go/potionDB/
+ADD go.sum /go/potionDB/
 #RUN go install -race main
 #RUN go install main
 RUN cd potionDB && go mod download
-ADD potionDB/src/ /go/potionDB/src/
+ADD src/ /go/potionDB/src/
 RUN cd potionDB/src/main && go build
 
 
@@ -29,7 +27,7 @@ COPY --from=base /usr/local/go/bin/ /go/
 COPY --from=base /go/potionDB/src/main/main /go/bin/
 
 #Add start script
-ADD potionDB/dockerStuff/start.sh /go/bin/
+ADD dockerStuff/start.sh /go/bin/
 
 #Default listen port
 EXPOSE 8087
@@ -38,31 +36,24 @@ EXPOSE 5672
 
 #Arguments
 ENV CONFIG "/go/bin/configs/cluster/default"
+#ENV SERVERS, ENV RABBITMQ
 ENV RABBITMQ_WAIT 10s
+#ENV RABBITMQ_WAIT 5s
+ENV RABBITMQ_VHOST /crdts
 ENV BUCKETS "none"
 ENV DISABLE_REPLICATOR "none"
 ENV DISABLE_LOG "none"
 ENV DISABLE_READ_WAITING "none"
 ENV POOL_MAX "none"
-ENV POTIONDB_WAIT 0s
-ENV TOPK_SIZE 100
-ENV DO_DATALOAD false
-ENV SCALE 1
-ENV DATALOC "go/data/"
-ENV REGION "none"
-
 #If rabbitMQ takes a long time to start, add some delay to PotionDB startup
-#ENV RABBITMQ_VHOST /crdts
-#ENV POTIONDB_WAIT 0s
+ENV POTIONDB_WAIT 0s
 
-#TODO: Add config file to the right folder
 #Add config folders late to avoid having to rebuild multiple images
-#ENV RABBITMQ_PID_FILE /var/lib/rabbitmq/mnesia/rabbitmq
-#ADD potionDB/dockerStuff/rabbitmq.config /etc/rabbitmq/
-#ADD potionDB/dockerStuff/definitions.json /etc/rabbitmq/
+ENV RABBITMQ_PID_FILE /var/lib/rabbitmq/mnesia/rabbitmq
+#ADD dockerStuff/rabbitmq.config /etc/rabbitmq/
+#ADD dockerStuff/definitions.json /etc/rabbitmq/
 #RUN chown rabbitmq:rabbitmq /etc/rabbitmq/rabbitmq.config /etc/rabbitmq/definitions.json
-ADD potionDB/dockerStuff/rabbitmq.conf /etc/rabbitmq/
-ADD potionDB/configs /go/bin/configs
+ADD configs /go/bin/configs
 
 # Run the protoserver
 #CMD ["sh", "-c", "go/bin/start.sh $CONFIG"]

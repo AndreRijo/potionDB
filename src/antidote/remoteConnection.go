@@ -69,14 +69,16 @@ var ()
 func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16, connID int16, isSelfConn bool) (remote *RemoteConn, err error) {
 	//conn, err := amqp.Dial(protocol + prefix + ip + port)
 	prefix := tools.SharedConfig.GetOrDefault("rabbitMQUser", "guest")
-	vhost := tools.SharedConfig.GetOrDefault("rabbitVHost", "/")
-
+	vhost := tools.SharedConfig.GetOrDefault("rabbitVHost", "/crdts")
 	prefix = prefix + ":" + prefix + "@"
 	//conn, err := amqp.Dial(protocol + prefix + ip)
 	link := protocol + prefix + ip + "/" + vhost
-	fmt.Println("Connecting to", link)
+	currH, currM, currS := time.Now().Clock()
+	fmt.Printf("[RC][%d:%d:%d]Connecting to %s\n", currH, currM, currS, link)
 	conn, err := amqp.DialConfig(link, amqp.Config{Dial: scalateTimeout})
 	if err != nil {
+		currH, currM, currS = time.Now().Clock()
+		fmt.Printf("[RC][%d:%d:%d]Failed to open connection to rabbitMQ at %s: %s. Retrying.\n", currH, currM, currS, ip, err)
 		tools.FancyWarnPrint(tools.REMOTE_PRINT, replicaID, "failed to open connection to rabbitMQ at", ip, ":", err, ". Retrying.")
 		time.Sleep(4000 * time.Millisecond)
 		return CreateRemoteConnStruct(ip, bucketsToListen, replicaID, connID, isSelfConn)
@@ -167,7 +169,8 @@ func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16
 
 func scalateTimeout(network, addr string) (conn net.Conn, err error) {
 	//Also control the timeout locally due to the localhost case which returns immediatelly
-	nextTimeout := 4 * time.Second
+	fmt.Println("[RC][ScalateTimeout function]")
+	nextTimeout := 2 * time.Second
 	lastAttempt := time.Now().UnixNano()
 	for {
 		conn, err = net.DialTimeout(network, addr, nextTimeout)
@@ -180,8 +183,8 @@ func scalateTimeout(network, addr string) (conn net.Conn, err error) {
 				time.Sleep(nextTimeout - time.Duration(thisAttempt-lastAttempt))
 			}
 			lastAttempt = thisAttempt
-			nextTimeout += (nextTimeout / 2)
-			fmt.Println("Failed to connect to", addr, ". Retrying to connect...")
+			nextTimeout += (nextTimeout / 4)
+			fmt.Println("[RC][ScalateTimeout function]Failed to connect to", addr, ". Retrying to connect...")
 		}
 	}
 	return

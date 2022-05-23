@@ -367,8 +367,6 @@ message ApbGetTriggersReply {
     repeated ApbNewTrigger genericMapping = 2;
 }
 
-message ApbServerConn {}
-
 //Partial reading
 
 enum READ_type {

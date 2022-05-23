@@ -17,7 +17,6 @@ import (
 	"potionDB/src/proto"
 	"potionDB/src/shared"
 	"potionDB/src/tools"
-	"strings"
 	"time"
 )
 
@@ -168,7 +167,7 @@ func (repl *Replicator) Reset() {
 	}
 }
 
-func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, replicaID int16) {
+func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, buckets []string, replicaID int16) {
 	if !shared.IsReplDisabled {
 		if !repl.started {
 			repl.tm = tm
@@ -176,7 +175,7 @@ func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, rep
 			repl.localPartitions = loggers
 			//bucketsToListen := make([]string, 1)
 			//bucketsToListen[0] = "*"
-			bucketsToListen := repl.getBuckets()
+			bucketsToListen := buckets
 
 			remoteConn, err := CreateRemoteGroupStruct(bucketsToListen, replicaID)
 			//TODO: Not ignore err
@@ -195,12 +194,15 @@ func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, rep
 
 			//Also skips the joining algorithm if there's no replica to join
 			if tools.SharedConfig.GetBoolConfig(DO_JOIN, true) && len(remoteConn.conns) > 0 {
+				fmt.Println("[REPLICATOR]Join mode")
 				repl.JoinInfo = JoinInfo{holdMsgs: make([]ReplicatorMsg, 0, joinHoldInitialSize), allDone: false, nHoldJoins: 0}
 				repl.joinGroup()
 			} else {
 				//Wait for replicaIDs of existing replicas
 				repl.JoinInfo.waitFor = int(remoteConn.nReplicas)
 				crdt.NReplicas = int32(remoteConn.nReplicas + 1)
+				fmt.Printf("[REPLICATOR]Not doing join, will wait for replicaID of existing replicas. IDs to receive: %d, number of replicas (including self): %d\n",
+					repl.JoinInfo.waitFor, crdt.NReplicas)
 				remoteConn.sendReplicaID(bucketsToListen, tools.SharedConfig.GetOrDefault("localPotionDBAddress", "localhost:8087"))
 				go repl.receiveRemoteTxns()
 				go repl.replicateCycle()
@@ -216,15 +218,6 @@ func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, rep
 	} else {
 		fmt.Println("[REPLICATOR] Warning - replicator is disabled. PotionDB started in single server mode.")
 		go tm.SendRemoteMsg(TMStart{})
-	}
-}
-
-func (repl *Replicator) getBuckets() []string {
-	stringBuckets, has := tools.SharedConfig.GetAndHasConfig("buckets")
-	if !has {
-		return []string{"*"}
-	} else {
-		return strings.Split(stringBuckets, " ")
 	}
 }
 
@@ -385,6 +378,7 @@ func (repl *Replicator) sendTxns(toSend []RemoteTxn) {
 }
 
 func (repl *Replicator) receiveRemoteTxns() {
+	fmt.Println("[Replicator]Ready to receive requests from RabbitMQ.")
 	for {
 		tools.FancyInfoPrint(tools.REPL_PRINT, repl.replicaID, "iterating receiveRemoteTxns")
 		remoteReq := repl.remoteConn.GetNextRemoteRequest()
@@ -414,6 +408,7 @@ func (repl *Replicator) handleRemoteRequest(remoteReq ReplicatorMsg) {
 		if repl.waitFor == 0 {
 			repl.initialDummyTs.Update()
 			repl.allDone = true
+			fmt.Println("[RC]All IDs received, sending signal to TM.")
 			repl.tm.SendRemoteMsg(TMStart{})
 		}
 	case *RemoteTrigger:

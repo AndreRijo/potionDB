@@ -1,8 +1,9 @@
 package crdt
 
 import (
-	"potionDB/src/clocksi"
+	"fmt"
 	"math"
+	"potionDB/src/clocksi"
 	"potionDB/src/proto"
 	"sort"
 
@@ -128,9 +129,10 @@ type TopSumAddReplaceEffect struct {
 
 //Equal to TopSumAddReplaceEffect, but the swap is instead from top to nonTop. Different processing though.
 type TopSumSubReplaceEffect struct {
-	newElem         TopKScore
-	newElemOldScore int32     //Might have been an increase
-	oldElem         TopKScore //The element that went to notInTop was the previous min
+	newElem         TopKScore //Element that went to notInTop
+	newElemOldScore int32     //The element's previous value when it was on top
+	oldElem         TopKScore //The element that got promoted from notInTop to Top. It is the current minimum
+	oldMin          TopKScore //The minimum before this change
 }
 
 func (score TopKScore) copy() (newScoreP *TopKScore) {
@@ -190,7 +192,7 @@ func (args GetTopSumAboveValueArguments) GetREADType() proto.READType {
 	return proto.READType_GET_ABOVE_VALUE
 }
 
-const (
+var (
 	defaultTopSSize = 100 //Default number of top positions
 )
 
@@ -230,6 +232,8 @@ func (crdt *TopSumCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateArgu
 		return crdt.getTopSAboveValue(typedArgs.MinValue, updsNotYetApplied)
 	case GetTopKAboveValueArguments:
 		return crdt.getTopSAboveValue(typedArgs.MinValue, updsNotYetApplied)
+	default:
+		fmt.Printf("[TOPSUMCrdt]Unknown read type: %+v\n", args)
 	}
 	return nil
 }
@@ -634,13 +638,21 @@ func (crdt *TopSumCrdt) applyTopSSubDownstreamArgs(op DownstreamTopSSub) (effect
 				crdt.smallestScore = entry
 			} else {
 				//Move to notTop, find new min, add that min to top.
+				//Searching for new min in nonTop; this min will be added to elems
+				newMin := &TopKScore{Id: math.MinInt32, Score: math.MinInt32}
+				for _, elem := range crdt.notInTop {
+					if elem.isHigher(newMin) {
+						newMin = elem
+					}
+				}
 				delete(crdt.elems, op.Id)
+				delete(crdt.notInTop, newMin.Id)
 				crdt.notInTop[op.Id] = entry
-				crdt.findAndUpdateMin()
-				newMin := crdt.smallestScore
 				crdt.elems[newMin.Id] = newMin
+				oldMin := crdt.smallestScore
+				crdt.smallestScore = newMin
 				//replace
-				effectValue = TopSumSubReplaceEffect{newElem: *entry, oldElem: *newMin, newElemOldScore: oldScore}
+				effectValue = TopSumSubReplaceEffect{newElem: *entry, oldElem: *newMin, newElemOldScore: oldScore, oldMin: *oldMin}
 			}
 		}
 		//Nothing do on else (element stays in top)
@@ -733,10 +745,18 @@ func (crdt *TopSumCrdt) applyTopSSubAllDownstreamArgs(op DownstreamTopSSubAll) (
 				}
 			} else {
 				//Move to notTop, find new min, add that min to top
+				//Searching for new min in nonTop; this min will be added to elems
+				newMin := &TopKScore{Id: math.MinInt32, Score: math.MinInt32}
+				for _, elem := range crdt.notInTop {
+					if elem.isHigher(newMin) {
+						newMin = elem
+					}
+				}
 				delete(crdt.elems, entry.Id)
+				delete(crdt.notInTop, newMin.Id)
 				crdt.notInTop[entry.Id] = entry
-				crdt.findAndUpdateMin()
-				crdt.elems[crdt.smallestScore.Id] = crdt.smallestScore
+				crdt.elems[newMin.Id] = newMin
+				crdt.smallestScore = newMin
 			}
 			downScores[downI], downI = currScore, downI+1
 		} else if len(crdt.elems) < crdt.maxElems {
@@ -887,8 +907,15 @@ func (crdt *TopSumCrdt) undoAddReplaceEffect(effect *TopSumAddReplaceEffect) {
 }
 
 func (crdt *TopSumCrdt) undoSubReplaceEffect(effect *TopSumSubReplaceEffect) {
-	//Only one case
-	delete(crdt.elems, effect.newElem.Id)
+	//Only one case (top was full; element on top went to notInTop from a decrease)
+	newTop := effect.newElem
+	newTop.Score = effect.newElemOldScore
+	//newTop was the one that got moved from top to notInTop before
+	crdt.elems[newTop.Id] = &newTop
+	newNotTop := effect.oldElem
+	crdt.notInTop[newNotTop.Id] = &newNotTop
+	newMin := effect.oldMin
+	crdt.smallestScore = &newMin
 }
 
 func (crdt *TopSumCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}

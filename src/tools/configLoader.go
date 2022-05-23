@@ -46,6 +46,11 @@ func (config *ConfigLoader) LoadConfigs(folder string) {
 	fmt.Printf("Finished reading %d config files from %s.\n", filesRead, folder)
 }
 
+func (config *ConfigLoader) HasConfig(key string) (has bool) {
+	_, has = config.configs[key]
+	return
+}
+
 func (config *ConfigLoader) GetConfig(key string) (value string) {
 	return config.configs[key]
 }

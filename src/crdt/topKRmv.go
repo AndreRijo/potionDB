@@ -1,9 +1,9 @@
 package crdt
 
 import (
-	"potionDB/src/clocksi"
 	"fmt"
 	"math"
+	"potionDB/src/clocksi"
 	"potionDB/src/proto"
 	"sort"
 
@@ -255,8 +255,11 @@ func (args GetTopKAboveValueArguments) GetREADType() proto.READType {
 }
 
 const (
-	defaultTopKSize = 100  //Default number of top positions
-	cacheSortedSet  = true //If topN query should cache the sorted set of elems until an update is applied
+	cacheSortedSet = true //If topN query should cache the sorted set of elems until an update is applied
+)
+
+var (
+	defaultTopKSize = 100 //Default number of top positions
 )
 
 func (crdt *TopKRmvCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
@@ -295,6 +298,8 @@ func (crdt *TopKRmvCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateArg
 		return crdt.getTopN(typedArgs.NumberEntries, updsNotYetApplied)
 	case GetTopKAboveValueArguments:
 		return crdt.getTopKAboveValue(typedArgs.MinValue, updsNotYetApplied)
+	default:
+		fmt.Printf("[TOPKCrdt]Unknown read type: %+v\n", args)
 	}
 	return nil
 }
@@ -1246,11 +1251,13 @@ func (crdt *TopKRmvCrdt) applyRemove(op *DownstreamTopKRemove) (effect *Effect, 
 func (crdtOp TopKAdd) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
 	add := protobuf.GetTopkrmvop().GetAdds()[0]
 	crdtOp.TopKScore = TopKScore{Id: add.GetPlayerId(), Score: add.GetScore(), Data: &add.Data}
+	//fmt.Println("[TopK][FromUpdateObject]Pair:", *add.PlayerId, " ", *add.Score)
 	return crdtOp
 }
 
 func (crdtOp TopKAdd) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
 	add := proto.ApbIntPair{PlayerId: pb.Int32(crdtOp.Id), Score: pb.Int32(crdtOp.Score)}
+	//fmt.Println("[TopK][ToUpdateObject]Pair:", *add.PlayerId, " ", *add.Score)
 	if crdtOp.Data != nil {
 		add.Data = *crdtOp.Data
 	}

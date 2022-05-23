@@ -1,8 +1,8 @@
 package crdt
 
 import (
-	"potionDB/src/clocksi"
 	rand "math/rand"
+	"potionDB/src/clocksi"
 	"potionDB/src/proto"
 	"time"
 

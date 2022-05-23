@@ -1,29 +1,11 @@
 #!/bin/bash
 
+echo $DO_DATALOAD;
+echo $SCALE;
+echo $DATALOC;
+echo $REGION;
 /opt/rabbitmq/sbin/rabbitmq-server & (
-#echo $PWD ;
-#echo $1 ;
-#echo $0 ;
-#echo $CONFIG ;
-#echo $SERVERS ;
-#echo $RABBITMQ ;
-sleep $RABBITMQ_WAIT ;
-rabbitmqctl wait --timeout 60 $RABBITMQ_PID_FILE ; 
-#rabbitmqctl await_startup ;
-#rabbitmqctl wait $RABBITMQ_PID_FILE ;  
-#sleep 5s ; 
-rabbitmqctl add_vhost $RABBITMQ_VHOST ;
-#sleep 3s ;
-rabbitmqctl add_user test test ; 
-rabbitmqctl set_user_tags test administrator;
-rabbitmqctl set_permissions -p $RABBITMQ_VHOST test ".*" ".*" ".*";
-sleep 3s;
-sleep $POTIONDB_WAIT ; 
-#sleep 20s;
-#/go/bin/monitor-fetch/main $1 ;
-#/opt/rabbitmq/sbin/cuttlefish -c /etc/rabbitmq/rabbitmq.conf -s /opt/rabbitmq/priv/schema/ ;
-
-/go/bin/main --config=$CONFIG --servers=$SERVERS --rabbitMQIP=$RABBITMQ --rabbitVHost=$RABBITMQ_VHOST --buckets=$BUCKETS --disableReplicator=$DISABLE_REPLICATOR --disableLog=$DISABLE_LOG --disableReadWaiting=$DISABLE_READ_WAITING --useTC=$USE_TC --tcIPs=$TC_IPS --selfIP=$SELF_IP;
+/go/bin/main --config=$CONFIG --servers=$SERVERS --rabbitMQIP=$RABBITMQ --rabbitVHost=$RABBITMQ_VHOST --buckets=$BUCKETS --disableReplicator=$DISABLE_REPLICATOR --disableLog=$DISABLE_LOG --disableReadWaiting=$DISABLE_READ_WAITING --useTC=$USE_TC --tcIPs=$TC_IPS --selfIP=$SELF_IP --poolMax=$POOL_MAX --topKSize=$TOPK_SIZE --doDataload=$DO_DATALOAD --scale=$SCALE --dataLoc=$DATALOC --region=$REGION
 )
 
 #srv=${SERVERS:-nil}

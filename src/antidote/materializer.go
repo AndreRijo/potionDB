@@ -1174,6 +1174,7 @@ func applyUpdates(updates []*UpdateObjectParams, commitTimestamp *clocksi.Timest
 		//Some "normal" CRDTs have also be optimized to do the same (e.g., setAWCrdt when removing element that doesn't exist)
 		downArgs := obj.Update(*upd.UpdateArgs)
 		if (downArgs != crdt.NoOp{}) {
+			//fmt.Printf("[MAT]Applying downstream update to %v with args %T %+v\n", upd.KeyParams, *upd.UpdateArgs, *upd.UpdateArgs)
 			obj.Downstream(copyTs, downArgs)
 			if downArgs.MustReplicate() {
 				updArgs := downArgs.(crdt.UpdateArguments)

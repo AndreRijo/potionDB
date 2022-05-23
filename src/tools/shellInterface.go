@@ -6,12 +6,16 @@ import (
 	"fmt"
 	"os/exec"
 	"strconv"
+	"strings"
 )
 
 const (
 	//TC_BASE_COMMAND   = "tc qdisc add dev eth0"
 	//TC_FILTER_COMMAND = "tc filter add dev eth0"
 	TC_BASE_PRIOMAP = "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"
+	//eth0 if using docker network; some other name if using net=host
+	ETHERNET_NAME = "eth0"
+	//ETHERNET_NAME = "enp24s0f0"
 )
 
 //Assumes Latencies[MyIpPos] = 0
@@ -37,7 +41,7 @@ func (tc TcInfo) FireTcCommands() {
 	//Creates a prio qdisc with len(Ips) bands
 	//startCmd := exec.Command("tc", "qdisc", "add", "dev", "eth0", "root", "handle", "1:", "prio",
 	//"bands", strconv.Itoa(len(tc.Ips)), "priomap", TC_BASE_PRIOMAP)
-	startCmd := exec.Command("tc", "qdisc", "add", "dev", "eth0", "root", "handle", "1:", "prio",
+	startCmd := exec.Command("tc", "qdisc", "add", "dev", ETHERNET_NAME, "root", "handle", "1:", "prio",
 		"bands", strconv.Itoa(len(tc.Ips)), "priomap", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0",
 		"0", "0", "0", "0", "0", "0")
 
@@ -51,23 +55,23 @@ func (tc TcInfo) FireTcCommands() {
 	i := 0
 	for i = tc.MyIpPos + 1; i < len(tc.Ips); i++ {
 		//Latency rule
-		netemCmds[i-1] = exec.Command("tc", "qdisc", "add", "dev", "eth0", "parent", "1:"+strconv.Itoa(i+1),
+		netemCmds[i-1] = exec.Command("tc", "qdisc", "add", "dev", ETHERNET_NAME, "parent", "1:"+strconv.Itoa(i+1),
 			"handle", strconv.Itoa(i+1)+"0:", "netem", "delay", strconv.FormatFloat(tc.Latencies[i], 'f', -1, 64)+"ms")
 		//fmt.Printf("%s %s %s %s %s %s %s %s %s %s %s\n", "tc", "qdisc", "add", "dev", "eth0", "parent 1:"+strconv.Itoa(i+1),
 		//"handle", strconv.Itoa(i+1)+"0:", "netem", "delay", strconv.FormatFloat(tc.Latencies[i], 'f', -1, 64)+"ms")
 		//Associates latency rule to IP
-		filterCmds[i-1] = exec.Command("tc", "filter", "add", "dev", "eth0", "protocol", "ip", "parent",
+		filterCmds[i-1] = exec.Command("tc", "filter", "add", "dev", ETHERNET_NAME, "protocol", "ip", "parent",
 			"1:0", "prio", "1", "u32", "match", "ip", "dst", tc.Ips[i], "flowid", "1:"+strconv.Itoa(i+1))
 		//fmt.Printf("%s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s\n", "tc", "filter", "add", "dev", "eth0", "protocol", "ip", "parent",
 		//"1:0", "prio", "1", "u32", "match", "ip", "dst", tc.Ips[i], "flowid", "1:"+strconv.Itoa(i+1))
 		testPings[i-1] = exec.Command("ping", "-c", "1", tc.Ips[i])
 	}
 	for i = 0; i < tc.MyIpPos; i++ {
-		netemCmds[i] = exec.Command("tc", "qdisc", "add", "dev", "eth0", "parent", "1:"+strconv.Itoa(i+1),
+		netemCmds[i] = exec.Command("tc", "qdisc", "add", "dev", ETHERNET_NAME, "parent", "1:"+strconv.Itoa(i+1),
 			"handle", strconv.Itoa(i+1)+"0:", "netem", "delay", strconv.FormatFloat(tc.Latencies[i], 'f', -1, 64)+"ms")
 		//fmt.Printf("%s %s %s %s %s %s %s %s %s %s %s\n", "tc", "qdisc", "add", "dev", "eth0", "parent 1:"+strconv.Itoa(i+1),
 		//"handle", strconv.Itoa(i+1)+"0:", "netem", "delay", strconv.FormatFloat(tc.Latencies[i], 'f', -1, 64)+"ms")
-		filterCmds[i] = exec.Command("tc", "filter", "add", "dev", "eth0", "protocol", "ip", "parent",
+		filterCmds[i] = exec.Command("tc", "filter", "add", "dev", ETHERNET_NAME, "protocol", "ip", "parent",
 			"1:0", "prio", "1", "u32", "match", "ip", "dst", tc.Ips[i], "flowid", "1:"+strconv.Itoa(i+1))
 		//fmt.Printf("%s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s\n", "tc", "filter", "add", "dev", "eth0", "protocol", "ip", "parent",
 		//"1:0", "prio", "1", "u32", "match", "ip", "dst", tc.Ips[i], "flowid", "1:"+strconv.Itoa(i+1))
@@ -75,7 +79,7 @@ func (tc TcInfo) FireTcCommands() {
 	}
 
 	//Associates every other IP to the non-modified band
-	catchAllCmd := exec.Command("tc", "filter", "add", "dev", "eth0", "protocol", "ip", "parent", "1:",
+	catchAllCmd := exec.Command("tc", "filter", "add", "dev", ETHERNET_NAME, "protocol", "ip", "parent", "1:",
 		"prio", "2", "u32", "match", "ip", "dst", "0.0.0.0/0", "flowid", "1:"+strconv.Itoa(tc.MyIpPos+1))
 	//fmt.Printf("%s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s\n", "tc", "filter", "add", "dev", "eth0", "protocol", "ip", "parent", "1:",
 	//"prio", "2", "u32", "match", "ip", "dst", "0.0.0.0/0", "flowid", "1:"+strconv.Itoa(tc.MyIpPos+1))
@@ -87,12 +91,16 @@ func (tc TcInfo) FireTcCommands() {
 	}
 	catchAllCmd.Run()
 
-	/*
-		for i = 0; i < len(tc.Ips)-1; i++ {
-			output, err := testPings[i].Output()
-			fmt.Printf("%s; Error: %s\n", output, err)
-		}
-	*/
+	for i = 0; i < len(tc.Ips)-1; i++ {
+		go func(cmd *exec.Cmd) {
+			output, err := cmd.Output()
+			strOutput := string(output)
+			splitString := strings.Split(strOutput, "\n")
+			last := splitString[len(splitString)-2]
+			fmt.Printf("%s; Error: %v\n", last, err)
+		}(testPings[i])
+	}
+
 	/*
 		startMsg, _ := startCmd.CombinedOutput()
 		netemMsgs, filterMsgs := make([][]byte, len(netemCmds)), make([][]byte, len(filterCmds))

@@ -206,3 +206,10 @@ func StateToString(state crdt.State) (stateString string) {
 func GetFunctionName(fun interface{}) string {
 	return runtime.FuncForPC(reflect.ValueOf(fun).Pointer()).Name()
 }
+
+func MinInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}

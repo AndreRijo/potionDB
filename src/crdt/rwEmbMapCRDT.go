@@ -1,8 +1,8 @@
 package crdt
 
 import (
-	"potionDB/src/clocksi"
 	"fmt"
+	"potionDB/src/clocksi"
 	"potionDB/src/proto"
 	"strings"
 
@@ -203,6 +203,8 @@ func (crdt *RWEmbMapCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateAr
 		return crdt.hasKey(updsNotYetApplied, typedArg.Key)
 	case EmbMapPartialArguments:
 		return crdt.getPartialState(updsNotYetApplied, typedArg.Args)
+	default:
+		fmt.Printf("[RWEmb]Unknown read type: %T\n", args)
 	}
 	return nil
 }
@@ -549,6 +551,8 @@ func (crdt *RWEmbMapCrdt) Update(args UpdateArguments) (downstreamArgs Downstrea
 		downstreamArgs = crdt.getUpdateAllDownstreamArgs(opType.Upds)
 	case MapRemoveAll:
 		downstreamArgs = crdt.getRemoveAllDownstreamArgs(opType.Keys)
+	default:
+		fmt.Printf("[RWEmbMap]Didn't apply any update!!! Type received: %T\n", args)
 	}
 	return
 }

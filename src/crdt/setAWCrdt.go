@@ -1,8 +1,9 @@
 package crdt
 
 import (
-	"potionDB/src/clocksi"
+	"fmt"
 	rand "math/rand"
+	"potionDB/src/clocksi"
 	"potionDB/src/proto"
 	"time"
 
@@ -135,6 +136,8 @@ func (crdt *SetAWCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateArgum
 		return crdt.getState(updsNotYetApplied)
 	case LookupReadArguments:
 		return crdt.lookup(typedArg.Elem, updsNotYetApplied)
+	default:
+		fmt.Printf("[AWSetCrdt]Unknown read type: %+v\n", args)
 	}
 	return nil
 }

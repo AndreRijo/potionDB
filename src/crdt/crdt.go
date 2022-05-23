@@ -1,8 +1,8 @@
 package crdt
 
 import (
-	"potionDB/src/clocksi"
 	"fmt"
+	"potionDB/src/clocksi"
 	"potionDB/src/proto"
 )
 
@@ -114,3 +114,21 @@ func (crdt genericCRDT) initialize() (newCrdt genericCRDT) {
 func (crdt genericCRDT) copy() (copyCrdt genericCRDT) {
 	return genericCRDT{}
 }
+
+func SetTopKSize(size int) {
+	defaultTopKSize, defaultTopSSize = size, size
+	//PrepareTopKReply()
+}
+
+/*
+var defaultReply TopKValueState
+
+func PrepareTopKReply() {
+	scores := make([]TopKScore, defaultTopKSize)
+	selfRng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	for i := range scores {
+		id, value, data := selfRng.Int31n(100000), selfRng.Int31n(100000), make([]byte, 0)
+		scores[i] = TopKScore{Id: id, Score: value, Data: &data}
+	}
+	defaultReply = TopKValueState{Scores: scores}
+}*/

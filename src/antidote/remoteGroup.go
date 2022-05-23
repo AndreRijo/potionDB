@@ -38,6 +38,7 @@ func CreateRemoteGroupStruct(bucketsToListen []string, replicaID int16) (group *
 	if len(othersIPList) == 1 && len(othersIPList[0]) < 2 {
 		othersIPList = []string{}
 	}
+	fmt.Println("[RG]Remote conns:", othersIPList, "(size:", len(othersIPList), ")")
 
 	group = &RemoteGroup{conns: make([]*RemoteConn, len(othersIPList)), nReplicas: int16(len(othersIPList)),
 		groupChan: make(chan ReplicatorMsg, defaultListenerSize*len(othersIPList)), replicaID: replicaID, knownIPs: make(map[string]int16)}
@@ -91,7 +92,7 @@ func CreateRemoteGroupStruct(bucketsToListen []string, replicaID int16) (group *
 		group.conns[i] = reply.RemoteConn
 		fmt.Println("Connected to", othersIPList[reply.index])
 	}
-	fmt.Println("Number of conns:", len(group.conns))
+	fmt.Println("All RabbitMQ connections established. Number of conns (not counting self):", len(group.conns))
 	group.prepareMsgListener()
 	return
 }

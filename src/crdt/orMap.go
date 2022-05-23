@@ -1,8 +1,9 @@
 package crdt
 
 import (
-	"potionDB/src/clocksi"
+	"fmt"
 	rand "math/rand"
+	"potionDB/src/clocksi"
 	"potionDB/src/proto"
 	"time"
 
@@ -172,6 +173,8 @@ func (crdt *ORMapCrdt) Read(args ReadArguments, updsNotYetApplied []*UpdateArgum
 		return crdt.hasKey(updsNotYetApplied, typedArg.Key)
 	case GetValuesArguments:
 		return crdt.getValues(updsNotYetApplied, typedArg.Keys)
+	default:
+		fmt.Printf("[ORMAPCrdt]Unknown read type: %+v\n", args)
 	}
 	return nil
 }
