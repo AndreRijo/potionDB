@@ -400,7 +400,7 @@ func (crdt *TopKRmvCrdt) getTopKAddDownstreamArgs(addOp *TopKAdd) (args Downstre
 	//1) Its id is already in the Top but with a smaller score
 	//2) Its id is not in the top but it is higher than the smallestScore
 	//If an element belongs to the top, then a normal TopKAdd must be returned. Otherwise, a "TopKAdd_r" is returned.
-	if hasId && elem.Score < addOp.Score {
+	if hasId && elem.Score <= addOp.Score {
 		//1st
 		args = localArgs
 	} else if hasId {
@@ -439,7 +439,7 @@ func (crdt *TopKRmvCrdt) getTopKAddAllDownstreamArgs(addOp *TopKAddAll) (args Do
 		if add.Data == nil {
 			currElem.Data = &[]byte{}
 		}
-		if hasId && existingElem.Score < add.Score {
+		if hasId && existingElem.Score <= add.Score {
 			downAdds[nAdd] = currElem
 			nAdd++
 		} else if hasId {

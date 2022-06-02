@@ -42,6 +42,8 @@ type Timestamp interface {
 	IsConcurrent(otherTs Timestamp) (compResult bool)
 	//For two given concurrent timestamps, it applies a tiebreaker algorithm to decide if ts is smaller than otherTs.
 	IsSmallerConcurrent(otherTs Timestamp) (isSmaller bool)
+	//Returns true if the two timestamps are different in some form. Useful for quick timestamp comparisons
+	IsDifferent(otherTs Timestamp) bool
 	//Compares a position in both timestamps. This operation has no meaning if the Timestamp implementation isn't based on vector clocks or other position based system
 	//Returns concurrent if one of the clocks doesn't contain the reffered position
 	ComparePos(id int16, otherTs Timestamp) (compResult TsResult)
@@ -54,7 +56,7 @@ type Timestamp interface {
 	//Does the same as IsLowerOrEqual except that it ignores the values associated to self and id positions
 	IsLowerOrEqualExceptFor(otherTs Timestamp, self int16, id int16) (compResult bool)
 	//Returns the timestamp resulting of merging this timestamp and the argument timestamp
-	//In a vector clock, it represents keeping the highest value of each position
+	//In a vector clock, it represents keeping the highest value of each position. The current implementation creates a new timestamp.
 	Merge(otherTs Timestamp) (mergedTs Timestamp)
 	//Adds entries for all replicas in knownIDs that aren't already existent in the Timestamp. This operation only makes sense for vector clock implementations.
 	Update()
@@ -69,6 +71,8 @@ type Timestamp interface {
 	GetMapKey() (key TimestampKey)
 	//Performs a deep copy of the current timestamp and returns the copy
 	Copy() (copyTs Timestamp)
+	//Returns true if this TS happened before otherTS or, if they are concurrent, if by a total order TS should be before orderTS. Also returns true if they are equal.
+	IsLowerOrEqualTotalOrder(otherTs Timestamp) (compResult bool)
 }
 
 type ClockSiTimestamp struct {
@@ -298,6 +302,53 @@ func (ts ClockSiTimestamp) IsLower(otherTs Timestamp) (compResult bool) {
 	return foundHigher
 }
 
+func (ts ClockSiTimestamp) IsLowerOrEqualTotalOrder(otherTs Timestamp) (compResult bool) {
+	if otherTs == nil {
+		return false
+	}
+
+	otherVc := otherTs.(ClockSiTimestamp).VectorClock
+	selfVc := ts.VectorClock
+
+	foundHigher := false
+	foundLower := false
+
+	for i, selfValue := range selfVc {
+		if selfValue > otherVc[i] {
+			foundLower = true
+		} else if selfValue < otherVc[i] {
+			foundHigher = true
+		}
+	}
+
+	if !foundLower && !foundHigher {
+		//Equal
+		return true
+	}
+	if !foundLower {
+		//foundHigher = true. Thus, it is higher
+		return false
+	}
+	if !foundHigher {
+		//foundLower = true. Thus, it is lower
+		return true
+	}
+	//Concurrent. Check which one has the minimum ID that is "lower"
+	minIdLower, minIdHigher := int16(math.MaxInt16), int16(math.MaxInt16)
+	for i, selfValue := range selfVc {
+		if selfValue > otherVc[i] && minIdLower > i {
+			minIdLower = i
+		} else if selfValue < otherVc[i] && minIdHigher > i {
+			minIdHigher = i
+		}
+	}
+	if minIdLower < minIdHigher {
+		//The ID that is lower belongs to the other TS. Thus, this one is not before
+		return false
+	}
+	return true
+}
+
 func (ts ClockSiTimestamp) IsEqual(otherTs Timestamp) (compResult bool) {
 	if otherTs == nil {
 		return false
@@ -354,6 +405,14 @@ func (ts ClockSiTimestamp) GetPos(id int16) (value int64) {
 }
 
 func (ts ClockSiTimestamp) Merge(otherTs Timestamp) (mergedTs Timestamp) {
+	if otherTs == nil {
+		//Just do a copy
+		vc := make(map[int16]int64)
+		for i, value := range ts.VectorClock {
+			vc[i] = value
+		}
+		return ClockSiTimestamp{VectorClock: vc}
+	}
 	vc := make(map[int16]int64)
 	otherTsVc := otherTs.(ClockSiTimestamp).VectorClock
 
@@ -386,6 +445,19 @@ func (ts ClockSiTimestamp) IsSmallerConcurrent(otherTs Timestamp) (isSmaller boo
 	}
 
 	return isSmaller
+}
+
+func (ts ClockSiTimestamp) IsDifferent(otherTs Timestamp) bool {
+	if otherTs == nil {
+		return true
+	}
+	otherTsVc := otherTs.(ClockSiTimestamp).VectorClock
+	for id, value := range ts.VectorClock {
+		if value != otherTsVc[id] {
+			return true
+		}
+	}
+	return false
 }
 
 func (ts ClockSiTimestamp) Update() {

@@ -1,8 +1,8 @@
 package antidote
 
 import (
-	"potionDB/src/clocksi"
 	fmt "fmt"
+	"potionDB/src/clocksi"
 	"potionDB/src/shared"
 	"sync"
 )

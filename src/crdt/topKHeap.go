@@ -100,7 +100,7 @@ func (h TopHeap) Swap(i, j int) {
 func (h TopHeap) Push(value interface{}) {
 	convValue := value.(*TopKHeapElement)
 	convValue.pos = *h.nEntries
-	h.values[*h.nEntries], *h.nEntries = value.(*TopKHeapElement), *h.nEntries+1
+	h.values[*h.nEntries], *h.nEntries = convValue, *h.nEntries+1
 
 }
 
@@ -424,6 +424,14 @@ func (crdt *TopKHeapCrdt) applyRemove(op *DownstreamTopKRemove) (effect *Effect,
 
 	var eff Effect = remEffect
 	return &eff, otherDownstreamArgs
+}
+
+func (crdt *TopKHeapCrdt) applyAddAll(op *DownstreamTopKAddAll) (effect *Effect, otherDownstreamArgs DownstreamArguments) {
+	return
+}
+
+func (crdt *TopKHeapCrdt) applyRemoveAll(op *DownstreamTopKRemoveAll) (effect *Effect, otherDownstreamArgs DownstreamArguments) {
+	return
 }
 
 func (crdt *TopKHeapCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err error) {

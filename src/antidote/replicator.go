@@ -32,8 +32,9 @@ type Replicator struct {
 	replicaID  int16
 	buckets    []string
 	JoinInfo
-	allReplicaIDs  []int16           //Stores the replicaIDs of all replicas
-	initialDummyTs clocksi.Timestamp //The initial TS used in txnCache to signal that all txns are to be replicated.
+	allReplicaIDs  []int16               //Stores the replicaIDs of all replicas
+	initialDummyTs clocksi.Timestamp     //The initial TS used in txnCache to signal that all txns are to be replicated.
+	receiveHold    map[int16]TMRemoteTxn //Holds the current transaction being received for each replicaID.
 }
 
 type JoinInfo struct {
@@ -191,6 +192,7 @@ func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, buc
 				repl.txnCache[id] = cacheEntry
 			}
 			repl.replicaID = replicaID
+			repl.receiveHold = make(map[int16]TMRemoteTxn)
 
 			//Also skips the joining algorithm if there's no replica to join
 			if tools.SharedConfig.GetBoolConfig(DO_JOIN, true) && len(remoteConn.conns) > 0 {
@@ -367,11 +369,14 @@ func (repl *Replicator) sendTxns(toSend []RemoteTxn) {
 			count++
 			repl.remoteConn.SendPartTxn(&NewReplicatorRequest{PartitionID: int64(partId), SenderID: repl.replicaID, Timestamp: txn.Timestamp, Upds: upds})
 		}
-		count++
+		//count++
 		//TODO: This might not even be necessary to be sent - probably it is enough to send this when there's no upds to send.
-		repl.remoteConn.SendStableClk(txn.Timestamp.GetPos(repl.replicaID))
+		//repl.remoteConn.SendStableClk(txn.Timestamp.GetPos(repl.replicaID))
 		//fmt.Println("Sending txns")
 	}
+	//Send clock to ensure all replicas receive the latest clock
+	repl.remoteConn.SendStableClk(toSend[len(toSend)-1].Timestamp.GetPos(repl.replicaID))
+	count++
 	//endTime := time.Now().UnixNano()
 	//fmt.Printf("[REPLICATOR]Took %d ms to send txns to rabbitMQ. Total msgs sent: %d.\n", (endTime-startTime)/1000000, count)
 	tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "finished sendTxns")
@@ -390,20 +395,37 @@ func (repl *Replicator) receiveRemoteTxns() {
 func (repl *Replicator) handleRemoteRequest(remoteReq ReplicatorMsg) {
 	switch typedReq := remoteReq.(type) {
 	case *StableClock:
+		hold := repl.receiveHold[typedReq.SenderID]
+		if hold.Clk != nil {
+			repl.tm.SendRemoteMsg(hold)
+			repl.receiveHold[typedReq.SenderID] = TMRemoteTxn{}
+		}
 		repl.tm.SendRemoteMsg(TMRemoteClk{
 			ReplicaID: typedReq.SenderID,
 			StableTs:  typedReq.Ts,
 		})
 	case *NewReplicatorRequest:
-		repl.tm.SendRemoteMsg(TMRemotePartTxn{
-			ReplicaID:   typedReq.SenderID,
-			PartitionID: typedReq.PartitionID,
-			Upds:        typedReq.Upds,
-			Timestamp:   typedReq.Timestamp,
-		})
+		hold := repl.receiveHold[typedReq.SenderID]
+		if typedReq.Timestamp.IsEqual(hold.Clk) {
+			hold.Upds[typedReq.PartitionID] = typedReq.Upds
+		} else {
+			//New transaction, previous transaction is complete.
+			//If the previous txn wasn't given yet to the TM, do so now.
+			if hold.Clk != nil {
+				repl.tm.SendRemoteMsg(hold)
+			}
+			newHold := TMRemoteTxn{
+				ReplicaID: typedReq.SenderID,
+				Clk:       typedReq.Timestamp,
+				Upds:      make([][]*UpdateObjectParams, len(repl.localPartitions)),
+			}
+			newHold.Upds[typedReq.PartitionID] = typedReq.Upds
+			repl.receiveHold[typedReq.SenderID] = newHold
+		}
 	case *RemoteID:
 		repl.waitFor--
 		fmt.Println("ID received from RabbitMQ: ", typedReq)
+		repl.receiveHold[typedReq.SenderID] = TMRemoteTxn{}
 		repl.tm.SendRemoteMsg(TMReplicaID{ReplicaID: typedReq.SenderID, IP: typedReq.IP, Buckets: typedReq.Buckets})
 		if repl.waitFor == 0 {
 			repl.initialDummyTs.Update()
