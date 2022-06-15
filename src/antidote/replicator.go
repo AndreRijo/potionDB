@@ -10,6 +10,10 @@ package antidote
 //TODO: In this version of PotionDB, Join no longer needs the list of buckets - it can use the one from RemoteID.
 //However, this is a temporary solution for requesting remote objects
 
+//TODO: Replicator's algorithm could be improved.
+//Now, we could ask TM for the safe clock, and then ask Log to only send operations until that safe clock.
+//This works as every partition will have, at least, until that safe clock.
+
 import (
 	fmt "fmt"
 	"potionDB/src/clocksi"
@@ -32,9 +36,9 @@ type Replicator struct {
 	replicaID  int16
 	buckets    []string
 	JoinInfo
-	allReplicaIDs  []int16               //Stores the replicaIDs of all replicas
-	initialDummyTs clocksi.Timestamp     //The initial TS used in txnCache to signal that all txns are to be replicated.
-	receiveHold    map[int16]TMRemoteTxn //Holds the current transaction being received for each replicaID.
+	allReplicaIDs  []int16           //Stores the replicaIDs of all replicas
+	initialDummyTs clocksi.Timestamp //The initial TS used in txnCache to signal that all txns are to be replicated.
+	//receiveHold    map[int16]TMRemoteTxn //Holds the current transaction being received for each replicaID.
 }
 
 type JoinInfo struct {
@@ -49,12 +53,33 @@ type ReplicatorMsg interface {
 	getSenderID() int16
 }
 
+/*
+type ReplicatorTxn struct {
+	Clk      clocksi.Timestamp
+	Upds     map[int64][]*UpdateObjectParams
+	SenderID int16
+	TxnID    int32 //This is filled by remoteConnection.go. When receiving txns, this is used to identify when a different txn is being received.
+}
+
+type ReplicatorGroupTxn struct {
+	Txns     []RemoteTxnSlice
+	SenderID int16
+	TxnID    int32 //This is filled by remoteConnection.go. When receiving txns, this is used to identify when a different txn is being received.
+}
+
+type RemoteTxnSlice struct {
+	Txns []RemoteTxn
+	clocksi.Timestamp
+}*/
+
+/*
 type NewReplicatorRequest struct {
 	clocksi.Timestamp
 	Upds        []*UpdateObjectParams
 	SenderID    int16
 	PartitionID int64
-}
+	TxnID       int32 //This is filled by remoteConnection.go. When receiving txns, this is used to identify when a different txn is being received.
+}*/
 
 type StableClock struct {
 	SenderID int16
@@ -62,8 +87,17 @@ type StableClock struct {
 }
 
 type RemoteTxn struct {
-	clocksi.Timestamp
-	Upds map[int][]*UpdateObjectParams
+	SenderID int16
+	Clk      clocksi.Timestamp
+	Upds     map[int][]*UpdateObjectParams
+	TxnID    int32 //This is filled by remoteConnection.go. Used to identify the transactions
+}
+
+type RemoteTxnGroup struct {
+	SenderID int16
+	Txns     []RemoteTxn
+	MinTxnID int32 //This is filled by remoteConnection.go. Used to identify the transactions
+	MaxTxnID int32 //This is filled by remoteConnection.go. Used to identify the transactions
 }
 
 type RemoteID struct {
@@ -115,13 +149,34 @@ const (
 	toSendInitialSize   = 10
 	joinHoldInitialSize = 100
 	DO_JOIN             = "doJoin"
+	minTxnsToGroup      = 10   //Only groups txns for sending if it's sending at least 10 txns
+	maxTxnsPerGroup     = 1000 //To avoid creating groups too big that take a long time to transfer
+	//minTxnsToGroup      = 10  //Only groups txns for sending if it's sending at least 10 txns
+	//maxTxnsPerGroup     = 100 //To avoid creating groups too big that take a long time to transfer
 )
 
+/*
 func (req NewReplicatorRequest) getSenderID() int16 {
 	return req.SenderID
 }
 
+func (req ReplicatorTxn) getSenderID() int16 {
+	return req.SenderID
+}
+
+func (req ReplicatorGroupTxn) getSenderID() int16 {
+	return req.SenderID
+}*/
+
 func (req StableClock) getSenderID() int16 {
+	return req.SenderID
+}
+
+func (req RemoteTxn) getSenderID() int16 {
+	return req.SenderID
+}
+
+func (req RemoteTxnGroup) getSenderID() int16 {
 	return req.SenderID
 }
 
@@ -192,7 +247,7 @@ func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, buc
 				repl.txnCache[id] = cacheEntry
 			}
 			repl.replicaID = replicaID
-			repl.receiveHold = make(map[int16]TMRemoteTxn)
+			//repl.receiveHold = make(map[int16]TMRemoteTxn)
 
 			//Also skips the joining algorithm if there's no replica to join
 			if tools.SharedConfig.GetBoolConfig(DO_JOIN, true) && len(remoteConn.conns) > 0 {
@@ -242,8 +297,8 @@ func (repl *Replicator) replicateCycle() {
 		toSend := repl.preparateDataToSend()
 		if len(toSend) > 0 {
 			fmt.Println("[REPLICATOR]Sending ops.", "Number of remote txns:", len(toSend))
+			repl.sendTxns(toSend)
 		}
-		repl.sendTxns(toSend)
 		tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "finishing replicateCycle")
 
 		finish = time.Now().UnixNano()
@@ -335,7 +390,7 @@ func (repl *Replicator) preparateDataToSend() (toSend []RemoteTxn) {
 		if !foundStableClk {
 			//Safe to include the actual txn's clock in the list to send. We can remove entry from cache
 			tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "appending upds. Upds:", txnUpdates)
-			toSend = append(toSend, RemoteTxn{Timestamp: minClk, Upds: txnUpdates})
+			toSend = append(toSend, RemoteTxn{Clk: minClk, Upds: txnUpdates, SenderID: repl.replicaID})
 			tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "upds to send:", txnUpdates)
 			for id := range txnUpdates {
 				repl.txnCache[id] = repl.txnCache[id][1:]
@@ -347,18 +402,60 @@ func (repl *Replicator) preparateDataToSend() (toSend []RemoteTxn) {
 }
 
 func (repl *Replicator) sendTxns(toSend []RemoteTxn) {
-	/*
-		fmt.Print(tools.REPL_PRINT+string(repl.replicaID)+"]"+tools.DEBUG, "starting sendTxns:[")
-		for _, txn := range toSend {
-			fmt.Print("{", txn.Timestamp, "|", *txn.Upds, "},")
+
+	if len(toSend) >= minTxnsToGroup {
+		repl.sendGroupTxns(toSend)
+	} else {
+		repl.sendIndividualTxns(toSend)
+	}
+
+	//repl.sendIndividualTxns(toSend)
+	//Send clock to ensure all replicas receive the latest clock.
+	//This is also used to know that the last transaction sent has ended.
+	repl.remoteConn.SendStableClk(toSend[len(toSend)-1].Clk.GetPos(repl.replicaID))
+}
+
+func (repl *Replicator) sendIndividualTxns(toSend []RemoteTxn) {
+	fmt.Printf("[REPLICATOR]Sending txns individually (size: %d)\n", len(toSend))
+	for _, txn := range toSend {
+		repl.remoteConn.SendTxn(txn)
+	}
+}
+
+func (repl *Replicator) sendGroupTxns(toSend []RemoteTxn) {
+	fmt.Printf("[REPLICATOR]Sending txns in group (size: %d). Min: %d, max: %d\n", len(toSend), minTxnsToGroup, maxTxnsPerGroup)
+	end := 0
+	for len(toSend) > 0 {
+		end = tools.MinInt(len(toSend), maxTxnsPerGroup)
+		//start, end = currOffset, tools.MinInt(len(toSend)-currOffset, maxTxnsPerGroup)+currOffset //for txns variable
+		currTxns := toSend[:end]
+		firstClk := currTxns[0].Clk
+		for i, txn := range currTxns {
+			if !txn.Clk.IsEqualExceptForSelf(firstClk, repl.replicaID) {
+				fmt.Printf("[REPLICATOR]Clk of other replica changed. This happened at index %d. Clks. %s, %s\n", i, firstClk.ToSortedString(), txn.Clk.ToSortedString())
+				end = i
+				currTxns = currTxns[:i]
+				//This txn depends on some txn of another replica, thus better not put in this group
+				break
+			}
 		}
-		fmt.Println("]")
-	*/
-	/*
-		for _, remoteChan := range repl.remoteReps {
-			remoteChan <- ReplicatorRequest{SenderID: repl.replicaID, Txns: toSend, StableTs: stableTs}
+		if end < minTxnsToGroup/2 {
+			//Send individually, too few transactions.
+			fmt.Printf("[REPLICATOR]Sending individual in groupTxns. End: %d, min/2: %d, nTxns: %d\n", end, minTxnsToGroup, len(currTxns))
+			for _, txn := range currTxns {
+				repl.remoteConn.SendTxn(txn)
+			}
+		} else {
+			//Send the slice
+			fmt.Printf("[REPLICATOR]Sending group in groupTxns. Size: %d\n", len(currTxns))
+			repl.remoteConn.SendGroupTxn(currTxns)
 		}
-	*/
+		toSend = toSend[end:] //Hide positions that were already sent
+	}
+}
+
+/*
+func (repl *Replicator) sendTxns(toSend []RemoteTxn) {
 	//Separate each txn into partitions
 	//TODO: Batch of transactions for the same partition? Not simple due to clock updates.
 	//startTime := time.Now().UnixNano()
@@ -369,10 +466,6 @@ func (repl *Replicator) sendTxns(toSend []RemoteTxn) {
 			count++
 			repl.remoteConn.SendPartTxn(&NewReplicatorRequest{PartitionID: int64(partId), SenderID: repl.replicaID, Timestamp: txn.Timestamp, Upds: upds})
 		}
-		//count++
-		//TODO: This might not even be necessary to be sent - probably it is enough to send this when there's no upds to send.
-		//repl.remoteConn.SendStableClk(txn.Timestamp.GetPos(repl.replicaID))
-		//fmt.Println("Sending txns")
 	}
 	//Send clock to ensure all replicas receive the latest clock
 	repl.remoteConn.SendStableClk(toSend[len(toSend)-1].Timestamp.GetPos(repl.replicaID))
@@ -381,13 +474,42 @@ func (repl *Replicator) sendTxns(toSend []RemoteTxn) {
 	//fmt.Printf("[REPLICATOR]Took %d ms to send txns to rabbitMQ. Total msgs sent: %d.\n", (endTime-startTime)/1000000, count)
 	tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "finished sendTxns")
 }
+*/
+
+/*
+func (repl *Replicator) groupTxns(txns []RemoteTxn) {
+	if len(txns) < minTxnsToGroup {
+		return
+	}
+	start, end := 0, tools.MinInt(len(txns), maxTxnsPerGroup) //for txns variable
+	currTxns := txns[start:end]
+	currOffset := 0
+	firstClk := currTxns[0].Timestamp
+	for i, txn := range currTxns[1:] {
+		if !txn.IsEqualExceptForSelf(firstClk, repl.replicaID) {
+			//This txn depends on some txn of another replica, thus better not put in this group
+			currOffset = i
+			break
+		}
+	}
+	if currOffset < minTxnsToGroup/2 {
+		//Send individually
+	} else {
+		//Make a group
+		txnGroup := RemoteTxnGroup{txns: currTxns}
+	}
+}
+*/
 
 func (repl *Replicator) receiveRemoteTxns() {
 	fmt.Println("[Replicator]Ready to receive requests from RabbitMQ.")
 	for {
+		fmt.Println("[REPL]Iterating receiveRemoteTxns. Ts:", time.Now().String())
 		tools.FancyInfoPrint(tools.REPL_PRINT, repl.replicaID, "iterating receiveRemoteTxns")
 		remoteReq := repl.remoteConn.GetNextRemoteRequest()
+		fmt.Println("[REPL]Received something from RabbitMQ, handling request.")
 		repl.handleRemoteRequest(remoteReq)
+		fmt.Println("[REPL]Finish interating receiveRemoteTxns. Ts:", time.Now().String())
 	}
 }
 
@@ -395,16 +517,22 @@ func (repl *Replicator) receiveRemoteTxns() {
 func (repl *Replicator) handleRemoteRequest(remoteReq ReplicatorMsg) {
 	switch typedReq := remoteReq.(type) {
 	case *StableClock:
-		hold := repl.receiveHold[typedReq.SenderID]
+		/*hold := repl.receiveHold[typedReq.SenderID]
 		if hold.Clk != nil {
+			fmt.Println("[REPL]Sending TMRemoteTxn to TM due to clock. Ts:", time.Now().String())
 			repl.tm.SendRemoteMsg(hold)
+			fmt.Println("[REPL]Finished sending TMRemoteTxn to TM due to clock. Ts:", time.Now().String())
 			repl.receiveHold[typedReq.SenderID] = TMRemoteTxn{}
-		}
-		repl.tm.SendRemoteMsg(TMRemoteClk{
-			ReplicaID: typedReq.SenderID,
-			StableTs:  typedReq.Ts,
-		})
-	case *NewReplicatorRequest:
+		}*/
+		fmt.Println("[REPL]Sending TMRemoteClk to TM. Ts:", time.Now().String())
+		repl.tm.SendRemoteMsg(TMRemoteClk{ReplicaID: typedReq.SenderID, StableTs: typedReq.Ts})
+		fmt.Println("[REPL]Finished sending TMRemoteClk to TM. Ts:", time.Now().String())
+	case *RemoteTxn:
+		//repl.tm.SendRemoteMsg(TMRemoteTxn{ReplicaID: typedReq.SenderID, Clk: typedReq.Clk, Upds: typedReq.Upds})
+		repl.tm.SendRemoteMsg(*typedReq)
+	case *RemoteTxnGroup:
+		repl.tm.SendRemoteMsg(*typedReq)
+	/*	case *NewReplicatorRequest:
 		hold := repl.receiveHold[typedReq.SenderID]
 		if typedReq.Timestamp.IsEqual(hold.Clk) {
 			hold.Upds[typedReq.PartitionID] = typedReq.Upds
@@ -412,7 +540,9 @@ func (repl *Replicator) handleRemoteRequest(remoteReq ReplicatorMsg) {
 			//New transaction, previous transaction is complete.
 			//If the previous txn wasn't given yet to the TM, do so now.
 			if hold.Clk != nil {
+				fmt.Println("[REPL]Sending TMRemoteTxn to TM. Ts:", time.Now().String())
 				repl.tm.SendRemoteMsg(hold)
+				fmt.Println("[REPL]Finished sending TMRemoteTxn to TM. Ts:", time.Now().String())
 			}
 			newHold := TMRemoteTxn{
 				ReplicaID: typedReq.SenderID,
@@ -422,10 +552,11 @@ func (repl *Replicator) handleRemoteRequest(remoteReq ReplicatorMsg) {
 			newHold.Upds[typedReq.PartitionID] = typedReq.Upds
 			repl.receiveHold[typedReq.SenderID] = newHold
 		}
+	*/
 	case *RemoteID:
 		repl.waitFor--
 		fmt.Println("ID received from RabbitMQ: ", typedReq)
-		repl.receiveHold[typedReq.SenderID] = TMRemoteTxn{}
+		//repl.receiveHold[typedReq.SenderID] = TMRemoteTxn{}
 		repl.tm.SendRemoteMsg(TMReplicaID{ReplicaID: typedReq.SenderID, IP: typedReq.IP, Buckets: typedReq.Buckets})
 		if repl.waitFor == 0 {
 			repl.initialDummyTs.Update()

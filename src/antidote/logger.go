@@ -8,6 +8,7 @@ import (
 )
 
 /*****Logging interface*****/
+//TODO: Improve with a switch of channels (or select?). Better than use two routines with locks I think.
 
 type Logger interface {
 	//Initializes the logger belogging to partition partitionID. Must be called before any other method of the Logger.

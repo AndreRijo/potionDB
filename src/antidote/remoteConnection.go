@@ -2,39 +2,61 @@ package antidote
 
 import (
 	fmt "fmt"
+	"math"
 	"net"
+	"os"
+	"potionDB/src/clocksi"
 	"potionDB/src/proto"
 	"potionDB/src/tools"
-	"strconv"
+	"strings"
 	"time"
 
 	pb "github.com/golang/protobuf/proto"
 	"github.com/streadway/amqp"
 )
 
+//I think each connection only receives txns from one other replica? Will assume this.
 //NOTE: Each replica still receives its own messages - it just ignores them before processing
 //This might be a waste.
 //TODO: I shouldn't mix Publish and Consume on the same connection, according to this: https://godoc.org/github.com/streadway/amqp
 
 type RemoteConn struct {
-	conn             *amqp.Connection
-	sendCh           *amqp.Channel
-	recCh            <-chan amqp.Delivery
-	listenerChan     chan ReplicatorMsg
-	replicaID        int16
-	replicaString    string //Used for rabbitMQ headers in order to signal from who the msg is
-	holdOperations   map[int16]*HoldOperations
+	conn          *amqp.Connection
+	sendCh        *amqp.Channel
+	recCh         <-chan amqp.Delivery
+	listenerChan  chan ReplicatorMsg
+	replicaID     int16  //Replica ID of the server, not of the connection itself.
+	replicaString string //Used for rabbitMQ headers in order to signal from who the msg is
+	//holdOperations   map[int16]*HoldOperations
+	HoldTxn
 	nBucketsToListen int
 	buckets          map[string]struct{}
 	connID           int16 //Uniquely identifies this connection. This should not be confused with the connected replica's replicaID
+	txnCount         int32 //Used to uniquely identify the transactions when sending. It does not match TxnId and overflows are OK.
+	debugCount       int32
 }
 
 //Idea: hold operations from a replica until all operations for a partition are received.
-type HoldOperations struct {
+/*type HoldOperations struct {
 	lastRecUpds []*NewReplicatorRequest
 	partitionID int64
 	nOpsSoFar   int
+	txnID       int32
+}*/
+
+type HoldTxn struct {
+	onHold    []ReplicatorMsg //May receive up to 1 RemoteTxn/Group per bucket
+	txnID     int32
+	nReceived int
+	isGroup   bool
 }
+
+/*
+type BktOpsIdPair struct {
+	upds  map[int][]*UpdateObjectParams //Updates per partition of a bucket of one txn
+	txnID int32                         //TxnID
+}
+*/
 
 const (
 	protocol = "amqp://"
@@ -48,6 +70,7 @@ const (
 	//defaultListenerSize = 100
 	clockTopic        = "clk"
 	joinTopic         = "join"
+	groupTopicPrefix  = "g."
 	triggerTopic      = "trigger"
 	remoteIDContent   = "remoteID"
 	joinContent       = "join"
@@ -111,9 +134,12 @@ func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16
 		return nil, err
 	}
 	//The previously declared queue will receive messages from any replica that publishes updates for objects in buckets in bucketsToListen
-	//TODO: Probably remove the partition part? (i.e., the *.)
+	//bucket.* - matches anything with "bucket.(any word). * means one word, any"
+	//bucket.# - matches anything with "bucket.(any amount of words). # means 0 or more words, each separated by a dot."
 	for _, bucket := range bucketsToListen {
-		sendCh.QueueBind(replQueue.Name, "*."+bucket, exchangeName, false, nil)
+		sendCh.QueueBind(replQueue.Name, bucket, exchangeName, false, nil)
+		//For groups
+		sendCh.QueueBind(replQueue.Name, groupTopicPrefix+bucket, exchangeName, false, nil)
 		//sendCh.QueueBind(replQueue.Name, "*", exchangeName, false, nil)
 	}
 	//We also need to associate stable clocks to the queue.
@@ -150,10 +176,11 @@ func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16
 		conn:   conn,
 		recCh:  recCh,
 		//listenerChan:     make(chan ReplicatorMsg, defaultListenerSize),
-		listenerChan:     make(chan ReplicatorMsg),
-		replicaID:        replicaID,
-		replicaString:    fmt.Sprint(replicaID),
-		holdOperations:   make(map[int16]*HoldOperations),
+		listenerChan:  make(chan ReplicatorMsg),
+		replicaID:     replicaID,
+		replicaString: fmt.Sprint(replicaID),
+		//holdOperations:   make(map[int16]*HoldOperations),
+		HoldTxn:          HoldTxn{onHold: make([]ReplicatorMsg, len(bucketsToListen))},
 		nBucketsToListen: len(bucketsToListen),
 		buckets:          bucketsMap,
 		connID:           connID,
@@ -196,6 +223,137 @@ func deleteRabbitMQStructures(ch *amqp.Channel) {
 	ch.ExchangeDelete(exchangeName, false, false)
 }
 
+/*
+type groupReplicateInfo struct {
+	bucketOps map[string][]map[int][]*UpdateObjectParams
+
+}*/
+
+func (remote *RemoteConn) SendGroupTxn(txns []RemoteTxn) {
+	currCount := remote.txnCount
+	for i := range txns {
+		txns[i].TxnID = currCount
+		currCount++
+	}
+
+	//TODO: These buffers could be re-used, as the buckets and max size of a group txn is known
+	bucketOps := make(map[string][]RemoteTxn)
+	pos := make(map[string]*int)
+	for bkt := range remote.buckets {
+		bucketOps[bkt] = make([]RemoteTxn, len(txns))
+		pos[bkt] = new(int)
+	}
+	var currTxnBuckets map[string]map[int][]*UpdateObjectParams
+	for _, txn := range txns {
+		currTxnBuckets = remote.txnToBuckets(txn)
+		for bkt, partUpds := range currTxnBuckets {
+			bucketOps[bkt][*pos[bkt]] = RemoteTxn{SenderID: txn.SenderID, Clk: txn.Clk, TxnID: txn.TxnID, Upds: partUpds}
+			*pos[bkt]++
+		}
+	}
+
+	for bkt, bktTxns := range bucketOps {
+		if *pos[bkt] > 0 {
+			protobuf := createProtoReplicateGroupTxn(remote.replicaID, txns, bktTxns[:*pos[bkt]])
+			data, err := pb.Marshal(protobuf)
+			if err != nil {
+				fmt.Println("[RC]Error marshalling ProtoReplicateGroupTxn proto. Protobuf:", *protobuf)
+				os.Exit(0)
+			}
+			fmt.Printf("[RC%d]Sending group txns with IDs %d-%d for bucket %s with len %d.\n", remote.connID,
+				remote.txnCount, remote.txnCount+int32(len(txns)), bkt, len(bktTxns))
+			//remote.sendCh.Publish(exchangeName, strconv.FormatInt(int64(remote.txnCount), 10)+"."+bkt, false, false, amqp.Publishing{CorrelationId: remote.replicaString, Body: data})
+			remote.sendCh.Publish(exchangeName, groupTopicPrefix+bkt, false, false, amqp.Publishing{CorrelationId: remote.replicaString, Body: data})
+		}
+	}
+	remote.txnCount += int32(len(txns))
+}
+
+/*
+func (remote *RemoteConn) SendGroupTxn(txns []RemoteTxn) {
+	bucketOps := make(map[string][]map[int][]*UpdateObjectParams) //bucket -> txn -> part -> upds
+	for bkt := range remote.buckets {
+		bucketOps[bkt] = make([]map[int][]*UpdateObjectParams, len(txns))
+	}
+	//var currTxnBuckets map[string]BktOpsIdPair
+	var currTxnBuckets map[string]map[int][]*UpdateObjectParams
+	for i, txn := range txns {
+		currTxnBuckets = remote.txnToBuckets(txn)
+		for bkt, partUpds := range currTxnBuckets {
+			bucketOps[bkt][i] = partUpds
+		}
+	}
+
+	for bkt, bktTxns := range bucketOps {
+		protobuf := createProtoReplicateGroupTxn(remote.replicaID, txns, bktTxns, remote.txnCount)
+		data, err := pb.Marshal(protobuf)
+		if err != nil {
+			fmt.Println("[RC]Error marshalling ProtoReplicateGroupTxn proto. Protobuf:", *protobuf)
+			os.Exit(0)
+		}
+		fmt.Printf("[RC%d]Sending group txns for bucket %s with len %d.\n", remote.connID, bkt, len(bktTxns))
+		//remote.sendCh.Publish(exchangeName, strconv.FormatInt(int64(remote.txnCount), 10)+"."+bkt, false, false, amqp.Publishing{CorrelationId: remote.replicaString, Body: data})
+		remote.sendCh.Publish(exchangeName, groupTopicPrefix+bkt, false, false, amqp.Publishing{CorrelationId: remote.replicaString, Body: data})
+	}
+	remote.txnCount += int32(len(txns))
+}
+*/
+
+func (remote *RemoteConn) SendTxn(txn RemoteTxn) {
+	txn.TxnID = remote.txnCount
+	//First, get the txn separated in buckets and, for each bucket, in partitions
+	bucketOps := remote.txnToBuckets(txn)
+	//Now, build the protos
+	for bucket, upds := range bucketOps {
+		protobuf := createProtoReplicateTxn(remote.replicaID, txn.Clk, upds, remote.txnCount)
+		data, err := pb.Marshal(protobuf)
+		if err != nil {
+			remote.checkProtoError(err, protobuf, upds)
+			os.Exit(0)
+		}
+		fmt.Printf("[RC%d]Sending individual txn %d for bucket %s.\n", remote.connID, remote.txnCount, bucket)
+		//remote.sendCh.Publish(exchangeName, strconv.FormatInt(int64(remote.txnCount), 10)+"."+bucket, false, false, amqp.Publishing{CorrelationId: remote.replicaString, Body: data})
+		remote.sendCh.Publish(exchangeName, bucket, false, false, amqp.Publishing{CorrelationId: remote.replicaString, Body: data})
+	}
+	remote.txnCount++
+}
+
+func (remote *RemoteConn) txnToBuckets(txn RemoteTxn) (bucketOps map[string]map[int][]*UpdateObjectParams) {
+	//We need to send one message per bucket. Note that we're sending operations out of order here - this might be relevant later on!
+	//(the order for operations in the same bucket is kept however)
+	//ProtoReplicateTxn: one txn; slice of partitions
+	//ProtoNewRemoteTxn: one txn of a partition.
+	//Re-arrange the operations into groups of buckets, with each bucket having entries for each partition
+	bucketOps = make(map[string]map[int][]*UpdateObjectParams) //bucket -> part -> upds
+	for partID, partUpds := range txn.Upds {
+		for _, upd := range partUpds {
+			entry, hasEntry := bucketOps[upd.KeyParams.Bucket]
+			if !hasEntry {
+				entry = make(map[int][]*UpdateObjectParams)
+				bucketOps[upd.KeyParams.Bucket] = entry
+			}
+			partEntry, hasEntry := entry[partID]
+			if !hasEntry {
+				partEntry = make([]*UpdateObjectParams, 0, len(partUpds))
+			}
+			partEntry = append(partEntry, upd)
+			entry[partID] = partEntry
+		}
+	}
+	return
+}
+
+func (remote *RemoteConn) checkProtoError(err error, msg pb.Message, upds map[int][]*UpdateObjectParams) {
+	switch typedProto := msg.(type) {
+	case *proto.ProtoReplicateTxn:
+		fmt.Println("[RC]Error creating ProtoReplicateTxn.")
+		fmt.Println(*typedProto)
+		fmt.Println(upds)
+		fmt.Println("[RC]Timestamp:", (clocksi.ClockSiTimestamp{}.FromBytes(typedProto.GetTimestamp())).ToSortedString())
+	}
+}
+
+/*
 func (remote *RemoteConn) SendPartTxn(request *NewReplicatorRequest) {
 	tools.FancyDebugPrint(tools.REMOTE_PRINT, remote.replicaID, "Sending remote request:", *request)
 	if len(request.Upds) > 0 {
@@ -216,7 +374,7 @@ func (remote *RemoteConn) SendPartTxn(request *NewReplicatorRequest) {
 	}
 
 	for bucket, upds := range bucketOps {
-		protobuf := createProtoReplicatePart(request.SenderID, request.PartitionID, request.Timestamp, upds)
+		protobuf := createProtoReplicatePart(request.SenderID, request.PartitionID, request.Timestamp, upds, remote.txnCount)
 		data, err := pb.Marshal(protobuf)
 		//_, err := pb.Marshal(protobuf)
 		if err != nil {
@@ -230,10 +388,14 @@ func (remote *RemoteConn) SendPartTxn(request *NewReplicatorRequest) {
 			}
 		}
 		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Sending bucket ops to topic:", strconv.FormatInt(request.PartitionID, 10)+"."+bucket)
+		fmt.Printf("[RC][%d]Sending txn at %s\n", remote.debugCount, time.Now().String())
 		remote.sendCh.Publish(exchangeName, strconv.FormatInt(request.PartitionID, 10)+"."+bucket, false, false, amqp.Publishing{CorrelationId: remote.replicaString, Body: data})
 		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Finished sending bucket ops to topic:", strconv.FormatInt(request.PartitionID, 10)+"."+bucket)
+		remote.debugCount++
 	}
+	remote.txnCount++
 }
+*/
 
 func (remote *RemoteConn) SendStableClk(ts int64) {
 	tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Sending stable clk:", ts)
@@ -262,9 +424,10 @@ func (remote *RemoteConn) SendTrigger(trigger AutoUpdate, isGeneric bool) {
 //This should not be called externally.
 func (remote *RemoteConn) startReceiver() {
 	fmt.Println("[RC] Receiver started")
+	nTxnReceived := 0
 	for data := range remote.recCh {
 		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Received something!")
-
+		fmt.Printf("[RC%d]Receiving something (%s) at: %s\n", remote.connID, data.RoutingKey, time.Now().String())
 		switch data.RoutingKey {
 		case clockTopic:
 			remote.handleReceivedStableClock(data.Body)
@@ -273,13 +436,149 @@ func (remote *RemoteConn) startReceiver() {
 		case triggerTopic:
 			remote.handleReceivedTrigger(data.Body)
 		default:
-			//Ops have a topic based on the partition ID + bucket
-			remote.handleReceivedOps(data.Body)
+			if strings.HasPrefix(data.RoutingKey, groupTopicPrefix) {
+				//Group
+				remote.handleReceivedGroupOps(data.Body)
+			} else {
+				remote.handleReceivedOps(data.Body)
+			}
+			nTxnReceived++
 		}
+		fmt.Printf("[RC%d]Finished receiving something at: %s\n", remote.connID, time.Now().String())
 		//}
 	}
 }
 
+func (remote *RemoteConn) handleReceivedGroupOps(data []byte) {
+	protobuf := &proto.ProtoReplicateGroupTxn{}
+	err := pb.Unmarshal(data, protobuf)
+	if err != nil {
+		fmt.Println("[RC][ERROR]Failed to decode bytes of received ProtoReplicateGroupTxn. Error:", err)
+		os.Exit(0)
+	}
+	bktGroup := protoToRemoteTxnGroup(protobuf)
+	fmt.Printf("[RC%d]Received txn group %d-%d with size %d\n", remote.connID, bktGroup.MinTxnID, bktGroup.MaxTxnID, len(bktGroup.Txns))
+	if bktGroup.MinTxnID != remote.txnID {
+		remote.sendMerged()
+		remote.createHold(bktGroup.MinTxnID)
+	}
+	remote.storeTxn(bktGroup, true)
+}
+
+func (remote *RemoteConn) handleReceivedOps(data []byte) {
+	protobuf := &proto.ProtoReplicateTxn{}
+	err := pb.Unmarshal(data, protobuf)
+	if err != nil {
+		fmt.Println("[RC][ERROR]Failed to decode bytes of received ProtoReplicateTxn. Error:", err)
+		os.Exit(0)
+	}
+	//Each transaction must be hold until we receive all buckets
+	//This is identified by receiving another transaction or a clock.
+	bktTxn := protoToRemoteTxn(protobuf)
+	fmt.Printf("[RC%d]Received txn %d\n", remote.connID, bktTxn.TxnID)
+	if bktTxn.TxnID != remote.txnID {
+		//Need to send the previous txn that is now complete
+		remote.sendMerged()
+		remote.createHold(bktTxn.TxnID)
+	}
+	remote.storeTxn(bktTxn, false)
+}
+
+func (remote *RemoteConn) sendMerged() {
+	if remote.nReceived == 0 {
+		//Nothing to send. This will happen after a clock is received.
+		return
+	}
+	if remote.isGroup {
+		remote.listenerChan <- remote.getMergedTxnGroup()
+	} else {
+		remote.listenerChan <- remote.getMergedTxn()
+	}
+}
+
+func (remote *RemoteConn) getMergedTxn() (merged *RemoteTxn) {
+	merged = &RemoteTxn{}
+	merged.Upds = make(map[int][]*UpdateObjectParams)
+	var currReq *RemoteTxn
+	fmt.Printf("[RC%d]Merging txn. TxnID: %d; nReceived: %d, isGroup: %t. Msgs: %v\n",
+		remote.connID, remote.txnID, remote.nReceived, remote.isGroup, remote.onHold)
+	for _, msg := range remote.onHold[:remote.nReceived] {
+		currReq = msg.(*RemoteTxn)
+		for partID, partUpds := range currReq.Upds {
+			merged.Upds[partID] = append(merged.Upds[partID], partUpds...)
+		}
+	}
+	merged.SenderID, merged.Clk = currReq.SenderID, currReq.Clk
+	return
+}
+
+func (remote *RemoteConn) getMergedTxnGroup() (merged *RemoteTxnGroup) {
+
+	merged = &RemoteTxnGroup{}
+	convReqs := make([]*RemoteTxnGroup, remote.nReceived)
+	pos := make([]int, remote.nReceived)
+	for i, req := range remote.onHold[:remote.nReceived] {
+		convReqs[i] = req.(*RemoteTxnGroup)
+	}
+
+	firstGroup := convReqs[0]
+	merged.Txns, merged.SenderID = make([]RemoteTxn, 0, len(firstGroup.Txns)), firstGroup.SenderID
+	merged.MinTxnID, merged.MaxTxnID = firstGroup.MinTxnID, firstGroup.MaxTxnID
+
+	currID, maxID := firstGroup.MinTxnID, firstGroup.MaxTxnID
+	currMergedUpds := make(map[int][]*UpdateObjectParams)
+	var currRemoteTxn RemoteTxn
+	var currClk clocksi.Timestamp
+	potencialSkip := int32(math.MaxInt32) //If for all entries the nextID is bigger than currID, we can jump to the minimum on next iteration.
+
+	fmt.Printf("[RC%d]Merging txn group. TxnID: %d; nReceived: %d, isGroup: %t, MinID: %d, MaxID: %d, Msgs: %v\n",
+		remote.connID, remote.txnID, remote.nReceived, remote.isGroup, currID, maxID, remote.onHold[:remote.nReceived])
+	for currID <= maxID {
+		//fmt.Printf("[RC%d]Outer cycle. CurrID: %d\n", remote.connID, currID)
+		for i, group := range convReqs {
+			if pos[i] < len(group.Txns) { //If this is false, it means we already processed all txns for this bucket.
+				//fmt.Printf("[RC%d]Inner cycle. Index: %d. SenderID: %d, MinTxnID: %d, MaxTxnID: %d, Len of ops: %d\n",
+				//remote.connID, i, group.SenderID, group.MinTxnID, group.MaxTxnID, len(group.Txns))
+				currRemoteTxn = group.Txns[pos[i]]
+				if currRemoteTxn.TxnID == currID {
+					//Right txn.
+					for partID, partUpds := range currRemoteTxn.Upds {
+						currMergedUpds[partID] = append(currMergedUpds[partID], partUpds...)
+					}
+					currClk = currRemoteTxn.Clk
+					pos[i]++
+				} else {
+					//Ignore. Mark it as a potencial new minimum
+					potencialSkip = tools.MinInt32(currRemoteTxn.TxnID, potencialSkip)
+				}
+			}
+		}
+		if len(currMergedUpds) > 0 {
+			merged.Txns = append(merged.Txns, RemoteTxn{SenderID: merged.SenderID, Clk: currClk, Upds: currMergedUpds, TxnID: currID})
+			currID++
+			currMergedUpds = make(map[int][]*UpdateObjectParams)
+		} else {
+			//There may be no update for the txn, as the txn may only concern buckets not locally replicated.
+			//In this case we found what's the next minID, can skip to it
+			//As an intended side-effect, if all groups are already full processed, the cycle will terminate as currID will be maxInt32.
+			currID = potencialSkip
+		}
+		potencialSkip = math.MaxInt32
+	}
+	fmt.Printf("[RC%d]Finished txn group merge. Size: %d\n", remote.connID, len(merged.Txns))
+	return
+}
+
+func (remote *RemoteConn) storeTxn(msg ReplicatorMsg, isGroup bool) {
+	remote.onHold[remote.nReceived], remote.isGroup = msg, isGroup
+	remote.nReceived++
+}
+
+func (remote *RemoteConn) createHold(txnID int32) {
+	remote.txnID, remote.nReceived = txnID, 0
+}
+
+/*
 func (remote *RemoteConn) handleReceivedOps(data []byte) {
 	protobuf := &proto.ProtoReplicatePart{}
 	err := pb.Unmarshal(data, protobuf)
@@ -299,7 +598,7 @@ func (remote *RemoteConn) handleReceivedOps(data []byte) {
 			//Initial case
 			tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Initial case - Creating hold for remote ops.")
 			remote.holdOperations[request.SenderID] = remote.buildHoldOperations(request)
-		} else if holdOps.partitionID == request.PartitionID {
+		} else if holdOps.txnID == request.TxnID {
 			//Hold the received operations
 			tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Adding remote ops to hold.")
 			holdOps.lastRecUpds = append(holdOps.lastRecUpds, request)
@@ -317,6 +616,7 @@ func (remote *RemoteConn) handleReceivedOps(data []byte) {
 	}
 	//tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "My replicaID:", remote.replicaID, "senderID:", request.SenderID)
 }
+*/
 
 func (remote *RemoteConn) handleReceivedStableClock(data []byte) {
 	protobuf := &proto.ProtoStableClock{}
@@ -330,17 +630,22 @@ func (remote *RemoteConn) handleReceivedStableClock(data []byte) {
 		fmt.Println("[RC]Received clock from self - is localrabbitmq correctly configured?")
 		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Ignored received stableClock as it was sent by myself.")
 	} else {
-		//We also need to send a request with the last partition ops, if there's any
-		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Processing received stableClock.")
-		holdOperations, hasOps := remote.holdOperations[clkReq.SenderID]
-		if hasOps {
-			tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Merging previous requests before sending stableClock to replicator.")
-			partReq := remote.getMergedReplicatorRequest(holdOperations, clkReq.SenderID)
-			remote.listenerChan <- partReq
-		} else {
-			tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "No previous request.")
-		}
-		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Sending stableClock to replicator.")
+		/*
+			//We also need to send a request with the last partition ops, if there's any
+			tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Processing received stableClock.")
+			holdOperations, hasOps := remote.holdOperations[clkReq.SenderID]
+			if hasOps {
+				tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Merging previous requests before sending stableClock to replicator.")
+				partReq := remote.getMergedReplicatorRequest(holdOperations, clkReq.SenderID)
+				remote.listenerChan <- partReq
+			} else {
+				tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "No previous request.")
+			}
+			tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Sending stableClock to replicator.")
+			remote.listenerChan <- clkReq
+		*/
+		remote.sendMerged()
+		remote.createHold(0)
 		remote.listenerChan <- clkReq
 	}
 }
@@ -372,6 +677,7 @@ func (remote *RemoteConn) SendTrigger(trigger AutoUpdate, isGeneric bool) {
 }
 */
 
+/*
 func (remote *RemoteConn) getMergedReplicatorRequest(holdOps *HoldOperations, replicaID int16) (request *NewReplicatorRequest) {
 	tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Merging received replicator requests")
 	request = &NewReplicatorRequest{
@@ -379,6 +685,7 @@ func (remote *RemoteConn) getMergedReplicatorRequest(holdOps *HoldOperations, re
 		SenderID:    replicaID,
 		Timestamp:   holdOps.lastRecUpds[0].Timestamp,
 		Upds:        make([]*UpdateObjectParams, 0, holdOps.nOpsSoFar),
+		TxnID:       holdOps.txnID,
 	}
 	for _, reqs := range holdOps.lastRecUpds {
 		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Merging upds:", reqs.Upds)
@@ -394,12 +701,14 @@ func (remote *RemoteConn) buildHoldOperations(request *NewReplicatorRequest) (ho
 		lastRecUpds: make([]*NewReplicatorRequest, 1, remote.nBucketsToListen),
 		partitionID: request.PartitionID,
 		nOpsSoFar:   len(request.Upds),
+		txnID:       request.TxnID,
 	}
 	holdOps.lastRecUpds[0] = request
 	tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Hold after creation:", *holdOps)
 	tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Ops of request added to hold:", *holdOps.lastRecUpds[0])
 	return
 }
+*/
 
 func (remote *RemoteConn) GetNextRemoteRequest() (request ReplicatorMsg) {
 	//Wait until all operations for a partition arrive. We can detect this in two ways:

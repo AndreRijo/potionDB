@@ -125,8 +125,18 @@ func (group *RemoteGroup) AddReplica(ip string, bucketsToListen []string, joinin
 	return slot
 }
 
+/*
 func (group *RemoteGroup) SendPartTxn(request *NewReplicatorRequest) {
 	group.ourConn.SendPartTxn(request)
+}
+*/
+
+func (group *RemoteGroup) SendGroupTxn(txns []RemoteTxn) {
+	group.ourConn.SendGroupTxn(txns)
+}
+
+func (group *RemoteGroup) SendTxn(txn RemoteTxn) {
+	group.ourConn.SendTxn(txn)
 }
 
 func (group *RemoteGroup) SendStableClk(ts int64) {

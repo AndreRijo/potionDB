@@ -55,6 +55,8 @@ type Timestamp interface {
 	GetPos(id int16) (value int64)
 	//Does the same as IsLowerOrEqual except that it ignores the values associated to self and id positions
 	IsLowerOrEqualExceptFor(otherTs Timestamp, self int16, id int16) (compResult bool)
+	//Does the same as isEqual except it ignores the value associated to self
+	IsEqualExceptForSelf(otherTs Timestamp, self int16) (isEqual bool)
 	//Returns the timestamp resulting of merging this timestamp and the argument timestamp
 	//In a vector clock, it represents keeping the highest value of each position. The current implementation creates a new timestamp.
 	Merge(otherTs Timestamp) (mergedTs Timestamp)
@@ -67,6 +69,8 @@ type Timestamp interface {
 	FromBytes(bytes []byte) (newTs Timestamp)
 	//Useful for debugging purposes
 	ToString() (tsString string)
+	//Also useful for debugging purposes
+	ToSortedString() (tsString string)
 	//Gets a representation of this clock that is safe to use in GO maps
 	GetMapKey() (key TimestampKey)
 	//Performs a deep copy of the current timestamp and returns the copy
@@ -274,6 +278,25 @@ func (ts ClockSiTimestamp) IsLowerOrEqualExceptFor(otherTs Timestamp, self int16
 	for i, selfValue := range selfVc {
 		if i != id && i != self {
 			if selfValue > otherVc[i] {
+				return false
+			}
+		}
+	}
+
+	return true
+}
+
+func (ts ClockSiTimestamp) IsEqualExceptForSelf(otherTs Timestamp, self int16) (isEqual bool) {
+	if otherTs == nil {
+		return false
+	}
+
+	otherVc := otherTs.(ClockSiTimestamp).VectorClock
+	selfVc := ts.VectorClock
+
+	for i, selfValue := range selfVc {
+		if i != self {
+			if selfValue != otherVc[i] {
 				return false
 			}
 		}
@@ -527,6 +550,27 @@ func (ts ClockSiTimestamp) ToString() (tsString string) {
 		builder.WriteString(fmt.Sprint(id))
 		builder.WriteString(":")
 		builder.WriteString(fmt.Sprint(value))
+		builder.WriteString(",")
+	}
+	builder.WriteString("]}")
+	return builder.String()
+}
+
+func (ts ClockSiTimestamp) ToSortedString() (tsString string) {
+	//Need to ensure this is written in order, since go randomizes map iteration order
+	keys := make([]int16, len(ts.VectorClock))
+	i := 0
+	for key := range ts.VectorClock {
+		keys[i] = key
+		i++
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	var builder strings.Builder
+	builder.WriteString("{[")
+	for _, key := range keys {
+		builder.WriteString(fmt.Sprint(key))
+		builder.WriteString(":")
+		builder.WriteString(fmt.Sprint(ts.VectorClock[key]))
 		builder.WriteString(",")
 	}
 	builder.WriteString("]}")

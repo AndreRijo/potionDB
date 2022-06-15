@@ -12,6 +12,26 @@ message ProtoReplicatePart {
     required int32 senderID = 1;
     required ProtoRemoteTxn txn = 2;
     required int64 partitionID = 3;
+    required int32 txnID = 4;       //Note: this ID is not the actual txnID, just an ID used to distinguish different txns
+}
+
+message ProtoReplicateGroupTxn {
+    required int32 senderID = 1;
+    repeated ProtoReplicateTxn txns = 2;
+    required int32 minTxnID = 3;
+    required int32 maxTxnID = 4;
+}
+
+message ProtoReplicateTxn {
+    required int32 senderID = 1;
+    required bytes timestamp = 2;
+    repeated ProtoNewRemoteTxn part = 3;       //One per partition in the txn
+    required int32 txnID = 4;
+}
+
+message ProtoNewRemoteTxn {
+    repeated ProtoDownstreamUpd upds = 1;
+    required int64 partitionID = 2;
 }
 
 message ProtoRemoteTxn {
