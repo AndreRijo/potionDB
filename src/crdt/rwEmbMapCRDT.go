@@ -26,7 +26,7 @@ const (
 )
 
 type RWEmbMapCrdt struct {
-	*genericInversibleCRDT
+	CRDTVM
 	//entries RWEmbCRDT
 	entries   map[string]CRDT
 	removes   map[string]map[int16]*markedTimestamp //replicaID -> (clk value, mark)
@@ -174,10 +174,10 @@ func (args EmbMapPartialArguments) GetREADType() proto.READType { return proto.R
 //Note: crdt can (and most often will be) nil
 func (crdt *RWEmbMapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
 	crdt = &RWEmbMapCrdt{
-		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
-		entries:               make(map[string]CRDT),
-		removes:               make(map[string]map[int16]*markedTimestamp),
-		rmvClock:              clocksi.NewClockSiTimestamp(),
+		CRDTVM:   (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete),
+		entries:  make(map[string]CRDT),
+		removes:  make(map[string]map[int16]*markedTimestamp),
+		rmvClock: clocksi.NewClockSiTimestamp(),
 		//rmvClock:              clocksi.NewClockSiTimestamp(replicaID),
 		replicaID: replicaID,
 	}
@@ -187,7 +187,7 @@ func (crdt *RWEmbMapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16
 
 //Used to initialize when building a CRDT from a remote snapshot
 func (crdt *RWEmbMapCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID int16) (sameCRDT *RWEmbMapCrdt) {
-	crdt.genericInversibleCRDT, crdt.replicaID = (&genericInversibleCRDT{}).initialize(startTs), replicaID
+	crdt.CRDTVM, crdt.replicaID = (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete), replicaID
 	return crdt
 }
 
@@ -755,11 +755,11 @@ func (crdt *RWEmbMapCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, e
 
 func (crdt *RWEmbMapCrdt) Copy() (copyCRDT InversibleCRDT) {
 	newCrdt := RWEmbMapCrdt{
-		genericInversibleCRDT: crdt.genericInversibleCRDT.copy(),
-		entries:               make(map[string]CRDT),
-		removes:               make(map[string]map[int16]*markedTimestamp),
-		rmvClock:              crdt.rmvClock.Copy(),
-		replicaID:             crdt.replicaID,
+		CRDTVM:    crdt.CRDTVM.copy(),
+		entries:   make(map[string]CRDT),
+		removes:   make(map[string]map[int16]*markedTimestamp),
+		rmvClock:  crdt.rmvClock.Copy(),
+		replicaID: crdt.replicaID,
 	}
 	for key, embCrdt := range crdt.entries {
 		newCrdt.entries[key] = embCrdt.(InversibleCRDT).Copy()
@@ -780,7 +780,7 @@ func (crdt *RWEmbMapCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	//There's also an opportunity to do so here with multiple goroutines, but that wouldn't be complete
 	//and would recalculate old states of CRDTs that were deleted in the past and thus unecessary.
 	crdt.keysToRebuild = make(map[string]struct{})
-	crdt.genericInversibleCRDT.rebuildCRDTToVersion(targetTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete)
+	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
 func (crdt *RWEmbMapCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {

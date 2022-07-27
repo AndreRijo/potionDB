@@ -597,7 +597,7 @@ func (part *partition) handleRequest(request MaterializerRequest) {
 
 func (part *partition) handleMatRead(args MatReadArgs) {
 	readLatest := part.canReadLatest(args.Timestamp)
-	obj := part.getObject(args.KeyParams)
+	obj := part.getObject(args.KeyParams, args.Timestamp)
 	objPending := part.getObjPendingOps(args.KeyParams, args.TransactionId)
 	args.ReplyChan <- part.getState(readLatest, obj, args.ReadArgs, args.Timestamp, objPending)
 }
@@ -605,7 +605,7 @@ func (part *partition) handleMatRead(args MatReadArgs) {
 func (part *partition) handleMatStaticRead(args MatStaticReadArgs) {
 	//Static read does not need to check for pending ops
 	readLatest := part.canReadLatest(args.Timestamp)
-	obj := part.getObject(args.KeyParams)
+	obj := part.getObject(args.KeyParams, args.Timestamp)
 	args.ReplyChan <- part.getState(readLatest, obj, args.ReadArgs, args.Timestamp, nil)
 }
 
@@ -740,7 +740,7 @@ func (part *partition) applyUpdates(updates []*UpdateObjectParams, commitClk clo
 			continue
 		}
 
-		obj = part.getObjectForUpd(hashKey, upd.CrdtType)
+		obj = part.getObjectForUpd(hashKey, upd.CrdtType, commitClk)
 		//Due to non-uniform CRDTs, the downstream args might be noop (op with no effect/doesn't need to be propagated yet)
 		//Some "normal" CRDTs have also be optimized to do the same (e.g., setAWCrdt when removing element that doesn't exist)
 		downArgs := obj.Update(*upd.UpdateArgs)
@@ -861,7 +861,7 @@ func (part *partition) applyRemoteUpds(args MatRemoteTxn, newDownstream []*Updat
 	var obj VersionManager
 	for _, upd := range args.Upds {
 		hashKey = getHash(getCombinedKey(upd.KeyParams))
-		obj = part.getObjectForUpd(hashKey, upd.CrdtType)
+		obj = part.getObjectForUpd(hashKey, upd.CrdtType, args.Timestamp)
 		//TODO: Update this in order to avoid forced cast
 		var generatedDownstream crdt.UpdateArguments = obj.Downstream(args.Timestamp, (*upd.UpdateArgs).(crdt.DownstreamArguments))
 		//non-uniform CRDTs may generate downstream updates when applying remote ops. We'll "commit" those upds with the stable clock
@@ -906,20 +906,20 @@ func (part *partition) handleMatReset(args MatResetArgs) {
 
 //Generic helper functions
 
-func (part *partition) getObject(keyParams KeyParams) VersionManager {
+func (part *partition) getObject(keyParams KeyParams, clk clocksi.Timestamp) VersionManager {
 	hashKey := getHash(getCombinedKey(keyParams))
 	obj, hasKey := part.db[hashKey]
 	if !hasKey {
-		obj = part.initializeVersionManager(keyParams.CrdtType)
+		obj = part.initializeVersionManager(keyParams.CrdtType, clk)
 	}
 	return obj
 }
 
 //Also stores the object if non-existent
-func (part *partition) getObjectForUpd(hashKey uint64, crdtType proto.CRDTType) VersionManager {
+func (part *partition) getObjectForUpd(hashKey uint64, crdtType proto.CRDTType, clk clocksi.Timestamp) VersionManager {
 	obj, hasKey := part.db[hashKey]
 	if !hasKey {
-		obj = part.initializeVersionManager(crdtType)
+		obj = part.initializeVersionManager(crdtType, clk)
 		part.db[hashKey] = obj
 	}
 	return obj
@@ -940,11 +940,10 @@ func (part *partition) getObjPendingOps(keyParams KeyParams, txnId TransactionId
 	return
 }
 
-func (part *partition) initializeVersionManager(crdtType proto.CRDTType) (newVM VersionManager) {
-	//For now, all CRDTs use the same version manager
+func (part *partition) initializeVersionManager(crdtType proto.CRDTType, clk clocksi.Timestamp) (newVM VersionManager) {
 	crdt := part.initializeCrdt(crdtType)
-	tmpVM := (InverseOpVM{}).Initialize(crdt)
-	return &tmpVM
+	//Variable defined in versionManager.go
+	return BaseVM.Initialize(crdt, clk)
 }
 
 func (part *partition) initializeCrdt(crdtType proto.CRDTType) (newCrdt crdt.CRDT) {

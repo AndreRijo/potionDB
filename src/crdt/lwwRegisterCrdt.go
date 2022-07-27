@@ -11,7 +11,7 @@ import (
 
 //Note: Implements both CRDT and InversibleCRDT
 type LwwRegisterCrdt struct {
-	*genericInversibleCRDT
+	CRDTVM
 	value          interface{}
 	ts             int64
 	replicaID      int16
@@ -54,17 +54,17 @@ func (args DownstreamSetValue) MustReplicate() bool { return true }
 //Note: crdt can (and most often will be) nil
 func (crdt *LwwRegisterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
 	return &LwwRegisterCrdt{
-		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
-		value:                 "",
-		ts:                    0,
-		replicaID:             replicaID,
-		localReplicaID:        replicaID,
+		CRDTVM:         (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete),
+		value:          "",
+		ts:             0,
+		replicaID:      replicaID,
+		localReplicaID: replicaID,
 	}
 }
 
 //Used to initialize when building a CRDT from a remote snapshot
 func (crdt *LwwRegisterCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID int16) (sameCRDT *LwwRegisterCrdt) {
-	crdt.genericInversibleCRDT, crdt.localReplicaID = (&genericInversibleCRDT{}).initialize(startTs), replicaID
+	crdt.CRDTVM, crdt.localReplicaID = (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete), replicaID
 	return crdt
 }
 
@@ -111,17 +111,17 @@ func (crdt *LwwRegisterCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool
 
 func (crdt *LwwRegisterCrdt) Copy() (copyCRDT InversibleCRDT) {
 	newCRDT := LwwRegisterCrdt{
-		genericInversibleCRDT: crdt.genericInversibleCRDT.copy(),
-		value:                 crdt.value,
-		ts:                    crdt.ts,
-		replicaID:             crdt.replicaID,
+		CRDTVM:    crdt.CRDTVM.copy(),
+		value:     crdt.value,
+		ts:        crdt.ts,
+		replicaID: crdt.replicaID,
 	}
 	return &newCRDT
 }
 
 func (crdt *LwwRegisterCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	//TODO: Might be worth it to make one specific for registers
-	crdt.genericInversibleCRDT.rebuildCRDTToVersion(targetTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete)
+	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
 func (crdt *LwwRegisterCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {

@@ -33,7 +33,7 @@ For a given id:
 //TODO: Might need to rethink "add" due to negative values in nonProp.
 
 type TopSumCrdt struct {
-	*genericInversibleCRDT
+	CRDTVM
 
 	//Max number of elements that can be in top-K
 	maxElems int
@@ -202,12 +202,12 @@ func (crdt *TopSumCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) 
 
 func (crdt *TopSumCrdt) InitializeWithSize(startTs *clocksi.Timestamp, replicaID int16, size int) (newCrdt CRDT) {
 	crdt = &TopSumCrdt{
-		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
-		maxElems:              size,
-		elems:                 make(map[int32]*TopKScore),
-		notInTop:              make(map[int32]*TopKScore),
-		notPropagated:         make(map[int32]*TopKScore),
-		replicaID:             replicaID,
+		CRDTVM:        (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete),
+		maxElems:      size,
+		elems:         make(map[int32]*TopKScore),
+		notInTop:      make(map[int32]*TopKScore),
+		notPropagated: make(map[int32]*TopKScore),
+		replicaID:     replicaID,
 	}
 	newCrdt = crdt
 	return
@@ -215,7 +215,7 @@ func (crdt *TopSumCrdt) InitializeWithSize(startTs *clocksi.Timestamp, replicaID
 
 //Used to initialize when building a CRDT from a remote snapshot
 func (crdt *TopSumCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID int16) (sameCRDT *TopSumCrdt) {
-	crdt.genericInversibleCRDT = (&genericInversibleCRDT{}).initialize(startTs)
+	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete)
 	return crdt
 }
 
@@ -824,13 +824,13 @@ func (crdt *TopSumCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err
 
 func (crdt *TopSumCrdt) Copy() (copyCRDT InversibleCRDT) {
 	newCrdt := TopSumCrdt{
-		genericInversibleCRDT: crdt.genericInversibleCRDT.copy(),
-		maxElems:              crdt.maxElems,
-		smallestScore:         crdt.smallestScore,
-		elems:                 make(map[int32]*TopKScore),
-		notInTop:              make(map[int32]*TopKScore),
-		notPropagated:         make(map[int32]*TopKScore),
-		replicaID:             crdt.replicaID,
+		CRDTVM:        crdt.CRDTVM.copy(),
+		maxElems:      crdt.maxElems,
+		smallestScore: crdt.smallestScore,
+		elems:         make(map[int32]*TopKScore),
+		notInTop:      make(map[int32]*TopKScore),
+		notPropagated: make(map[int32]*TopKScore),
+		replicaID:     crdt.replicaID,
 	}
 
 	for id, elem := range crdt.elems {
@@ -847,7 +847,7 @@ func (crdt *TopSumCrdt) Copy() (copyCRDT InversibleCRDT) {
 }
 
 func (crdt *TopSumCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
-	crdt.genericInversibleCRDT.rebuildCRDTToVersion(targetTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete)
+	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
 func (crdt *TopSumCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {

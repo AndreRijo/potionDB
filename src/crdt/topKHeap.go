@@ -11,7 +11,7 @@ import (
 )
 
 type TopKHeapCrdt struct {
-	*genericInversibleCRDT
+	CRDTVM
 	vc        clocksi.Timestamp
 	replicaID int16
 
@@ -167,15 +167,15 @@ func (crdt *TopKHeapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16
 
 func (crdt *TopKHeapCrdt) InitializeWithSize(startTs *clocksi.Timestamp, replicaID int16, size int) (newCrdt CRDT) {
 	crdt = &TopKHeapCrdt{
-		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
-		vc:                    clocksi.NewClockSiTimestamp(),
-		replicaID:             replicaID,
-		maxElems:              size,
-		elems:                 make(map[int32]*TopKHeapElement),
-		elemsHeap:             TopHeap{values: make([]*TopKHeapElement, size), nEntries: new(int)},
-		rems:                  make(map[int32]clocksi.Timestamp),
-		notInTop:              make(map[int32]*setTopKHeapElement),
-		notInTopHeap:          make(NotInTopHeap, 0, size),
+		CRDTVM:       (&genericInversibleCRDT{}).initialize(startTs, nil, nil, nil), //TODO
+		vc:           clocksi.NewClockSiTimestamp(),
+		replicaID:    replicaID,
+		maxElems:     size,
+		elems:        make(map[int32]*TopKHeapElement),
+		elemsHeap:    TopHeap{values: make([]*TopKHeapElement, size), nEntries: new(int)},
+		rems:         make(map[int32]clocksi.Timestamp),
+		notInTop:     make(map[int32]*setTopKHeapElement),
+		notInTopHeap: make(NotInTopHeap, 0, size),
 	}
 	newCrdt = crdt
 	return
@@ -183,7 +183,7 @@ func (crdt *TopKHeapCrdt) InitializeWithSize(startTs *clocksi.Timestamp, replica
 
 //Used to initialize when building a CRDT from a remote snapshot
 func (crdt *TopKHeapCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID int16) (sameCRDT *TopKHeapCrdt) {
-	crdt.genericInversibleCRDT, crdt.replicaID = (&genericInversibleCRDT{}).initialize(startTs), replicaID
+	crdt.CRDTVM, crdt.replicaID = (&genericInversibleCRDT{}).initialize(startTs, nil, nil, nil), replicaID //TODO
 	return crdt
 }
 

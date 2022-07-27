@@ -39,7 +39,10 @@ type EmbInversibleCRDT interface {
 
 type genericInversibleCRDT struct {
 	genericCRDT
-	history []*History
+	history        []*History
+	undoEffectFunc func(*Effect)
+	reapplyOpFunc  func(DownstreamArguments) *Effect
+	notifyFunc     func(*clocksi.Timestamp)
 }
 
 //Represents an update effect
@@ -79,14 +82,18 @@ var (
 )
 
 //TODO: This startTs is not even used anymore... delete?
-func (crdt *genericInversibleCRDT) initialize(startTs *clocksi.Timestamp) (newCrdt *genericInversibleCRDT) {
+func (crdt *genericInversibleCRDT) initialize(startTs *clocksi.Timestamp, undoEffectFunc func(*Effect),
+	reapplyOpFunc func(DownstreamArguments) *Effect, notifyFunc func(*clocksi.Timestamp)) (newCrdt CRDTVM) {
 	if shared.IsVMDisabled {
 		return disabledVMCrdt
 	}
 	newCrdt = &genericInversibleCRDT{
 		genericCRDT: genericCRDT{}.initialize(),
 		//history:     make([]*History, 1, initialHistSize),
-		history: make([]*History, 0, initialHistSize),
+		history:        make([]*History, 0, initialHistSize),
+		undoEffectFunc: undoEffectFunc,
+		reapplyOpFunc:  reapplyOpFunc,
+		notifyFunc:     notifyFunc,
 	}
 	//Add a "initial state" entry to history
 	//newCrdt.history[0] = &History{ts: startTs, updsArgs: []*UpdateArguments{}, effects: []*Effect{}}
@@ -94,7 +101,7 @@ func (crdt *genericInversibleCRDT) initialize(startTs *clocksi.Timestamp) (newCr
 }
 
 //Note that this only copies the generic part
-func (crdt *genericInversibleCRDT) copy() (copyCrdt *genericInversibleCRDT) {
+func (crdt *genericInversibleCRDT) copy() (copyCrdt CRDTVM) {
 	if shared.IsVMDisabled {
 		return crdt
 	}
@@ -104,19 +111,19 @@ func (crdt *genericInversibleCRDT) copy() (copyCrdt *genericInversibleCRDT) {
 			history:     crdt.history,
 		}
 	*/
-	copyCrdt = &genericInversibleCRDT{
+	copyInvCrdt := &genericInversibleCRDT{
 		genericCRDT: crdt.genericCRDT.copy(),
 		history:     make([]*History, len(crdt.history), cap(crdt.history)),
 	}
 	//We need to make a deep copy of each history entry, as when we go back in history in a CRDT the effects of updates may change. We also need to copy the effects to a new array
 	for i, hist := range crdt.history {
-		copyCrdt.history[i] = &History{ts: hist.ts, updsArgs: hist.updsArgs, effects: make([]*Effect, len(hist.effects), cap(hist.effects))}
+		copyInvCrdt.history[i] = &History{ts: hist.ts, updsArgs: hist.updsArgs, effects: make([]*Effect, len(hist.effects), cap(hist.effects))}
 		for j, eff := range hist.effects {
 			valueCopy := *eff
-			copyCrdt.history[i].effects[j] = &valueCopy
+			copyInvCrdt.history[i].effects[j] = &valueCopy
 		}
 	}
-	return
+	return copyInvCrdt
 }
 
 //Adds an operation to the history
@@ -141,9 +148,7 @@ func (crdt *genericInversibleCRDT) addToHistory(ts *clocksi.Timestamp, updArgs *
 
 //Rebuilds the CRDT to match the CRDT's state in the version received as argument.
 //Note that undoEffectFunc, downstreamFunc and notifyFunc should be provided by each wrapping CRDT.
-func (crdt *genericInversibleCRDT) rebuildCRDTToVersion(targetTs clocksi.Timestamp,
-	undoEffectFunc func(*Effect), reapplyOpFunc func(DownstreamArguments) *Effect,
-	notifyFunc func(*clocksi.Timestamp)) {
+func (crdt *genericInversibleCRDT) rebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	if shared.IsVMDisabled {
 		return
 	}
@@ -156,7 +161,7 @@ func (crdt *genericInversibleCRDT) rebuildCRDTToVersion(targetTs clocksi.Timesta
 	//Go back in history until we find a version in which every entry is <= than targetTs.
 	for i = len(crdt.history) - 1; i >= 0 && !currTs.IsLowerOrEqual(targetTs); i-- {
 		for _, effect := range crdt.history[i].effects {
-			undoEffectFunc(effect)
+			crdt.undoEffectFunc(effect)
 		}
 		if i > 0 {
 			currTs = *crdt.history[i-1].ts
@@ -182,7 +187,7 @@ func (crdt *genericInversibleCRDT) rebuildCRDTToVersion(targetTs clocksi.Timesta
 		} else if tsCompare != clocksi.ConcurrentTs {
 			//If it isn't concurrent nor higher, then we can apply the update.
 			for j, updArgs := range crdt.history[i].updsArgs {
-				crdt.history[i].effects[j] = reapplyOpFunc(*updArgs)
+				crdt.history[i].effects[j] = crdt.reapplyOpFunc(*updArgs)
 			}
 			currTs = currTs.Merge(*crdt.history[i].ts)
 			//The history we applied might had the exact clock we were looking for
@@ -197,7 +202,7 @@ func (crdt *genericInversibleCRDT) rebuildCRDTToVersion(targetTs clocksi.Timesta
 	//fmt.Println("")
 	//"delete" (in fact, hide) the remaining history
 	crdt.history = crdt.history[:i]
-	notifyFunc(&targetTs)
+	crdt.notifyFunc(&targetTs)
 }
 
 /*

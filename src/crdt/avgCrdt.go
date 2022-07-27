@@ -9,7 +9,7 @@ import (
 )
 
 type AvgCrdt struct {
-	*genericInversibleCRDT
+	CRDTVM
 	sum   int64
 	nAdds int64
 }
@@ -59,15 +59,15 @@ func (args AvgGetFullArguments) GetREADType() proto.READType { return proto.READ
 //Note: crdt can (and most often will be) nil
 func (crdt *AvgCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
 	return &AvgCrdt{
-		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
-		sum:                   0,
-		nAdds:                 0,
+		CRDTVM: (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete),
+		sum:    0,
+		nAdds:  0,
 	}
 }
 
 //Used to initialize when building a CRDT from a remote snapshot
 func (crdt *AvgCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID int16) (sameCRDT *AvgCrdt) {
-	crdt.genericInversibleCRDT = (&genericInversibleCRDT{}).initialize(startTs)
+	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete)
 	return crdt
 }
 
@@ -142,16 +142,16 @@ func (crdt *AvgCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err er
 
 func (crdt *AvgCrdt) Copy() (copyCRDT InversibleCRDT) {
 	newCRDT := AvgCrdt{
-		genericInversibleCRDT: crdt.genericInversibleCRDT.copy(),
-		sum:                   crdt.sum,
-		nAdds:                 crdt.nAdds,
+		CRDTVM: crdt.CRDTVM.copy(),
+		sum:    crdt.sum,
+		nAdds:  crdt.nAdds,
 	}
 	return &newCRDT
 }
 
 func (crdt *AvgCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	//TODO: Might be worth to check if there's a better way of doing this for avg
-	crdt.genericInversibleCRDT.rebuildCRDTToVersion(targetTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete)
+	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
 func (crdt *AvgCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {

@@ -16,8 +16,8 @@ type InverseOpVM struct {
 
 //PUBLIC METHODS
 
-func (vm InverseOpVM) Initialize(newCrdt crdt.CRDT) (newVm InverseOpVM) {
-	newVm = InverseOpVM{
+func (vm *InverseOpVM) Initialize(newCrdt crdt.CRDT, currTs clocksi.Timestamp) (newVm VersionManager) {
+	newVm = &InverseOpVM{
 		CRDT:            newCrdt,
 		OldVersions:     make(map[clocksi.TimestampKey]crdt.CRDT),
 		KeysToTimestamp: make(map[clocksi.TimestampKey]clocksi.Timestamp),

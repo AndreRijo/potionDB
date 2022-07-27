@@ -12,7 +12,7 @@ import (
 )
 
 type MaxMinCrdt struct {
-	*genericInversibleCRDT
+	CRDTVM
 	topValue int64
 }
 
@@ -54,14 +54,14 @@ func (args MinAddValue) MustReplicate() bool { return true }
 //Note: crdt can (and most often will be) nil
 func (crdt *MaxMinCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
 	return &MaxMinCrdt{
-		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
-		topValue:              math.MaxInt64,
+		CRDTVM:   (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete),
+		topValue: math.MaxInt64,
 	}
 }
 
 //Used to initialize when building a CRDT from a remote snapshot
 func (crdt *MaxMinCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID int16) (sameCRDT *MaxMinCrdt) {
-	crdt.genericInversibleCRDT = (&genericInversibleCRDT{}).initialize(startTs)
+	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete)
 	return crdt
 }
 
@@ -154,15 +154,15 @@ func (crdt *MaxMinCrdt) min(first, second int64) (min int64) {
 
 func (crdt *MaxMinCrdt) Copy() (copyCRDT InversibleCRDT) {
 	newCRDT := MaxMinCrdt{
-		genericInversibleCRDT: crdt.genericInversibleCRDT.copy(),
-		topValue:              crdt.topValue,
+		CRDTVM:   crdt.CRDTVM.copy(),
+		topValue: crdt.topValue,
 	}
 	return &newCRDT
 }
 
 func (crdt *MaxMinCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	//TODO: Might be worth to check if there's a better way of doing this for avg
-	crdt.genericInversibleCRDT.rebuildCRDTToVersion(targetTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete)
+	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
 func (crdt *MaxMinCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {

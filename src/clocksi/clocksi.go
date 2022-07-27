@@ -577,6 +577,7 @@ func (ts ClockSiTimestamp) ToSortedString() (tsString string) {
 	return builder.String()
 }
 
+/*
 //NOTE: If we one day support adding/removing replicas on the fly this will probably no longer work, as it ignores the replica's ID (map key)
 func (ts ClockSiTimestamp) GetMapKey() (key TimestampKey) {
 	//Need to ensure this is written in order, since go randomizes map iteration order
@@ -588,15 +589,24 @@ func (ts ClockSiTimestamp) GetMapKey() (key TimestampKey) {
 	}
 	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
 	var builder strings.Builder
-	/*
-		for _, value := range ts.VectorClock {
-			builder.WriteString(fmt.Sprint(value, ","))
-		}
-	*/
 	for _, key := range keys {
 		builder.WriteString(fmt.Sprint(ts.VectorClock[key], ","))
 	}
 	return builder.String()
+}*/
+
+func (ts ClockSiTimestamp) GetMapKey() (key TimestampKey) {
+	//Need to ensure this is written in order, since go randomizes map iteration order
+	keys := make([]int16, len(ts.VectorClock))
+	i := 0
+	for key := range ts.VectorClock {
+		keys[i] = key
+		i++
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	//values := [len(keys)]int64
+	//test := [5](const int){0, 1, 2, 3, 4})
+	return nil
 }
 
 func (ts ClockSiTimestamp) Copy() (copyTs Timestamp) {

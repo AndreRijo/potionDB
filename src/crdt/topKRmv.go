@@ -14,7 +14,7 @@ import (
 //TODO: updsNotYetApplied
 
 type TopKRmvCrdt struct {
-	*genericInversibleCRDT
+	CRDTVM
 	vc        clocksi.Timestamp
 	replicaID int16
 
@@ -268,8 +268,8 @@ func (crdt *TopKRmvCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16)
 
 func (crdt *TopKRmvCrdt) InitializeWithSize(startTs *clocksi.Timestamp, replicaID int16, size int) (newCrdt CRDT) {
 	crdt = &TopKRmvCrdt{
-		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
-		vc:                    clocksi.NewClockSiTimestamp(),
+		CRDTVM: (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete),
+		vc:     clocksi.NewClockSiTimestamp(),
 		//vc:                    clocksi.NewClockSiTimestamp(replicaID),
 		replicaID: replicaID,
 		maxElems:  size,
@@ -285,7 +285,7 @@ func (crdt *TopKRmvCrdt) InitializeWithSize(startTs *clocksi.Timestamp, replicaI
 
 //Used to initialize when building a CRDT from a remote snapshot
 func (crdt *TopKRmvCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID int16) (sameCRDT *TopKRmvCrdt) {
-	crdt.genericInversibleCRDT, crdt.replicaID = (&genericInversibleCRDT{}).initialize(startTs), replicaID
+	crdt.CRDTVM, crdt.replicaID = (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete), replicaID
 	return crdt
 }
 
@@ -1015,14 +1015,14 @@ func (crdt *TopKRmvCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, er
 
 func (crdt *TopKRmvCrdt) Copy() (copyCRDT InversibleCRDT) {
 	newCrdt := TopKRmvCrdt{
-		genericInversibleCRDT: crdt.genericInversibleCRDT.copy(),
-		vc:                    crdt.vc.Copy(),
-		replicaID:             crdt.replicaID,
-		maxElems:              crdt.maxElems,
-		smallestScore:         crdt.smallestScore,
-		elems:                 make(map[int32]TopKElement),
-		rems:                  make(map[int32]clocksi.Timestamp),
-		notInTop:              make(map[int32]setTopKElement),
+		CRDTVM:        crdt.CRDTVM.copy(),
+		vc:            crdt.vc.Copy(),
+		replicaID:     crdt.replicaID,
+		maxElems:      crdt.maxElems,
+		smallestScore: crdt.smallestScore,
+		elems:         make(map[int32]TopKElement),
+		rems:          make(map[int32]clocksi.Timestamp),
+		notInTop:      make(map[int32]setTopKElement),
 	}
 
 	for id, elem := range crdt.elems {
@@ -1039,7 +1039,7 @@ func (crdt *TopKRmvCrdt) Copy() (copyCRDT InversibleCRDT) {
 }
 
 func (crdt *TopKRmvCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
-	crdt.genericInversibleCRDT.rebuildCRDTToVersion(targetTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete)
+	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
 func (crdt *TopKRmvCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {

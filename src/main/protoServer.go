@@ -74,7 +74,9 @@ func main() {
 	//id := int16((tmpId + tmpId2) % math.MaxInt16)
 	tmpId, _ := strconv.ParseInt(configs.GetConfig("potionDBID"), 10, 64)
 	id := int16(tmpId % (math.MaxInt16 * 2))
+	shared.ReplicaID = id
 
+	antidote.SetVMToUse()
 	tm := antidote.Initialize(id)
 	handleTC(configs)
 

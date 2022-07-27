@@ -1,8 +1,8 @@
 package crdt
 
 import (
-	"potionDB/src/clocksi"
 	rand "math/rand"
+	"potionDB/src/clocksi"
 	"potionDB/src/proto"
 	"time"
 )
@@ -15,7 +15,7 @@ import (
 */
 
 type GMapCrdt struct {
-	*genericInversibleCRDT
+	CRDTVM
 	values         map[string]Element
 	ts             int64
 	replicaID      int16
@@ -46,11 +46,11 @@ func (args DownstreamGMapAddAll) MustReplicate() bool { return true }
 //Note: crdt can (and most often will be) nil
 func (crdt *GMapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
 	crdt = &GMapCrdt{
-		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
-		values:                make(map[string]Element),
-		ts:                    0,
-		replicaID:             replicaID,
-		localReplicaID:        replicaID,
+		CRDTVM:         (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete),
+		values:         make(map[string]Element),
+		ts:             0,
+		replicaID:      replicaID,
+		localReplicaID: replicaID,
 	}
 	newCrdt = crdt
 	return
@@ -234,7 +234,7 @@ func (crdt *GMapCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err e
 func (crdt *GMapCrdt) Copy() (copyCRDT InversibleCRDT) {
 	/*
 		newCrdt := GMapCrdt{
-			genericInversibleCRDT: crdt.genericInversibleCRDT.copy(),
+			CRDTVM: crdt.CRDTVM.copy(),
 			elems:                 make(map[Element]UniqueSet),
 			random:                rand.NewSource(time.Now().Unix()),
 		}
@@ -248,7 +248,7 @@ func (crdt *GMapCrdt) Copy() (copyCRDT InversibleCRDT) {
 }
 
 func (crdt *GMapCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
-	crdt.genericInversibleCRDT.rebuildCRDTToVersion(targetTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete)
+	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
 func (crdt *GMapCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {

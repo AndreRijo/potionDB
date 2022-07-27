@@ -1817,6 +1817,11 @@ type TMWaitClock struct {
 	replyChan chan clocksi.Timestamp //Replies with the actual clock of TM
 }
 
+//Used to get a copy of the TM's current clock
+type TMGetClock struct {
+	replyChan chan clocksi.Timestamp
+}
+
 //This will also need to handle requests for transactions on hold. Can use a sorted heap for this.
 func (tm *TransactionManager) handleCommitReplies() {
 	txnToClk := make(map[TransactionId]clocksi.Timestamp)

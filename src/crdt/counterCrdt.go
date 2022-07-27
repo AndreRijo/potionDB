@@ -9,7 +9,7 @@ import (
 
 //Note: Implements both CRDT and InversibleCRDT
 type CounterCrdt struct {
-	*genericInversibleCRDT
+	CRDTVM
 	value int32
 }
 
@@ -50,14 +50,14 @@ func (args Decrement) MustReplicate() bool { return true }
 //Note: crdt can (and most often will be) nil
 func (crdt *CounterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
 	return &CounterCrdt{
-		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
-		value:                 0,
+		CRDTVM: (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete),
+		value:  0,
 	}
 }
 
 //Used to initialize when building a CRDT from a remote snapshot
 func (crdt *CounterCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID int16) (sameCRDT *CounterCrdt) {
-	crdt.genericInversibleCRDT = (&genericInversibleCRDT{}).initialize(startTs)
+	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete)
 	return crdt
 }
 
@@ -112,15 +112,15 @@ func (crdt *CounterCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, er
 
 func (crdt *CounterCrdt) Copy() (copyCRDT InversibleCRDT) {
 	newCRDT := CounterCrdt{
-		genericInversibleCRDT: crdt.genericInversibleCRDT.copy(),
-		value:                 crdt.value,
+		CRDTVM: crdt.CRDTVM.copy(),
+		value:  crdt.value,
 	}
 	return &newCRDT
 }
 
 func (crdt *CounterCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	//TODO: Optimize and make one specific for counters (no need to redo operations!)
-	crdt.genericInversibleCRDT.rebuildCRDTToVersion(targetTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete)
+	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
 func (crdt *CounterCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {

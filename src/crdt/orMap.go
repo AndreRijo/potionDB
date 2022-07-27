@@ -11,7 +11,7 @@ import (
 )
 
 type ORMapCrdt struct {
-	*genericInversibleCRDT
+	CRDTVM
 	entries map[string]map[Element]UniqueSet
 	//Used to generate unique identifiers. This should not be included in a serialization to transfer the state.
 	random rand.Source
@@ -149,15 +149,15 @@ func (args GetValuesArguments) GetREADType() proto.READType { return proto.READT
 //Note: crdt can (and most often will be) nil
 func (crdt *ORMapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
 	return &ORMapCrdt{
-		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
-		entries:               make(map[string]map[Element]UniqueSet),
-		random:                rand.NewSource(time.Now().Unix()),
+		CRDTVM:  (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete),
+		entries: make(map[string]map[Element]UniqueSet),
+		random:  rand.NewSource(time.Now().Unix()),
 	}
 }
 
 //Used to initialize when building a CRDT from a remote snapshot
 func (crdt *ORMapCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID int16) (sameCRDT *ORMapCrdt) {
-	crdt.genericInversibleCRDT, crdt.random = (&genericInversibleCRDT{}).initialize(startTs), rand.NewSource(time.Now().Unix())
+	crdt.CRDTVM, crdt.random = (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete), rand.NewSource(time.Now().Unix())
 	return crdt
 }
 
@@ -523,9 +523,9 @@ func (crdt *ORMapCrdt) getMinElem(elemMap map[Element]UniqueSet) (minElem Elemen
 
 func (crdt *ORMapCrdt) Copy() (copyCRDT InversibleCRDT) {
 	newCrdt := ORMapCrdt{
-		genericInversibleCRDT: crdt.genericInversibleCRDT.copy(),
-		entries:               make(map[string]map[Element]UniqueSet),
-		random:                rand.NewSource(time.Now().Unix()),
+		CRDTVM:  crdt.CRDTVM.copy(),
+		entries: make(map[string]map[Element]UniqueSet),
+		random:  rand.NewSource(time.Now().Unix()),
 	}
 	for key, elemMap := range crdt.entries {
 		newElemMap := make(map[Element]UniqueSet)
@@ -539,7 +539,7 @@ func (crdt *ORMapCrdt) Copy() (copyCRDT InversibleCRDT) {
 }
 
 func (crdt *ORMapCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
-	crdt.genericInversibleCRDT.rebuildCRDTToVersion(targetTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete)
+	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
 func (crdt *ORMapCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
