@@ -112,8 +112,11 @@ func (crdt *genericInversibleCRDT) copy() (copyCrdt CRDTVM) {
 		}
 	*/
 	copyInvCrdt := &genericInversibleCRDT{
-		genericCRDT: crdt.genericCRDT.copy(),
-		history:     make([]*History, len(crdt.history), cap(crdt.history)),
+		genericCRDT:    crdt.genericCRDT.copy(),
+		history:        make([]*History, len(crdt.history), cap(crdt.history)),
+		undoEffectFunc: crdt.undoEffectFunc,
+		reapplyOpFunc:  crdt.reapplyOpFunc,
+		notifyFunc:     crdt.notifyFunc,
 	}
 	//We need to make a deep copy of each history entry, as when we go back in history in a CRDT the effects of updates may change. We also need to copy the effects to a new array
 	for i, hist := range crdt.history {
@@ -203,6 +206,35 @@ func (crdt *genericInversibleCRDT) rebuildCRDTToVersion(targetTs clocksi.Timesta
 	//"delete" (in fact, hide) the remaining history
 	crdt.history = crdt.history[:i]
 	crdt.notifyFunc(&targetTs)
+}
+
+//The last position of history contains the latest clock of the CRDT
+//As for every downstream, the timestamp is passed to "addToHistory"
+func (crdt *genericInversibleCRDT) GC(safeClk clocksi.Timestamp) {
+	//TODO: Detect when can all the history be cleaned.
+	startIndex := 0
+	for i := len(crdt.history) - 1; i >= 0; i-- {
+		if (*crdt.history[i].ts).IsLowerOrEqual(safeClk) {
+			startIndex = i //startIndex will be kept
+			break
+		}
+	}
+	if startIndex == 0 {
+		return //Nothing to clean.
+	}
+	newLen := len(crdt.history) - startIndex
+	if newLen < len(crdt.history)/4 {
+		//New len is very small; better make new slice.
+		//TODO: Maybe add some extra spaces to newHistory?
+		newHistory := make([]*History, newLen)
+		copy(newHistory, crdt.history[startIndex:len(crdt.history)])
+		crdt.history = newHistory
+	} else {
+		//Re-use slice. Move entries to the start.
+		//TODO: Should I clean the other entries for GC purposes?
+		copy(crdt.history, crdt.history[startIndex:len(crdt.history)])
+		crdt.history = crdt.history[:newLen]
+	}
 }
 
 /*

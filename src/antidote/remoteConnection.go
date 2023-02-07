@@ -34,6 +34,7 @@ type RemoteConn struct {
 	connID           int16 //Uniquely identifies this connection. This should not be confused with the connected replica's replicaID
 	txnCount         int32 //Used to uniquely identify the transactions when sending. It does not match TxnId and overflows are OK.
 	debugCount       int32
+	allBuckets       bool //True if the replica's buckets has the wildcard '*' (i.e., replicates every bucket)
 }
 
 //Idea: hold operations from a replica until all operations for a partition are received.
@@ -70,6 +71,7 @@ const (
 	//defaultListenerSize = 100
 	clockTopic        = "clk"
 	joinTopic         = "join"
+	bucketTopicPrefix = "b." //Needed otherwise when we listen to all buckets we receive our own join messages and related.
 	groupTopicPrefix  = "g."
 	triggerTopic      = "trigger"
 	remoteIDContent   = "remoteID"
@@ -91,6 +93,7 @@ var ()
 //In the case of the connection to the local replica's RabbitMQ server, we don't consume the self messages (isSelfConn)
 func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16, connID int16, isSelfConn bool) (remote *RemoteConn, err error) {
 	//conn, err := amqp.Dial(protocol + prefix + ip + port)
+	allBuckets := false
 	prefix := tools.SharedConfig.GetOrDefault("rabbitMQUser", "guest")
 	vhost := tools.SharedConfig.GetOrDefault("rabbitVHost", "/crdts")
 	prefix = prefix + ":" + prefix + "@"
@@ -137,7 +140,10 @@ func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16
 	//bucket.* - matches anything with "bucket.(any word). * means one word, any"
 	//bucket.# - matches anything with "bucket.(any amount of words). # means 0 or more words, each separated by a dot."
 	for _, bucket := range bucketsToListen {
-		sendCh.QueueBind(replQueue.Name, bucket, exchangeName, false, nil)
+		if bucket == "*" {
+			allBuckets = true
+		}
+		sendCh.QueueBind(replQueue.Name, bucketTopicPrefix+bucket, exchangeName, false, nil)
 		//For groups
 		sendCh.QueueBind(replQueue.Name, groupTopicPrefix+bucket, exchangeName, false, nil)
 		//sendCh.QueueBind(replQueue.Name, "*", exchangeName, false, nil)
@@ -160,6 +166,7 @@ func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16
 	} else {
 		queueToListen = joinQueue
 	}
+	fmt.Printf("[RC%d]Queues names: %s, %s, %s\n", connID, replQueue.Name, joinQueue.Name, queueToListen.Name)
 	recCh, err = sendCh.Consume(queueToListen.Name, "", true, false, false, false, nil)
 	if err != nil {
 		tools.FancyWarnPrint(tools.REMOTE_PRINT, replicaID, "failed to obtain consumer from rabbitMQ:", err)
@@ -184,6 +191,7 @@ func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16
 		nBucketsToListen: len(bucketsToListen),
 		buckets:          bucketsMap,
 		connID:           connID,
+		allBuckets:       allBuckets,
 	}
 	if !isSelfConn {
 		fmt.Println("Listening to repl on connection to", ip, "with id", remote.connID)
@@ -239,16 +247,35 @@ func (remote *RemoteConn) SendGroupTxn(txns []RemoteTxn) {
 	//TODO: These buffers could be re-used, as the buckets and max size of a group txn is known
 	bucketOps := make(map[string][]RemoteTxn)
 	pos := make(map[string]*int)
-	for bkt := range remote.buckets {
-		bucketOps[bkt] = make([]RemoteTxn, len(txns))
-		pos[bkt] = new(int)
-	}
-	var currTxnBuckets map[string]map[int][]*UpdateObjectParams
-	for _, txn := range txns {
-		currTxnBuckets = remote.txnToBuckets(txn)
-		for bkt, partUpds := range currTxnBuckets {
-			bucketOps[bkt][*pos[bkt]] = RemoteTxn{SenderID: txn.SenderID, Clk: txn.Clk, TxnID: txn.TxnID, Upds: partUpds}
-			*pos[bkt]++
+	if remote.allBuckets {
+		//Different logic as we don't know which buckets we have
+		var currTxnBuckets map[string]map[int][]*UpdateObjectParams
+		var currBucketOps []RemoteTxn
+		var has bool
+		for _, txn := range txns {
+			currTxnBuckets = remote.txnToBuckets(txn)
+			for bkt, partUpds := range currTxnBuckets {
+				currBucketOps, has = bucketOps[bkt]
+				if !has {
+					currBucketOps = make([]RemoteTxn, 0, len(currTxnBuckets)/2) //Usually there's fewish buckets
+					pos[bkt] = new(int)
+				}
+				bucketOps[bkt] = append(currBucketOps, RemoteTxn{SenderID: txn.SenderID, Clk: txn.Clk, TxnID: txn.TxnID, Upds: partUpds})
+				*pos[bkt]++
+			}
+		}
+	} else {
+		for bkt := range remote.buckets {
+			bucketOps[bkt] = make([]RemoteTxn, len(txns))
+			pos[bkt] = new(int)
+		}
+		var currTxnBuckets map[string]map[int][]*UpdateObjectParams
+		for _, txn := range txns {
+			currTxnBuckets = remote.txnToBuckets(txn)
+			for bkt, partUpds := range currTxnBuckets {
+				bucketOps[bkt][*pos[bkt]] = RemoteTxn{SenderID: txn.SenderID, Clk: txn.Clk, TxnID: txn.TxnID, Upds: partUpds}
+				*pos[bkt]++
+			}
 		}
 	}
 
@@ -313,7 +340,7 @@ func (remote *RemoteConn) SendTxn(txn RemoteTxn) {
 		}
 		fmt.Printf("[RC%d]Sending individual txn %d for bucket %s.\n", remote.connID, remote.txnCount, bucket)
 		//remote.sendCh.Publish(exchangeName, strconv.FormatInt(int64(remote.txnCount), 10)+"."+bucket, false, false, amqp.Publishing{CorrelationId: remote.replicaString, Body: data})
-		remote.sendCh.Publish(exchangeName, bucket, false, false, amqp.Publishing{CorrelationId: remote.replicaString, Body: data})
+		remote.sendCh.Publish(exchangeName, bucketTopicPrefix+bucket, false, false, amqp.Publishing{CorrelationId: remote.replicaString, Body: data})
 	}
 	remote.txnCount++
 }
@@ -786,7 +813,8 @@ func (remote *RemoteConn) handleReceivedJoinTopic(msgType string, data []byte) {
 func (remote *RemoteConn) handleRemoteID(data []byte) {
 	protobuf := &proto.ProtoRemoteID{}
 	remote.decodeProtobuf(protobuf, data, "Failed to decode bytes of received protoRemoteID. Error:")
-	remote.listenerChan <- &RemoteID{SenderID: int16(protobuf.GetReplicaID()), Buckets: protobuf.GetMyBuckets(), IP: protobuf.GetMyIP()}
+	senderID := int16(protobuf.GetReplicaID())
+	remote.listenerChan <- &RemoteID{SenderID: senderID, Buckets: protobuf.GetMyBuckets(), IP: protobuf.GetMyIP()}
 }
 
 func (remote *RemoteConn) handleJoin(data []byte) {

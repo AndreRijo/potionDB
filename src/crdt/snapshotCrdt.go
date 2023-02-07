@@ -3,16 +3,20 @@ package crdt
 import "potionDB/src/clocksi"
 
 //Implements the CRDTVM interface for ease of integration with CRDTs
-type SnapshopCrdt struct{}
+type SnapshotCrdt struct{}
 
-func (crdt *SnapshopCrdt) copy() (copyCRDT CRDTVM) {
+func (crdt *SnapshotCrdt) copy() (copyCRDT CRDTVM) {
 	return crdt
 }
 
-func (crdt *SnapshopCrdt) rebuildCRDTToVersion(targetTs clocksi.Timestamp) {
+func (crdt *SnapshotCrdt) rebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 
 }
 
-func (crdt *SnapshopCrdt) addToHistory(ts *clocksi.Timestamp, updArgs *DownstreamArguments, effect *Effect) {
+func (crdt *SnapshotCrdt) addToHistory(ts *clocksi.Timestamp, updArgs *DownstreamArguments, effect *Effect) {
+
+}
+
+func (crdt *SnapshotCrdt) GC(safeClk clocksi.Timestamp) {
 
 }

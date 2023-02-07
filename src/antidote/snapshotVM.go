@@ -24,8 +24,10 @@ import (
 
 type SnapshotVM struct {
 	crdt.CRDT
-	snaps     map[clocksi.TimestampKey]crdt.CRDT
-	replicaID int16
+	snaps          map[clocksi.TimestampKey]crdt.CRDT
+	replicaID      int16
+	updatedSinceGC bool              //Keeps track if this CRDT needs to be GC
+	currVersion    clocksi.Timestamp //Version of crdt.CRDT
 }
 
 func (vm *SnapshotVM) Initialize(newCrdt crdt.CRDT, currTs clocksi.Timestamp) (newVm VersionManager) {
@@ -63,6 +65,7 @@ func (vm *SnapshotVM) Downstream(updTs clocksi.Timestamp, downstreamArgs crdt.Do
 	if shared.IsVMDisabled {
 		return vm.CRDT.Downstream(updTs, downstreamArgs)
 	}
+	vm.updatedSinceGC, vm.currVersion = true, updTs
 	otherDownstreamArgs = vm.CRDT.Downstream(updTs, downstreamArgs)
 	vm.snaps[updTs.GetMapKey()] = vm.CRDT.(crdt.InversibleCRDT).Copy()
 	return
@@ -70,4 +73,33 @@ func (vm *SnapshotVM) Downstream(updTs clocksi.Timestamp, downstreamArgs crdt.Do
 
 func (vm *SnapshotVM) GetLatestCRDT() (crdt crdt.CRDT) {
 	return vm.CRDT
+}
+
+func (vm *SnapshotVM) GC(safeClk clocksi.Timestamp, safeClkKey clocksi.TimestampKey) {
+	//Same algorithm as in inverseOpVM.
+	if !vm.updatedSinceGC {
+		return
+	}
+	if safeClk.IsHigher(vm.currVersion) { //If an object has not been updated in a while, it may happen the latest version is < safeClk
+		//Can clean everything
+		vm.snaps = make(map[clocksi.TimestampKey]crdt.CRDT)
+		vm.updatedSinceGC = false //Cleared all past versions so can set this to false.
+	} else {
+		//This algorithm keeps any key > safeClk and the highestKey that is <= safeClk (highestSafe)
+		var highestSafe clocksi.TimestampKey = nil
+		for cacheKey := range vm.snaps {
+			if cacheKey.IsLowerOrEqual(safeClkKey) {
+				if highestSafe == nil {
+					highestSafe = cacheKey
+				} else if cacheKey.IsHigher(highestSafe) {
+					//Can delete safely the previous key
+					delete(vm.snaps, highestSafe)
+					highestSafe = cacheKey
+				}
+			}
+		}
+		//Do not set updatedSinceGC to false as there is still past versions to be cleaned by a future GC.
+		//Do not delete highestSafe - This contains the version that is correct at the time of safeClk
+	}
+	vm.CRDT.(crdt.CRDTVM).GC(safeClk)
 }

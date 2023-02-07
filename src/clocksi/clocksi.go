@@ -86,7 +86,23 @@ type ClockSiTimestamp struct {
 
 type TsResult int
 
-type TimestampKey interface{}
+type TimestampKey interface {
+	IsLower(otherKey TimestampKey) bool
+
+	IsEqual(otherKey TimestampKey) bool
+
+	IsHigher(otherKey TimestampKey) bool
+
+	IsLowerOrEqual(otherKey TimestampKey) bool
+
+	//toSliceKey() SliceKey
+}
+
+type StringKey string //Literal []int64 to string conversion
+
+type ByteKey string //BigEndian byte conversion of []int64
+
+//type SliceKey []int64
 
 const (
 	//Common to all clocks
@@ -97,24 +113,21 @@ const (
 
 	//Specific to clocksi implementation
 	entrySize    = 8
-	randomFactor = 500 //max value that can be added to the timestamp to avoid collisions
+	randomFactor = 500  //max value that can be added to the timestamp to avoid collisions
+	useByteKey   = true //true = TimestampKey uses byte representation (ByteKey). Otherwise, uses StringKey.
+	//useSliceKey = true //true = SliceKey ([]int64). false = string representation of the numbers
 )
 
 var (
 	//Useful for comparations or other situations in which we need a temporary, non-significant, timestamp
-	DummyTs  = NewClockSiTimestampFromId(0)
-	knownIDs = make([]int16, 0, 5) //Known replicaIDs. All new ClockSiTimestamps generated with NewClockSiTimestamp() will contain entries for these IDs
+	DummyTs   = NewClockSiTimestampFromId(0)
+	knownIDs  = make([]int16, 0, 5) //Known replicaIDs. All new ClockSiTimestamps generated with NewClockSiTimestamp() will contain entries for these IDs
+	HighestTs = ClockSiTimestamp{VectorClock: make(map[int16]int64)}
 )
-
-func prepareDummyHighTs() (ts Timestamp) {
-	vc := make(map[int16]int64)
-	clockSiTs := ClockSiTimestamp{VectorClock: vc}
-	clockSiTs.VectorClock[0] = math.MaxInt64
-	return clockSiTs
-}
 
 func AddNewID(id int16) {
 	knownIDs = append(knownIDs, id)
+	addToHighestTs(id)
 }
 
 //Creates a new timestamp. This gives the same result as doing: newTs = ClockSiTimestamp{}.NewTimestamp().
@@ -491,6 +504,10 @@ func (ts ClockSiTimestamp) Update() {
 	}
 }
 
+func addToHighestTs(id int16) {
+	HighestTs.VectorClock[id] = math.MaxInt64
+}
+
 func (ts ClockSiTimestamp) ToBytes() (bytes []byte) {
 	/*
 		bytes = make([]byte, len(*ts.VectorClock)*entrySize)
@@ -558,13 +575,7 @@ func (ts ClockSiTimestamp) ToString() (tsString string) {
 
 func (ts ClockSiTimestamp) ToSortedString() (tsString string) {
 	//Need to ensure this is written in order, since go randomizes map iteration order
-	keys := make([]int16, len(ts.VectorClock))
-	i := 0
-	for key := range ts.VectorClock {
-		keys[i] = key
-		i++
-	}
-	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	keys := ts.getSortedKeys()
 	var builder strings.Builder
 	builder.WriteString("{[")
 	for _, key := range keys {
@@ -577,36 +588,60 @@ func (ts ClockSiTimestamp) ToSortedString() (tsString string) {
 	return builder.String()
 }
 
-/*
 //NOTE: If we one day support adding/removing replicas on the fly this will probably no longer work, as it ignores the replica's ID (map key)
 func (ts ClockSiTimestamp) GetMapKey() (key TimestampKey) {
-	//Need to ensure this is written in order, since go randomizes map iteration order
-	keys := make([]int16, len(ts.VectorClock))
-	i := 0
-	for key := range ts.VectorClock {
-		keys[i] = key
-		i++
+	if useByteKey {
+		return ts.getMapByteKey()
 	}
-	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	/*if useSliceKey {
+		return ts.GetMapSliceKey()
+	}*/
+	return ts.getMapStringKey()
+}
+
+//Byte representation. Unused atm, probably no longer needed.
+func (ts ClockSiTimestamp) getMapByteKey() (key TimestampKey) {
+	//Need to ensure this is written in order, since go randomizes map iteration order
+	keys := ts.getSortedKeys()
+	byteSlice := make([]byte, len(keys)*8)
+	for i, key := range keys {
+		binary.BigEndian.PutUint64(byteSlice[i*8:i*8+8], uint64(ts.VectorClock[key]))
+	}
+	return ByteKey(string(byteSlice))
+}
+
+//Slice representation
+/*
+func (ts ClockSiTimestamp) GetMapSliceKey() (key TimestampKey) {
+	//Need to ensure this is written in order, since go randomizes map iteration order
+	keys := ts.getSortedKeys()
+	intSlice := make([]int64, len(keys))
+	for i, key := range keys {
+		intSlice[i] = ts.VectorClock[key]
+	}
+	return SliceKey(intSlice)
+}
+*/
+
+func (ts ClockSiTimestamp) getMapStringKey() (key TimestampKey) {
+	//Need to ensure this is written in order, since go randomizes map iteration order
+	keys := ts.getSortedKeys()
 	var builder strings.Builder
 	for _, key := range keys {
 		builder.WriteString(fmt.Sprint(ts.VectorClock[key], ","))
 	}
-	return builder.String()
-}*/
+	return StringKey(builder.String())
+}
 
-func (ts ClockSiTimestamp) GetMapKey() (key TimestampKey) {
-	//Need to ensure this is written in order, since go randomizes map iteration order
-	keys := make([]int16, len(ts.VectorClock))
+func (ts ClockSiTimestamp) getSortedKeys() (keys []int16) {
+	keys = make([]int16, len(ts.VectorClock))
 	i := 0
 	for key := range ts.VectorClock {
 		keys[i] = key
 		i++
 	}
 	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
-	//values := [len(keys)]int64
-	//test := [5](const int){0, 1, 2, 3, 4})
-	return nil
+	return
 }
 
 func (ts ClockSiTimestamp) Copy() (copyTs Timestamp) {
@@ -632,3 +667,258 @@ func ByteArrayToClockArray(bytes [][]byte) (clks []Timestamp) {
 	}
 	return
 }
+
+/////TIMESTAMPKEY methods//////
+/*
+func (bk ByteKey) toSliceKey() (sliceKey SliceKey) {
+	stringKey := string(bk)
+	bytesKey := []byte(stringKey)
+	values := make([]int64, len(stringKey)/4)
+	for i := 0; i < len(bytesKey); i += 4 {
+		values[i/4] = int64(binary.LittleEndian.Uint64(bytesKey[i : i+3]))
+	}
+	return values
+}
+
+func (sk StringKey) toSliceKey() (sliceKey SliceKey) {
+	stringKey := string(sk)
+	subStrings := strings.Split(stringKey, ",")
+	values := make([]int64, len(subStrings))
+	for i, value := range subStrings {
+		values[i], _ = strconv.ParseInt(value, 10, 64)
+	}
+	return
+}
+
+func (k SliceKey) toSliceKey() (sliceKey SliceKey) {
+	return k
+}*/
+
+func (bk ByteKey) IsLower(otherKey TimestampKey) bool {
+	ourBytes, otherBytes := []byte(bk), []byte(otherKey.(ByteKey))
+	i, j := 0, 0
+	foundHigher := false
+	for ; i < len(ourBytes); i += 4 {
+		for j = 0; j < 4; j++ {
+			if ourBytes[i+j] > otherBytes[i+j] { //if int1 > int2, then one of the leftmost bytes of int1 will be higher.
+				return false
+			} else if ourBytes[i+j] < otherBytes[i+j] { //Similarly but with "<" and lower.
+				foundHigher = true
+				break //Skip to the next number
+			}
+		}
+	}
+	return foundHigher
+}
+
+func (bk ByteKey) IsEqual(otherKey TimestampKey) bool {
+	ourBytes, otherBytes := []byte(bk), []byte(otherKey.(ByteKey))
+	for i := 0; i < len(ourBytes); i++ {
+		if ourBytes[i] != otherBytes[i] {
+			return false //Any byte that is different implies the keys are not equal
+		}
+	}
+	return true
+}
+
+func (bk ByteKey) IsHigher(otherKey TimestampKey) bool {
+	ourBytes, otherBytes := []byte(bk), []byte(otherKey.(ByteKey))
+	i, j := 0, 0
+	foundLower := false
+	for ; i < len(ourBytes); i += 4 {
+		for j = 0; j < 4; j++ {
+			if ourBytes[i+j] < otherBytes[i+j] { //if int1 < int2, then one of the leftmost bytes of int1 will be lower.
+				return false
+			} else if ourBytes[i+j] > otherBytes[i+j] { //Similarly but with ">" and higher.
+				foundLower = true
+				break //Skip to the next number
+			}
+		}
+	}
+	return foundLower
+}
+
+func (bk ByteKey) IsLowerOrEqual(otherKey TimestampKey) bool {
+	ourBytes, otherBytes := []byte(bk), []byte(otherKey.(ByteKey))
+	i, j := 0, 0
+	for ; i < len(ourBytes); i += 4 {
+		for j = 0; j < 4; j++ {
+			if ourBytes[i+j] > otherBytes[i+j] { //if int1 > int2, then one of the leftmost bytes of int1 will be higher.
+				return false
+			} else if ourBytes[i+j] < otherBytes[i+j] {
+				break //Skip to the next number (comparing the rest of the bytes could give a wrong result)
+			}
+		}
+	}
+	return true
+}
+
+func (sk StringKey) IsLower(otherKey TimestampKey) bool {
+	foundHigher := false
+	ourCommaPos, otherCommaPos := 0, 0
+	ourString, otherString := string(sk), string(otherKey.(StringKey))
+	var currOurNumber, currOtherNumber string
+	for {
+		ourCommaPos, otherCommaPos = strings.IndexRune(ourString, ','), strings.IndexRune(otherString, ',')
+		currOurNumber, currOtherNumber = ourString[:ourCommaPos], otherString[:otherCommaPos]
+		if len(currOurNumber) > len(currOtherNumber) {
+			return false
+		} else if len(currOurNumber) < len(currOtherNumber) {
+			foundHigher = true
+		} else {
+			//Same len, can compare bytes.
+			for i := 0; i < ourCommaPos; i++ {
+				if currOurNumber[i] > currOtherNumber[i] {
+					return false
+				} else if currOurNumber[i] < currOtherNumber[i] {
+					foundHigher = true
+					break //Go to next number.
+				}
+			}
+		}
+		if ourCommaPos == len(ourString)-1 {
+			break //Finished comparing the keys
+		}
+		ourString, otherString = ourString[ourCommaPos+1:], otherString[otherCommaPos+1:]
+	}
+	return foundHigher
+}
+
+func (sk StringKey) IsEqual(otherKey TimestampKey) bool {
+	ourString, otherString := string(sk), string(otherKey.(StringKey))
+	if len(ourString) != len(otherString) {
+		return false
+	}
+	//Any byte that is different implies the keys are different
+	for i := 0; i < len(ourString); i++ {
+		if ourString[i] != otherString[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (sk StringKey) IsHigher(otherKey TimestampKey) bool {
+	foundLower := false
+	ourCommaPos, otherCommaPos := 0, 0
+	ourString, otherString := string(sk), string(otherKey.(StringKey))
+	var currOurNumber, currOtherNumber string
+	for {
+		ourCommaPos, otherCommaPos = strings.IndexRune(ourString, ','), strings.IndexRune(otherString, ',')
+		currOurNumber, currOtherNumber = ourString[:ourCommaPos], otherString[:otherCommaPos]
+		if len(currOurNumber) < len(currOtherNumber) {
+			return false
+		} else if len(currOurNumber) > len(currOtherNumber) {
+			foundLower = true
+		} else {
+			//Same len, can compare bytes.
+			for i := 0; i < ourCommaPos; i++ {
+				if currOurNumber[i] > currOtherNumber[i] {
+					return false
+				} else if currOurNumber[i] < currOtherNumber[i] {
+					foundLower = true
+					break //Go to next number.
+				}
+			}
+		}
+		if ourCommaPos == len(ourString)-1 {
+			break //Finished comparing the keys
+		}
+		ourString, otherString = ourString[ourCommaPos+1:], otherString[otherCommaPos+1:]
+	}
+	return foundLower
+}
+
+func (sk StringKey) IsLowerOrEqual(otherKey TimestampKey) bool {
+	foundHigher := false
+	ourCommaPos, otherCommaPos := 0, 0
+	ourString, otherString := string(sk), string(otherKey.(StringKey))
+	var currOurNumber, currOtherNumber string
+	for {
+		ourCommaPos, otherCommaPos = strings.IndexRune(ourString, ','), strings.IndexRune(otherString, ',')
+		currOurNumber, currOtherNumber = ourString[:ourCommaPos], otherString[:otherCommaPos]
+		if len(currOurNumber) > len(currOtherNumber) {
+			return false
+		} else if len(currOurNumber) < len(currOtherNumber) {
+			foundHigher = true
+		} else {
+			//Same len, can compare bytes.
+			for i := 0; i < ourCommaPos; i++ {
+				if currOurNumber[i] > currOtherNumber[i] {
+					return false
+				} else if currOurNumber[i] < currOtherNumber[i] {
+					break //Skip to the next number (comparing the rest of the digits could give a wrong result.
+				}
+			}
+		}
+		if ourCommaPos == len(ourString)-1 {
+			break //Finished comparing the keys
+		}
+		ourString, otherString = ourString[ourCommaPos+1:], otherString[otherCommaPos+1:]
+	}
+	return foundHigher
+}
+
+/*
+func (sk SliceKey) IsLower(otherKey TimestampKey) bool {
+	return isLowerSlice(sk, otherKey.toSliceKey())
+}
+
+func (sk SliceKey) IsEqual(otherKey TimestampKey) bool {
+	return isEqualSlice(sk, otherKey.toSliceKey())
+}
+
+func (sk SliceKey) IsHigher(otherKey TimestampKey) bool {
+	return isHigherSlice(sk, otherKey.toSliceKey())
+}
+
+func (sk SliceKey) IsLowerOrEqual(otherKey TimestampKey) bool {
+	return isLowerOrEqualSlice(sk, otherKey.toSliceKey())
+}
+*/
+
+/////TIMESTAMPKEY helper methods/////
+/*
+func isLowerSlice(selfKey, otherKey SliceKey) bool {
+	foundHigher := false
+	for i, selfValue := range selfKey {
+		if selfValue > otherKey[i] {
+			return false
+		} else if selfValue < otherKey[i] {
+			foundHigher = true
+		}
+	}
+	return foundHigher
+}
+
+func isEqualSlice(selfKey, otherKey SliceKey) bool {
+	for i, selfValue := range selfKey {
+		if selfValue != otherKey[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func isHigherSlice(selfKey, otherKey SliceKey) bool {
+	foundLower := false
+	for i, selfValue := range selfKey {
+		if selfValue < otherKey[i] {
+			return false
+		} else if selfValue > otherKey[i] {
+			foundLower = true
+		}
+	}
+	return foundLower
+}
+
+func isLowerOrEqualSlice(selfKey, otherKey SliceKey) bool {
+	for i, selfValue := range selfKey {
+		if selfValue > otherKey[i] {
+			return false
+		}
+	}
+	//At this point, it is either equal or lower.
+	return true
+}
+*/

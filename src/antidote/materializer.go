@@ -142,6 +142,10 @@ type MatApplySnapshotArgs struct {
 //Processed separately. This is used to know when the partition can start and the initial clock be generated.
 type MatWaitForReplicasArgs struct{}
 
+type MatGCArgs struct {
+	SafeClk clocksi.Timestamp //Can clean anything "before" (<) this clock.
+}
+
 type MatRequestType byte
 
 type Materializer struct {
@@ -449,6 +453,14 @@ func (args MatWaitForReplicasArgs) getChannel() (channelId uint64) {
 	return 0 //MatWaitForReplicas is always sent to all partitions
 }
 
+func (args MatGCArgs) getRequestType() (requestType MatRequestType) {
+	return gcMatRequest
+}
+
+func (args MatGCArgs) getChannel() (channelId uint64) {
+	return 0 //MatGCArgs is always sent to all partitions
+}
+
 // /////*****************CONSTANTS AND VARIABLES***********************/////
 
 const (
@@ -470,6 +482,7 @@ const (
 	resetMatRequest          MatRequestType = 14
 	waitForReplicasRequest   MatRequestType = 15
 	remoteGroupTxnMatRequest MatRequestType = 16
+	gcMatRequest             MatRequestType = 17
 	versionMatRequest        MatRequestType = 255
 	//TODO: At the end, delete unused requests from above
 
@@ -590,6 +603,8 @@ func (part *partition) handleRequest(request MaterializerRequest) {
 	case resetMatRequest:
 		part.handleMatReset(request.MatRequestArgs.(MatResetArgs))
 		//TODO: snapshots, version, etc.
+	case gcMatRequest:
+		part.handleMatGC(request.MatRequestArgs.(MatGCArgs))
 	default:
 		fmt.Println("[WARNING][MAT]Unknown request type: ", request.getRequestType())
 	}
@@ -610,7 +625,7 @@ func (part *partition) handleMatStaticRead(args MatStaticReadArgs) {
 }
 
 //Pre-condition: Assumes a read is not for the future - either present or past.
-//This implies the TM must issue a read is not sent to materializer before all partition's clock has caught up
+//This implies the TM must ensure a read is not sent to materializer before all partition's clock has caught up
 //This should be easy to guarantee by only updating the TM clock after all partitions have confirmed the clock.
 //A possible problem may be when applying remote transactions - this may be slow when many remote transactions are received.
 func (part *partition) canReadLatest(readTs clocksi.Timestamp) bool {
@@ -904,6 +919,13 @@ func (part *partition) handleMatReset(args MatResetArgs) {
 	part.commitsOnHold = commitHeap{entries: make([]MatCommitArgs, heapSize), nEntries: new(int)}
 }
 
+func (part *partition) handleMatGC(args MatGCArgs) {
+	clkKey := args.SafeClk.GetMapKey()
+	for _, obj := range part.db {
+		obj.GC(args.SafeClk, clkKey)
+	}
+}
+
 //Generic helper functions
 
 func (part *partition) getObject(keyParams KeyParams, clk clocksi.Timestamp) VersionManager {
@@ -1035,7 +1057,7 @@ func (partClock *partitionClock) getLowestPrepare() (pair TxnIdClkPair) {
 
 func (partClock *partitionClock) removePrepare(txnId TransactionId) {
 	pos := partClock.prepClks.innerMap[txnId]
-	fmt.Println("[MAT]Removing prepare at pos:", pos, ", prepClks has length:", partClock.prepClks.Len())
+	//fmt.Println("[MAT]Removing prepare at pos:", pos, ", prepClks has length:", partClock.prepClks.Len())
 	heap.Remove(&partClock.prepClks, pos)
 	//delete(partClock.prepClks.innerMap, txnId)
 }

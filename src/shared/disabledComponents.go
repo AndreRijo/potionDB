@@ -7,6 +7,7 @@ const (
 	//CRDTs
 	IsVMDisabled   = true
 	IsCRDTDisabled = false //Replaces all CRDTs by EmptyCrdt instances
+	IsGCDisabled   = false
 )
 
 //Vars as they come from configs

@@ -19,6 +19,8 @@ type VersionManager interface {
 	Downstream(updTs clocksi.Timestamp, downstreamArgs crdt.DownstreamArguments) (otherDownstreamArgs crdt.DownstreamArguments)
 
 	GetLatestCRDT() (crdt crdt.CRDT)
+
+	GC(safeClk clocksi.Timestamp, safeClkKey clocksi.TimestampKey)
 }
 
 type VMType byte
@@ -29,7 +31,7 @@ const (
 )
 
 var (
-	VmTypeToUse VMType = SnapshotVMType //Configuration variable
+	VmTypeToUse VMType = InversibleVMType //Configuration variable
 	BaseVM      VersionManager
 )
 

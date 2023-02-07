@@ -514,7 +514,9 @@ func createProtoMapRemoves(rems map[string]map[Element]UniqueSet) (protos []*pro
 			protoElems[j] = &proto.ProtoValueUniques{Value: []byte(elem), Uniques: UniqueSetToUInt64Array(uniques)}
 			j++
 		}
+		j = 0
 		protos[i] = &proto.ProtoORMapRemove{Key: []byte(key), Elems: protoElems}
+		i++
 	}
 	return
 }

@@ -21,6 +21,7 @@ import (
 	"potionDB/src/tools"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -290,6 +291,7 @@ type TransactionManager struct {
 	RemoteInfo
 	connPool   *connPool
 	commitChan chan TMCommitInfo //Clock updates go to this channel. When a client needs to wait for a clock, the request also goes here
+	TMIdsInfo
 }
 
 type RemoteInfo struct {
@@ -298,6 +300,13 @@ type RemoteInfo struct {
 	bucketToIndex map[string][]int
 	ownBuckets    []string
 	hasAll        bool //In case server is replicating "*"
+}
+
+type TMIdsInfo struct {
+	clksInUse      []clocksi.Timestamp //For each client, contains the read clock of the ongoing txn
+	maxIDInUse     int64               //(atomic int) The last position in clksInUse that is relevant
+	newIDChan      chan int            //Channel from which new clients get their TM's IDs
+	canReuseIDChan chan int            //When a connection closes, the ID must be sent to this channel for later re-use
 }
 
 /////*****************CONSTANTS AND VARIABLES***********************/////
@@ -488,6 +497,12 @@ func Initialize(replicaID int16) (tm *TransactionManager) {
 			hasAll:        false,
 		},
 		commitChan: commitCh,
+		TMIdsInfo: TMIdsInfo{
+			clksInUse:      make([]clocksi.Timestamp, 100, 100),
+			maxIDInUse:     0,
+			newIDChan:      make(chan int, 10),
+			canReuseIDChan: make(chan int, 100),
+		},
 	}
 	tm.ownBuckets = buckets
 	//Check if server replicates all buckets
@@ -509,9 +524,11 @@ func Initialize(replicaID int16) (tm *TransactionManager) {
 	for i := 0; i < nDownGenHandlers; i++ {
 		go tm.handleDownstreamGeneratedOps()
 	}
+	go tm.generateTMIDs()
 	if debugMode {
 		go tm.sanityCheck()
 	}
+	InitializeGarbageCollector(tm)
 
 	return tm
 }
@@ -536,7 +553,9 @@ func (tm *TransactionManager) WaitUntilReady() {
 //Starts a goroutine to handle the client requests. Returns a channel to communicate with that goroutine
 func (tm *TransactionManager) CreateClientHandler() (channel chan TransactionManagerRequest) {
 	channel = make(chan TransactionManagerRequest)
-	go tm.listenForProtobufRequests(channel)
+	id := <-tm.newIDChan
+	atomic.AddInt64(&tm.maxIDInUse, 1)
+	go tm.listenForProtobufRequests(channel, id)
 	return
 }
 
@@ -544,7 +563,7 @@ func (tm *TransactionManager) SendRemoteMsg(msg TMRemoteMsg) {
 	tm.remoteChan <- msg
 }
 
-func (tm *TransactionManager) listenForProtobufRequests(channel chan TransactionManagerRequest) {
+func (tm *TransactionManager) listenForProtobufRequests(channel chan TransactionManagerRequest, id int) {
 	stop := false
 	var txnPartitions *ongoingTxn = &ongoingTxn{}
 	txnPartitions.partitions = make([]bool, nGoRoutines)
@@ -556,7 +575,7 @@ func (tm *TransactionManager) listenForProtobufRequests(channel chan Transaction
 	firstReq := <-channel
 
 	if firstReq.Args.getRequestType() == serverConnRequest {
-		tm.handleServerRequests(channel, firstReq.Args.(TMServerConn).ReplyChan)
+		tm.handleServerRequests(channel, firstReq.Args.(TMServerConn).ReplyChan, id)
 	}
 	/*
 		if firstReq.Args.getRequestType() != serverConnRequest {
@@ -565,22 +584,22 @@ func (tm *TransactionManager) listenForProtobufRequests(channel chan Transaction
 		}
 	*/
 	tm.connPool.newConn()
-	stop = tm.handleTMRequest(firstReq, txnPartitions)
+	stop = tm.handleTMRequest(firstReq, txnPartitions, id)
 	for !stop {
 		request := <-channel
-		stop = tm.handleTMRequest(request, txnPartitions)
+		stop = tm.handleTMRequest(request, txnPartitions, id)
 	}
 
 	tools.FancyDebugPrint(tools.TM_PRINT, tm.replicaID, "connection lost, shutting down goroutine for client.")
 }
 
 func (tm *TransactionManager) handleTMRequest(request TransactionManagerRequest,
-	txnPartitions *ongoingTxn) (shouldStop bool) {
+	txnPartitions *ongoingTxn, id int) (shouldStop bool) {
 	shouldStop = false
 
 	switch request.Args.getRequestType() {
 	case readStaticTMRequest:
-		tm.handleStaticTMRead(request)
+		tm.handleStaticTMRead(request, id)
 	case updateStaticTMRequest:
 		tm.handleStaticTMUpdate(request)
 	case readTMRequest:
@@ -588,11 +607,11 @@ func (tm *TransactionManager) handleTMRequest(request TransactionManagerRequest,
 	case updateTMRequest:
 		tm.handleTMUpdate(request, txnPartitions)
 	case startTxnTMRequest:
-		tm.handleTMStartTxn(request, txnPartitions)
+		tm.handleTMStartTxn(request, txnPartitions, id)
 	case commitTMRequest:
-		tm.handleTMCommit(request, txnPartitions)
+		tm.handleTMCommit(request, txnPartitions, id)
 	case abortTMRequest:
-		tm.handleTMAbort(request, txnPartitions)
+		tm.handleTMAbort(request, txnPartitions, id)
 	case newTriggerTMRequest:
 		tm.handleNewTrigger(request)
 	case getTriggersTMRequest:
@@ -600,6 +619,8 @@ func (tm *TransactionManager) handleTMRequest(request TransactionManagerRequest,
 	case lostConnRequest:
 		shouldStop = true
 		txnPartitions = nil
+		tm.clksInUse[id] = nil
+		tm.canReuseIDChan <- id
 	}
 	//remoteTxnRequest is handled separatelly
 
@@ -638,7 +659,7 @@ func (tm *TransactionManager) handleRemoteMsgs() {
 	That is, TM can still be single threaded - receive request -> process -> reply.
 */
 
-func (tm *TransactionManager) handleServerRequests(channel chan TransactionManagerRequest, replyChan chan TMS2SReply) {
+func (tm *TransactionManager) handleServerRequests(channel chan TransactionManagerRequest, replyChan chan TMS2SReply, id int) {
 	stop := false
 	ongoingInfo := make(map[int32]*ongoingTxn)
 
@@ -654,7 +675,7 @@ func (tm *TransactionManager) handleServerRequests(channel chan TransactionManag
 				replyChan <- TMS2SReply{ClientID: clientID, TxnID: txnID, ReplyType: proto.WrapperType_STATIC_READ_OBJS, Reply: <-channel}
 			}(clientID, txnID, innerArgs.Args.(TMStaticReadArgs).ReplyChan)*/
 			tm.handleStaticTMRead(TransactionManagerRequest{TransactionId: txnID,
-				Timestamp: request.Timestamp, Args: innerArgs.Args})
+				Timestamp: request.Timestamp, Args: innerArgs.Args}, id)
 		case updateStaticTMRequest:
 			/*go func(clientID int32, txnID TransactionId, channel chan TMStaticUpdateReply) {
 				replyChan <- TMS2SReply{ClientID: clientID, TxnID: txnID, ReplyType: proto.WrapperType_COMMIT, Reply: <-channel}
@@ -681,16 +702,16 @@ func (tm *TransactionManager) handleServerRequests(channel chan TransactionManag
 				replyChan <- TMS2SReply{ClientID: clientID, TxnID: txnID, ReplyType: proto.WrapperType_START_TXN, Reply: <-channel}
 			}(clientID, txnID, innerArgs.Args.(TMStartTxnArgs).ReplyChan)*/
 			tm.handleTMStartTxn(TransactionManagerRequest{TransactionId: txnID,
-				Timestamp: request.Timestamp, Args: innerArgs.Args}, ongoingInfo[clientID])
+				Timestamp: request.Timestamp, Args: innerArgs.Args}, ongoingInfo[clientID], id)
 		case commitTMRequest:
 			/*go func(clientID int32, txnID TransactionId, channel chan TMCommitReply) {
 				replyChan <- TMS2SReply{ClientID: clientID, TxnID: txnID, ReplyType: proto.WrapperType_COMMIT, Reply: <-channel}
 			}(clientID, txnID, innerArgs.Args.(TMCommitArgs).ReplyChan)*/
 			tm.handleTMCommit(TransactionManagerRequest{TransactionId: txnID,
-				Timestamp: request.Timestamp, Args: innerArgs.Args}, ongoingInfo[clientID])
+				Timestamp: request.Timestamp, Args: innerArgs.Args}, ongoingInfo[clientID], id)
 		case abortTMRequest:
 			tm.handleTMAbort(TransactionManagerRequest{TransactionId: txnID,
-				Timestamp: request.Timestamp, Args: innerArgs.Args}, ongoingInfo[clientID])
+				Timestamp: request.Timestamp, Args: innerArgs.Args}, ongoingInfo[clientID], id)
 		//Doesn't need reply
 		default:
 			fmt.Println("[TM]Unknown request type for S2S:", innerArgs.Args.getRequestType())
@@ -698,10 +719,10 @@ func (tm *TransactionManager) handleServerRequests(channel chan TransactionManag
 	}
 }
 
-func (tm *TransactionManager) handleStaticTMRead(request TransactionManagerRequest) {
+func (tm *TransactionManager) handleStaticTMRead(request TransactionManagerRequest, id int) {
 	readArgs := request.Args.(TMStaticReadArgs)
 	//tsToUse := request.Timestamp
-	tsToUse := tm.getClockToUse(request.Timestamp)
+	tsToUse := tm.getClockToUse(request.Timestamp, id)
 
 	var historyPos int
 	if doCompactHistory {
@@ -746,6 +767,7 @@ func (tm *TransactionManager) handleStaticTMRead(request TransactionManagerReque
 		close(readChan)
 	}
 
+	tm.clksInUse[id] = nil
 	if doCompactHistory {
 		tm.clocksArray.Delete(historyPos)
 	}
@@ -1019,11 +1041,11 @@ func (tm TransactionManager) groupWrites(updates []*UpdateObjectParams) (updsPer
 	return
 }
 
-func (tm *TransactionManager) handleTMStartTxn(request TransactionManagerRequest, txnPartitions *ongoingTxn) {
+func (tm *TransactionManager) handleTMStartTxn(request TransactionManagerRequest, txnPartitions *ongoingTxn, id int) {
 	//++fmt.Printf("%d TM%d - Started handling startTxn.\n", tm.replicaID, txnPartitions.debugID)
 	startTxnArgs := request.Args.(TMStartTxnArgs)
 
-	newClock := tm.getClockToUse(request.Timestamp)
+	newClock := tm.getClockToUse(request.Timestamp, id)
 	//fmt.Println("[TM]Got clock")
 	txnPartitions.originalClk = newClock.Copy()
 	txnPartitions.TransactionId = TransactionId(rand.Uint64())
@@ -1043,7 +1065,10 @@ func (tm *TransactionManager) handleTMStartTxn(request TransactionManagerRequest
 	//++fmt.Printf("%d TM%d - Finished handling finishTxn.\n", tm.replicaID, txnPartitions.debugID)
 }
 
-func (tm *TransactionManager) handleTMCommit(request TransactionManagerRequest, txnPartitions *ongoingTxn) {
+func (tm *TransactionManager) handleTMCommit(request TransactionManagerRequest, txnPartitions *ongoingTxn, id int) {
+	//No more reads will happen in this transaction so we can clean the read clock
+	tm.clksInUse[id] = nil
+
 	//++fmt.Printf("%d TM%d - Started handling commit.\n", tm.replicaID, txnPartitions.debugID)
 	commitArgs := request.Args.(TMCommitArgs)
 
@@ -1120,7 +1145,8 @@ func (tm *TransactionManager) handleTMCommit(request TransactionManagerRequest, 
 	//++fmt.Printf("%d TM%d - Finished handling commit.\n", tm.replicaID, txnPartitions.debugID)
 }
 
-func (tm *TransactionManager) handleTMAbort(request TransactionManagerRequest, txnPartitions *ongoingTxn) {
+func (tm *TransactionManager) handleTMAbort(request TransactionManagerRequest, txnPartitions *ongoingTxn, id int) {
+	tm.clksInUse[id] = nil
 	abortReq := MaterializerRequest{MatRequestArgs: MatAbortArgs{TransactionId: request.TransactionId}}
 	//for partId, _ := range txnPartitions.partSet {
 	for partId, isOn := range txnPartitions.partitions {
@@ -1150,10 +1176,11 @@ type RemoteInfo struct {
 }
 */
 
-func (tm *TransactionManager) getClockToUse(clientTs clocksi.Timestamp) (tsToUse clocksi.Timestamp) {
+func (tm *TransactionManager) getClockToUse(clientTs clocksi.Timestamp, id int) (tsToUse clocksi.Timestamp) {
 	//fmt.Println("[TM]Requesting clock...")
 	tm.localClock.Lock()
 	copyClk := tm.localClock.Copy()
+	tm.clksInUse[id] = copyClk
 	tm.localClock.Unlock()
 	tsToUse = copyClk.Merge(clientTs)
 	//fmt.Printf("[TM]Clocks. TM: %s; Merged: %s; Client: %s\n",
@@ -1164,7 +1191,8 @@ func (tm *TransactionManager) getClockToUse(clientTs clocksi.Timestamp) (tsToUse
 	}
 	//Have to wait
 	//fmt.Println("[TM]Waiting for clock")
-	req := TMWaitClock{targetClk: tsToUse, replyChan: make(chan clocksi.Timestamp, 1)}
+	req := TMWaitClock{targetClk: tsToUse, replyChan: make(chan clocksi.Timestamp, 1)} //TODO: What if we only wait on read?
+	tm.clksInUse[id] = tsToUse
 	tm.commitChan <- req
 	return <-req.replyChan
 }
@@ -1795,6 +1823,33 @@ func (tm *TransactionManager) handleRemoteStaticUpds(txnID TransactionId, ts clo
 		}
 	}
 
+}
+
+//The idea of this routine is to allow re-using IDs of clients that closed connection
+//as this allows for more efficient solutions.
+func (tm *TransactionManager) generateTMIDs() {
+	currMaxAvailableID := 0
+	reusableIDs := make([]int, 0, 10)
+	//Idea: Keep a bunch of IDs already pre-available, fill more as it empties
+	for {
+		if len(reusableIDs) > 0 {
+			tm.newIDChan <- reusableIDs[len(reusableIDs)-1]
+			reusableIDs = reusableIDs[:len(reusableIDs)-1]
+		} else {
+			tm.newIDChan <- currMaxAvailableID
+			currMaxAvailableID++
+			//TODO: Probably lock this.
+			if currMaxAvailableID == len(tm.clksInUse) {
+				tm.clksInUse = append(tm.clksInUse, nil)
+			}
+		}
+		//Check if any client closed. If so, keep reading until empty
+		for len(tm.canReuseIDChan) > 0 {
+			reusableIDs = append(reusableIDs, <-tm.canReuseIDChan)
+		}
+		//Known shortcoming: if at some point there are a lot of clients, and then few, the size of clksInUse will keep being big
+		//and thus GC will always check a lot of (nil) positions
+	}
 }
 
 type TMCommitInfo interface{}

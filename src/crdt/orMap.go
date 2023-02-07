@@ -240,7 +240,6 @@ func (crdt *ORMapCrdt) getValues(updsNotYetApplied []*UpdateArguments, keys []st
 			if has {
 				values[key] = crdt.getMinElem(elemMap)
 			}
-
 		}
 		return MapEntryState{Values: values}
 	}
