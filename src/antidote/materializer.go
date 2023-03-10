@@ -672,6 +672,8 @@ func (part *partition) handleMatCommit(args MatCommitArgs) {
 	if args.CommitTimestamp == nil {
 		fmt.Println("[MAT][ERROR]Received nil timestamp on commit!", args)
 	}
+	lowestPrep := part.getLowestPrepare()
+	part.removePrepare(args.TransactionId) //We always remove this prepare, even if the commit is put on hold.
 	if part.canCommit(args) {
 		//Safe to commit
 		//fmt.Println("[MAT]Apply commit")
@@ -680,9 +682,10 @@ func (part *partition) handleMatCommit(args MatCommitArgs) {
 		//fmt.Println("[MAT]Hold commit", args)
 		part.holdCommit(args)
 	}
-	//Need to check for hold commits iff - a) this commit is applied; b) this txnId was the lowest prepare
-	//For now we're always checking, this can be improved later. Checking is cheap as only need to check minimums (O(1))
-	part.checkHoldCommits()
+	if lowestPrep.txnId == args.TransactionId {
+		//Was the lowest prepare, so some commit on hold may be appliable now - even if this transaction's commit was put on hold.
+		part.checkHoldCommits()
+	}
 }
 
 func (part *partition) applyCommit(args MatCommitArgs) {
@@ -707,32 +710,19 @@ func (part *partition) holdCommit(args MatCommitArgs) {
 
 //Note: this function also removes args.TxnId from the list of prepares
 func (part *partition) canCommit(args MatCommitArgs) (canCommit bool) {
-	//Check if this commit is for the txn with lowest prepared clk. If it isn't, the commit must be queued.
-	//fmt.Println("[MAT][CanCommit]")
-	if part.prepClks.Len() == 1 {
-		//fmt.Println("[MAT][CanCommit]Can commit safely as there is no other prepare.")
-		//Can commit for sure, no other prepare except own
-		part.removeLowestPrepare()
-		return true
+	if part.prepClks.Len() == 0 {
+		if part.commitsOnHold.Len() == 0 {
+			return true //No prep or commit on hold, can commit for sure.
+		}
+		//No prep. Need to still check the lowest commit however.
+		return part.commitsOnHold.PeekMin().CommitTimestamp.IsHigher(args.CommitTimestamp) //if minCommitHold > args.CommitTimestamp -> safe to commit. Else, can't.
 	}
-	lowestPrep := part.getLowestPrepare()
-	if lowestPrep.txnId != args.TransactionId {
-		//fmt.Println("[MAT][CanCommit]TxnIds don't match: lowestPrep %d, this txn %d\n")
-		part.removePrepare(args.TransactionId)
-		return false //Must queue.
+	//If the lowest prepare is lower than args.CommitTimestamp, we can't commit for sure.
+	if part.prepClks.PeekMin().clk.IsLower(args.CommitTimestamp) {
+		return false
 	}
-	//fmt.Println("[MAT][CanCommit]TxnIds match. Must compare with next prepare.")
-	part.removeLowestPrepare()
-	lowestPrep = part.getLowestPrepare()
-	//fmt.Printf("[MAT][CanCommit]Lowest prepare: %v\n", lowestPrep)
-	if args.CommitTimestamp.IsLower(lowestPrep.clk) {
-		//fmt.Printf("[MAT][CanCommit]Commit ts is lower than the lowest prep: %s VS %s\n",
-		//args.CommitTimestamp.ToSortedString(), lowestPrep.clk.ToSortedString())
-		return true
-	}
-	//fmt.Printf("[MAT][CanCommit]Commit ts is not lower than the lowest prep: %s VS %s\n",
-	//args.CommitTimestamp.ToSortedString(), lowestPrep.clk.ToSortedString())
-	return false //Must still queue as at least one prepare has lower clock.
+	//The lowest prepare is higher than args.CommitTimestamp. If the lowest commit on hold is also higher (or no commit on hold), then we can commit. Otherwise, can't.
+	return part.commitsOnHold.Len() == 0 || part.commitsOnHold.PeekMin().CommitTimestamp.IsHigher(args.CommitTimestamp)
 }
 
 //downstreamUpds: key, CRDTType, bucket + downstream arguments of each update. This is what is sent to other replicas for them to apply the txn.
