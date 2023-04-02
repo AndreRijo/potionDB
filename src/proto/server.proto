@@ -4,7 +4,7 @@
 import "antidote.proto";
 option go_package = "potionDB/src/proto";
 
-message ApbServerConn {}
+//message ApbServerConn {}
 
 message S2SWrapper {
     required int32 clientID = 1;

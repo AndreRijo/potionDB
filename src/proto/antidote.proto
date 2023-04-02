@@ -244,19 +244,18 @@ message ApbUpdateOp {
     required ApbUpdateOperation operation = 2;
 }
 
-message ApbUpdateOperation {
+message ApbUpdateOperation { // TODO use this above
     optional ApbCounterUpdate counterop = 1;
     optional ApbSetUpdate setop = 2;
     optional ApbRegUpdate regop = 3;
     optional ApbMapUpdate mapop = 5;
     optional ApbCrdtReset resetop = 6;
-    optional ApbFlagUpdate flagop = 7;
+    optional ApbTopKInit topkinitop = 10;
     optional ApbMaxMinUpdate maxminop = 11;
     optional ApbTopkRmvUpdate topkrmvop = 12;
     optional ApbTopkUpdate topkop = 13;
     optional ApbLeaderboardUpdate leaderboardop = 14;
     optional ApbAverageUpdate avgop = 15;
-    optional ApbTopKInit topkinitop = 10;
 }
 
 // Objects to be updated
@@ -375,6 +374,8 @@ message ApbGetTriggersReply {
     repeated ApbNewTrigger mapping = 1;
     repeated ApbNewTrigger genericMapping = 2;
 }
+
+message ApbServerConn {}
 
 //Partial reading
 
