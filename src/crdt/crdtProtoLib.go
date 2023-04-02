@@ -66,6 +66,10 @@ func UpdateProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation, crdtType pr
 		tmpUpd = ResetOp{}
 		return &tmpUpd
 	}
+	if protobuf.GetTopkinitop() != nil {
+		tmpUpd = TopKInit{}.FromUpdateObject(protobuf)
+		return &tmpUpd
+	}
 
 	switch crdtType {
 	case proto.CRDTType_COUNTER:

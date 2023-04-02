@@ -24,9 +24,10 @@ message ProtoReplicateGroupTxn {
 
 message ProtoReplicateTxn {
     required int32 senderID = 1;
-    required bytes timestamp = 2;
+    required bytes readClk = 2;
     repeated ProtoNewRemoteTxn part = 3;       //One per partition in the txn
     required int32 txnID = 4;
+    required int64 commitTs = 5;
 }
 
 message ProtoNewRemoteTxn {
@@ -55,6 +56,12 @@ message ProtoOpDownstream {
     optional ProtoRWEmbMapDownstream rwembmapOp = 8;
     optional ProtoTopSumDownstream topsumOp = 9;
     optional ProtoResetDownstream resetOp = 15;
+    optional ProtoTopKInitDownstream topkinitOp = 14;
+}
+
+message ProtoTopKInitDownstream {
+    required uint32 topSize = 1;
+    required int32 shadowTopSize = 2;
 }
 
 message ProtoCounterDownstream {

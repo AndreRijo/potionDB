@@ -1,10 +1,10 @@
 package antidote
 
 import (
-	"potionDB/src/clocksi"
-	"potionDB/src/crdt"
 	fmt "fmt"
 	"math/rand"
+	"potionDB/src/clocksi"
+	"potionDB/src/crdt"
 	"potionDB/src/proto"
 	"testing"
 	"time"
@@ -73,7 +73,7 @@ func TestWrites1(t *testing.T) {
 	readParams := []ReadObjectParams{createReadObjParams(firstKey), createReadObjParams(secondKey)}
 	readReq, readChan := createStaticRead(secondWriteReply.TransactionId, secondWriteReply.Timestamp, readParams)
 
-	go tm.handleStaticTMRead(readReq)
+	go tm.handleStaticTMRead(readReq, 1)
 	readReply := <-readChan
 
 	if len(readReply.States[0].(crdt.SetAWValueState).Elems) == 0 || readReply.States[0].(crdt.SetAWValueState).Elems[0] != (*firstWriteParams[0].UpdateArgs).(crdt.Add).Element {

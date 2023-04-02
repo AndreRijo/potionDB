@@ -17,7 +17,7 @@ func createProtoStableClock(replicaID int16, ts int64) (protobuf *proto.ProtoSta
 func createProtoReplicateGroupTxn(replicaID int16, allTxns []RemoteTxn, bucketOps []RemoteTxn) (protobuf *proto.ProtoReplicateGroupTxn) {
 	protos := make([]*proto.ProtoReplicateTxn, len(bucketOps))
 	for i, txn := range bucketOps {
-		protos[i] = createProtoReplicateTxn(replicaID, txn.Clk, txn.Upds, txn.TxnID)
+		protos[i] = createProtoReplicateTxn(replicaID, txn.ReadClk, txn.CommitTs, txn.Upds, txn.TxnID)
 	}
 	minID, maxID := allTxns[0].TxnID, allTxns[len(allTxns)-1].TxnID
 	return &proto.ProtoReplicateGroupTxn{SenderID: pb.Int32(int32(replicaID)), Txns: protos, MinTxnID: pb.Int32(minID), MaxTxnID: pb.Int32(maxID)}
@@ -39,14 +39,14 @@ func createProtoReplicateGroupTxn(replicaID int16, allTxns []RemoteTxn, bucketOp
 	return &proto.ProtoReplicateGroupTxn{SenderID: pb.Int32(int32(replicaID)), Txns: protos, MinTxnID: pb.Int32(initialCount), MaxTxnID: pb.Int32(txnCount)}
 }*/
 
-func createProtoReplicateTxn(replicaID int16, clk clocksi.Timestamp, upds map[int][]*UpdateObjectParams, txnCount int32) (protobuf *proto.ProtoReplicateTxn) {
+func createProtoReplicateTxn(replicaID int16, readClk clocksi.Timestamp, commitTs int64, upds map[int][]*UpdateObjectParams, txnCount int32) (protobuf *proto.ProtoReplicateTxn) {
 	protos := make([]*proto.ProtoNewRemoteTxn, len(upds))
 	i := 0
 	for partID, partUpds := range upds {
 		protos[i] = createProtoNewRemoteTxn(int64(partID), partUpds)
 		i++
 	}
-	return &proto.ProtoReplicateTxn{SenderID: pb.Int32(int32(replicaID)), Timestamp: clk.ToBytes(), Part: protos, TxnID: &txnCount}
+	return &proto.ProtoReplicateTxn{SenderID: pb.Int32(int32(replicaID)), ReadClk: readClk.ToBytes(), CommitTs: &commitTs, Part: protos, TxnID: &txnCount}
 }
 
 func createProtoNewRemoteTxn(partID int64, upds []*UpdateObjectParams) (protobuf *proto.ProtoNewRemoteTxn) {
@@ -133,7 +133,8 @@ func protoToRemoteTxn(protobuf *proto.ProtoReplicateTxn) (request *RemoteTxn) {
 	}
 	return &RemoteTxn{
 		SenderID: int16(protobuf.GetSenderID()),
-		Clk:      clocksi.ClockSiTimestamp{}.FromBytes(protobuf.GetTimestamp()),
+		ReadClk:  clocksi.ClockSiTimestamp{}.FromBytes(protobuf.GetReadClk()),
+		CommitTs: protobuf.GetCommitTs(),
 		Upds:     upds,
 		TxnID:    protobuf.GetTxnID(),
 	}

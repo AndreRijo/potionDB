@@ -14,8 +14,12 @@ package antidote
 //Now, we could ask TM for the safe clock, and then ask Log to only send operations until that safe clock.
 //This works as every partition will have, at least, until that safe clock.
 
+//TODO: There's a lot of creating, copy and deleting slices here. This should be optimized
+//Whenever we receive transactions from the partitions, we have to copy all the transactions to txnCache
+
 import (
 	fmt "fmt"
+	"math"
 	"potionDB/src/clocksi"
 	"potionDB/src/crdt"
 	"potionDB/src/proto"
@@ -88,7 +92,8 @@ type StableClock struct {
 
 type RemoteTxn struct {
 	SenderID int16
-	Clk      clocksi.Timestamp
+	ReadClk  clocksi.Timestamp
+	CommitTs int64
 	Upds     map[int][]*UpdateObjectParams
 	TxnID    int32 //This is filled by remoteConnection.go. Used to identify the transactions
 }
@@ -212,11 +217,10 @@ func (req ReplyEmpty) getSenderID() int16 {
 func (repl *Replicator) Reset() {
 	if !shared.IsReplDisabled {
 		repl.txnCache = make(map[int][]PairClockUpdates)
-		dummyTs := clocksi.NewClockSiTimestamp()
 		for id := 0; id < int(nGoRoutines); id++ {
 			cacheEntry := make([]PairClockUpdates, 1, cacheInitialSize)
 			//All txns have a clock higher than this, so the first request is the equivalent of "requesting all commited txns"
-			cacheEntry[0] = PairClockUpdates{clk: &dummyTs}
+			cacheEntry[0] = PairClockUpdates{commitTs: -1}
 			repl.txnCache[id] = cacheEntry
 		}
 		fmt.Println("[REPLICATOR]Reset complete.")
@@ -243,7 +247,7 @@ func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, buc
 			for id := 0; id < int(nGoRoutines); id++ {
 				cacheEntry := make([]PairClockUpdates, 1, cacheInitialSize)
 				//All txns have a clock higher than this, so the first request is the equivalent of "requesting all commited txns"
-				cacheEntry[0] = PairClockUpdates{clk: &repl.initialDummyTs}
+				cacheEntry[0] = PairClockUpdates{commitTs: -1}
 				repl.txnCache[id] = cacheEntry
 			}
 			repl.replicaID = replicaID
@@ -292,9 +296,9 @@ func (repl *Replicator) replicateCycle() {
 		start = time.Now().UnixNano()
 		tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "starting replicateCycle")
 
-		repl.getNewTxns()
+		safeTs := repl.getNewTxns()
 		count++
-		toSend := repl.preparateDataToSend()
+		toSend := repl.prepareDataToSend(safeTs)
 		if len(toSend) > 0 {
 			fmt.Println("[REPLICATOR]Sending ops.", "Number of remote txns:", len(toSend))
 			repl.sendTxns(toSend)
@@ -315,18 +319,18 @@ func (repl *Replicator) replicateCycle() {
 	}
 }
 
-func (repl *Replicator) getNewTxns() {
+func (repl *Replicator) getNewTxns() (safeTs int64) {
 	tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "starting getNewTxns()")
-	replyChans := make([]chan StableClkUpdatesPair, len(repl.localPartitions))
+	replyChans := make([]chan StableTsUpdatesPair, len(repl.localPartitions))
 
 	//Send request for txns
 	for id, part := range repl.localPartitions {
 		partEntry := repl.txnCache[id]
-		replyChans[id] = make(chan StableClkUpdatesPair)
-		lastClk := *partEntry[len(partEntry)-1].clk
+		replyChans[id] = make(chan StableTsUpdatesPair)
+		lastTs := partEntry[len(partEntry)-1].commitTs
 		part.SendLoggerRequest(LoggerRequest{
 			LogRequestArgs: LogTxnArgs{
-				lastClock: lastClk,
+				LastTs:    lastTs,
 				ReplyChan: replyChans[id],
 			},
 		})
@@ -334,6 +338,7 @@ func (repl *Replicator) getNewTxns() {
 	tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "getNewTxns() second part")
 
 	//Receive replies and cache them
+	safeTs = int64(math.MaxInt64)
 	for id, replyChan := range replyChans {
 		reply := <-replyChan
 		cacheEntry := repl.txnCache[id]
@@ -342,12 +347,68 @@ func (repl *Replicator) getNewTxns() {
 			cacheEntry = cacheEntry[:len(cacheEntry)-1]
 		}
 		cacheEntry = append(cacheEntry, reply.upds...)
-		repl.txnCache[id] = append(cacheEntry, PairClockUpdates{clk: &reply.stableClock, upds: []*UpdateObjectParams{}})
+		repl.txnCache[id] = append(cacheEntry, PairClockUpdates{commitTs: reply.stableTs, upds: []*UpdateObjectParams{}})
+		if safeTs > reply.stableTs {
+			safeTs = reply.stableTs
+		}
 	}
 	tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "getNewTxns() finish")
+	return safeTs
 }
 
-func (repl *Replicator) preparateDataToSend() (toSend []RemoteTxn) {
+func (repl *Replicator) prepareDataToSend(safeTs int64) (toSend []RemoteTxn) {
+	toSend = make([]RemoteTxn, 0, toSendInitialSize) //TODO: Probably could re-use this buffer
+	nPartitions := len(repl.localPartitions)
+	var readClk clocksi.Timestamp
+	done := false //This will be true when we reach safeTs
+	for !done {
+		minTs := int64(math.MaxInt64)
+		txnUpdates := make(map[int][]*UpdateObjectParams) //Updates of current transaction
+		for id := 0; id < nPartitions; id++ {
+			partCache := repl.txnCache[id][0]
+			partTs := partCache.commitTs
+			if partTs < minTs {
+				if len(partCache.upds) == 0 && len(repl.txnCache[id]) > 0 {
+					//No more transactions left in this partition.
+					//Cleaning buffer
+					repl.txnCache[id] = make([]PairClockUpdates, 1, cacheInitialSize)
+					repl.txnCache[id][0] = partCache
+				}
+				minTs = partTs
+				txnUpdates = nil
+				txnUpdates = make(map[int][]*UpdateObjectParams)
+				if len(partCache.upds) > 0 {
+					txnUpdates[id] = partCache.upds
+					readClk = partCache.readClk
+				}
+			} else if partTs == minTs {
+				if len(partCache.upds) == 0 && len(repl.txnCache[id]) > 0 {
+					//Cleaning buffer
+					repl.txnCache[id] = make([]PairClockUpdates, 1, cacheInitialSize)
+					repl.txnCache[id][0] = partCache
+				} else {
+					txnUpdates[id] = partCache.upds
+					readClk = partCache.readClk
+				}
+			}
+			//If partTs > minTs, we ignore - we'll process later
+		}
+		if len(txnUpdates) > 0 {
+			//In case of the last iteration, there may not be any update to send
+			toSend = append(toSend, RemoteTxn{ReadClk: readClk, CommitTs: minTs, Upds: txnUpdates, SenderID: repl.replicaID})
+			for id := range txnUpdates {
+				repl.txnCache[id] = repl.txnCache[id][1:] //Hides what is referring to the current transaction
+			}
+		}
+		if minTs == safeTs {
+			done = true //We're done
+		}
+	}
+	return
+}
+
+/*
+func (repl *Replicator) prepareDataToSend() (toSend []RemoteTxn) {
 	tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "starting prepareDataToSend")
 	toSend = make([]RemoteTxn, 0, toSendInitialSize)
 	foundStableClk := false
@@ -400,6 +461,7 @@ func (repl *Replicator) preparateDataToSend() (toSend []RemoteTxn) {
 	tools.FancyDebugPrint(tools.REPL_PRINT, repl.replicaID, "finished prepareDataToSend")
 	return
 }
+*/
 
 func (repl *Replicator) sendTxns(toSend []RemoteTxn) {
 
@@ -412,27 +474,27 @@ func (repl *Replicator) sendTxns(toSend []RemoteTxn) {
 	//repl.sendIndividualTxns(toSend)
 	//Send clock to ensure all replicas receive the latest clock.
 	//This is also used to know that the last transaction sent has ended.
-	repl.remoteConn.SendStableClk(toSend[len(toSend)-1].Clk.GetPos(repl.replicaID))
+	repl.remoteConn.SendStableClk(toSend[len(toSend)-1].CommitTs)
 }
 
 func (repl *Replicator) sendIndividualTxns(toSend []RemoteTxn) {
-	fmt.Printf("[REPLICATOR]Sending txns individually (size: %d)\n", len(toSend))
+	//fmt.Printf("[REPLICATOR]Sending txns individually (size: %d)\n", len(toSend))
 	for _, txn := range toSend {
 		repl.remoteConn.SendTxn(txn)
 	}
 }
 
 func (repl *Replicator) sendGroupTxns(toSend []RemoteTxn) {
-	fmt.Printf("[REPLICATOR]Sending txns in group (size: %d). Min: %d, max: %d\n", len(toSend), minTxnsToGroup, maxTxnsPerGroup)
+	//fmt.Printf("[REPLICATOR]Sending txns in group (size: %d). Min: %d, max: %d\n", len(toSend), minTxnsToGroup, maxTxnsPerGroup)
 	end := 0
 	for len(toSend) > 0 {
 		end = tools.MinInt(len(toSend), maxTxnsPerGroup)
 		//start, end = currOffset, tools.MinInt(len(toSend)-currOffset, maxTxnsPerGroup)+currOffset //for txns variable
 		currTxns := toSend[:end]
-		firstClk := currTxns[0].Clk
+		firstClk := currTxns[0].ReadClk
 		for i, txn := range currTxns {
-			if !txn.Clk.IsEqualExceptForSelf(firstClk, repl.replicaID) {
-				fmt.Printf("[REPLICATOR]Clk of other replica changed. This happened at index %d. Clks. %s, %s\n", i, firstClk.ToSortedString(), txn.Clk.ToSortedString())
+			if !txn.ReadClk.IsEqualExceptForSelf(firstClk, repl.replicaID) {
+				//fmt.Printf("[REPLICATOR]Clk of other replica changed. This happened at index %d. Clks. %s, %s\n", i, firstClk.ToSortedString(), txn.ReadClk.ToSortedString())
 				end = i
 				currTxns = currTxns[:i]
 				//This txn depends on some txn of another replica, thus better not put in this group
@@ -441,13 +503,13 @@ func (repl *Replicator) sendGroupTxns(toSend []RemoteTxn) {
 		}
 		if end < minTxnsToGroup/2 {
 			//Send individually, too few transactions.
-			fmt.Printf("[REPLICATOR]Sending individual in groupTxns. End: %d, min/2: %d, nTxns: %d\n", end, minTxnsToGroup, len(currTxns))
+			//fmt.Printf("[REPLICATOR]Sending individual in groupTxns. End: %d, min/2: %d, nTxns: %d\n", end, minTxnsToGroup, len(currTxns))
 			for _, txn := range currTxns {
 				repl.remoteConn.SendTxn(txn)
 			}
 		} else {
 			//Send the slice
-			fmt.Printf("[REPLICATOR]Sending group in groupTxns. Size: %d\n", len(currTxns))
+			//fmt.Printf("[REPLICATOR]Sending group in groupTxns. Size: %d\n", len(currTxns))
 			repl.remoteConn.SendGroupTxn(currTxns)
 		}
 		toSend = toSend[end:] //Hide positions that were already sent
@@ -502,14 +564,14 @@ func (repl *Replicator) groupTxns(txns []RemoteTxn) {
 */
 
 func (repl *Replicator) receiveRemoteTxns() {
-	fmt.Println("[Replicator]Ready to receive requests from RabbitMQ.")
+	//fmt.Println("[Replicator]Ready to receive requests from RabbitMQ.")
 	for {
-		fmt.Println("[REPL]Iterating receiveRemoteTxns. Ts:", time.Now().String())
+		///fmt.Println("[REPL]Iterating receiveRemoteTxns. Ts:", time.Now().String())
 		tools.FancyInfoPrint(tools.REPL_PRINT, repl.replicaID, "iterating receiveRemoteTxns")
 		remoteReq := repl.remoteConn.GetNextRemoteRequest()
-		fmt.Println("[REPL]Received something from RabbitMQ, handling request.")
+		//fmt.Println("[REPL]Received something from RabbitMQ, handling request.")
 		repl.handleRemoteRequest(remoteReq)
-		fmt.Println("[REPL]Finish interating receiveRemoteTxns. Ts:", time.Now().String())
+		//fmt.Println("[REPL]Finish interating receiveRemoteTxns. Ts:", time.Now().String())
 	}
 }
 
@@ -524,9 +586,9 @@ func (repl *Replicator) handleRemoteRequest(remoteReq ReplicatorMsg) {
 			fmt.Println("[REPL]Finished sending TMRemoteTxn to TM due to clock. Ts:", time.Now().String())
 			repl.receiveHold[typedReq.SenderID] = TMRemoteTxn{}
 		}*/
-		fmt.Println("[REPL]Sending TMRemoteClk to TM. Ts:", time.Now().String())
+		//fmt.Println("[REPL]Sending TMRemoteClk to TM. Ts:", time.Now().String())
 		repl.tm.SendRemoteMsg(TMRemoteClk{ReplicaID: typedReq.SenderID, StableTs: typedReq.Ts})
-		fmt.Println("[REPL]Finished sending TMRemoteClk to TM. Ts:", time.Now().String())
+		//fmt.Println("[REPL]Finished sending TMRemoteClk to TM. Ts:", time.Now().String())
 	case *RemoteTxn:
 		//repl.tm.SendRemoteMsg(TMRemoteTxn{ReplicaID: typedReq.SenderID, Clk: typedReq.Clk, Upds: typedReq.Upds})
 		repl.tm.SendRemoteMsg(*typedReq)

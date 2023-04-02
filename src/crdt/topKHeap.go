@@ -174,7 +174,7 @@ func (crdt *TopKHeapCrdt) InitializeWithSize(startTs *clocksi.Timestamp, replica
 		elems:        make(map[int32]*TopKHeapElement),
 		elemsHeap:    TopHeap{values: make([]*TopKHeapElement, size), nEntries: new(int)},
 		rems:         make(map[int32]clocksi.Timestamp),
-		notInTop:     make(map[int32]*setTopKHeapElement),
+		notInTop:     make(map[int32]*setTopKHeapElement, size),
 		notInTopHeap: make(NotInTopHeap, 0, size),
 	}
 	newCrdt = crdt

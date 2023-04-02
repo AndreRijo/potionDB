@@ -156,6 +156,10 @@ func (ts ClockSiTimestamp) NewTimestamp() (newTs Timestamp) {
 	return ClockSiTimestamp{VectorClock: vc}
 }
 
+func GetSystemCurrTime() int64 {
+	return time.Now().UTC().UnixNano()
+}
+
 func (ts ClockSiTimestamp) NextTimestamp(id int16) (newTs Timestamp) {
 	newVc := make(map[int16]int64)
 	for i, value := range ts.VectorClock {

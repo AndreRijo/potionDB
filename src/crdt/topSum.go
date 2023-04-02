@@ -204,9 +204,9 @@ func (crdt *TopSumCrdt) InitializeWithSize(startTs *clocksi.Timestamp, replicaID
 	crdt = &TopSumCrdt{
 		CRDTVM:        (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete),
 		maxElems:      size,
-		elems:         make(map[int32]*TopKScore),
-		notInTop:      make(map[int32]*TopKScore),
-		notPropagated: make(map[int32]*TopKScore),
+		elems:         make(map[int32]*TopKScore, size),
+		notInTop:      make(map[int32]*TopKScore, size),
+		notPropagated: make(map[int32]*TopKScore, size),
 		replicaID:     replicaID,
 	}
 	newCrdt = crdt
@@ -300,6 +300,8 @@ func (crdt *TopSumCrdt) Update(args UpdateArguments) (downstreamArgs DownstreamA
 		return crdt.getTopSAddAllDownstreamArgs(typedArgs)
 	case TopSSubAll:
 		return crdt.getTopSSubAllDownstreamArgs(typedArgs)
+	case TopKInit:
+		downstreamArgs = typedArgs
 	}
 	return nil
 }
@@ -355,6 +357,15 @@ func (crdt *TopSumCrdt) applyDownstream(downstreamArgs UpdateArguments) (effect 
 		return crdt.applyTopSSubAllDownstreamArgs(typedArgs), nil
 	}
 	return nil, nil
+}
+
+func (crdt *TopSumCrdt) applyInit(op *TopKInit) (effect *Effect, otherDownstreamArgs DownstreamArguments) {
+	crdt.maxElems = int(op.TopSize)
+	fmt.Printf("[TopSum]Set top size to %d\n", crdt.maxElems)
+	var effectValue Effect = NoEffect{}
+	effect = &effectValue
+	//TODO (potencially): consider giving support for this operation if there is already elements in the top.
+	return
 }
 
 //TODO: I need to check pointers, as they may be shared between multiple maps (mainly, non-propagated + other two.)
