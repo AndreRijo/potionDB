@@ -66,6 +66,10 @@ func UpdateProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation, crdtType pr
 		tmpUpd = ResetOp{}
 		return &tmpUpd
 	}
+	if protobuf.GetTopkinitop() != nil {
+		tmpUpd = TopKInit{}.FromUpdateObject(protobuf)
+		return &tmpUpd
+	}
 
 	switch crdtType {
 	case proto.CRDTType_COUNTER:
@@ -189,6 +193,10 @@ func partialReadRespProtoToAntidoteState(protobuf *proto.ApbReadObjectResp, crdt
 }
 
 func DownstreamProtoToAntidoteDownstream(protobuf *proto.ProtoOpDownstream, crdtType proto.CRDTType) (downOp DownstreamArguments) {
+	if protobuf.GetTopkinitOp() != nil {
+		downOp = TopKInit{}.FromReplicatorObj(protobuf)
+		return downOp
+	}
 	switch crdtType {
 	case proto.CRDTType_COUNTER:
 		downOp = downstreamProtoCounterToAntidoteDownstream(protobuf)

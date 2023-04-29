@@ -154,6 +154,14 @@ message ApbTopkUpdate{
 	required sint64 score = 2;
 }
 
+//Initializer to give a non-default size to the top
+message ApbTopKInit{
+    required uint32 topSize = 1;
+    //This controls the extra number of top elements that should be actively maintained in the top, to ensure causality in the presence of removes.
+    //Set to -1 to have PotionDB calculate the appropriate value automatically.
+    required int32 shadowTopSize = 2;
+}
+
 // Value topk/topk-rmv request
 /*
 message ApbGetTopkResp {
@@ -242,7 +250,7 @@ message ApbUpdateOperation { // TODO use this above
     optional ApbRegUpdate regop = 3;
     optional ApbMapUpdate mapop = 5;
     optional ApbCrdtReset resetop = 6;
-    optional ApbFlagUpdate flagop = 7;
+    optional ApbTopKInit topkinitop = 7;
     optional ApbMaxMinUpdate maxminop = 11;
     optional ApbTopkRmvUpdate topkrmvop = 12;
     optional ApbTopkUpdate topkop = 13;

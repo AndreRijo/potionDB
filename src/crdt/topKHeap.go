@@ -245,10 +245,10 @@ func (crdt *TopKHeapCrdt) applyDownstream(downstreamArgs UpdateArguments) (effec
 		effect, otherDownstreamArgs = crdt.applyAdd(&opType.DownstreamTopKAdd)
 	case OptDownstreamTopKRemove:
 		effect, otherDownstreamArgs = crdt.applyRemove(&opType.DownstreamTopKRemove)
-	case DownstreamTopKAddAll:
-		effect, otherDownstreamArgs = crdt.applyAddAll(&opType)
-	case DownstreamTopKRemoveAll:
-		effect, otherDownstreamArgs = crdt.applyRemoveAll(&opType)
+		/*case DownstreamTopKAddAll:
+			effect, otherDownstreamArgs = crdt.applyAddAll(&opType)
+		case DownstreamTopKRemoveAll:
+			effect, otherDownstreamArgs = crdt.applyRemoveAll(&opType)*/
 	}
 	return
 }

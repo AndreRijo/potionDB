@@ -35,6 +35,12 @@ message ProtoOpDownstream {
     optional ProtoRWEmbMapDownstream rwembmapOp = 8;
     optional ProtoTopSumDownstream topsumOp = 9;
     optional ProtoResetDownstream resetOp = 15;
+    optional ProtoTopKInitDownstream topkinitOp = 14;
+}
+
+message ProtoTopKInitDownstream {
+    required uint32 topSize = 1;
+    required int32 shadowTopSize = 2;
 }
 
 message ProtoCounterDownstream {
