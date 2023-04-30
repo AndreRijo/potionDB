@@ -1,15 +1,66 @@
-Single server on port 8087 (default):
+Note: This is just a quick start up guide. It is recommended to read the full README instead.
 
-docker build -t "potiondb" .
-docker run -d -p 8087:8087 -p 5672:5672 --name potiondb8087 potiondb
+*****Single server on port 8087 (default)*****
+
+docker pull andrerj/potiondb
+
+(or, if it is preferred to build from source):
+docker build . -t mypotiondb
+
+Execute the server:
+docker run -p 8087:8087 -p 5672:5672 --name potiondb andrerj/potiondb
+
+Replace andrerj/potiondb above if building from source.
+If you want to run PotionDB in the background, add the parameter "-d" after run.
+
+To stop PotionDB:
+docker stop -t 1 potiondb
 
 
 
 
-More than one server:
+*****Executing multiple servers in the same machine*****
 
+In this example, we will create 5 instances of PotionDB.
+
+Creating a network that will connect with ease the 5 instances of PotionDB:
 docker network create potiondb-net
-docker build -t "potiondb1" -f Dockerfile_s1 .
-docker build -t "potiondb2" -f Dockerfile_s2 .
-docker run -d -p 8087:8087 -p 5674:5672 --network potiondb-net --name potiondb8087 potiondb1
-docker run -d -p 8088:8087 -p 5673:5672 --network potiondb-net --name potiondb8088 potiondb2
+
+Obtaining the image:
+docker pull andrerj/potiondb
+
+(or, if it is preferred to build from source):
+docker build . -t mypotiondb
+
+Starting the servers:
+docker run -d -p 8087:8087 -p 5672:5672 --network potiondb-net --CONFIG=/go/bin/configs/singlePC/docker/R1 --name potiondb1 andrerj/potiondb
+docker run -d -p 8088:8087 -p 5673:5672 --network potiondb-net --CONFIG=/go/bin/configs/singlePC/docker/R2 --name potiondb2 andrerj/potiondb
+docker run -d -p 8089:8087 -p 5674:5672 --network potiondb-net --CONFIG=/go/bin/configs/singlePC/docker/R3 --name potiondb3 andrerj/potiondb
+docker run -d -p 8090:8087 -p 5675:5672 --network potiondb-net --CONFIG=/go/bin/configs/singlePC/docker/R4 --name potiondb4 andrerj/potiondb
+docker run -d -p 8091:8087 -p 5676:5672 --network potiondb-net --CONFIG=/go/bin/configs/singlePC/docker/R5 --name potiondb5 andrerj/potiondb
+
+This will prepare a setup ready to be used by PotionDB's TPC-H Client, available at: https://github.com/AndreRijo/TPCH-Client
+
+You can customize the configuration files used in order to change, e.g., what each server replicates (buckets).
+By default each server is configured to replicate the buckets relevant to TPC-H.
+
+
+
+
+*****Executing multiple servers across different machines*****
+
+If you wish to run PotionDB instances across multiple machines, modify the configuration files in configs/cluster/normal.
+In each configuration file modify the line "remoteRabbitMQAddresses =" to include the IP address of each node except the self, appended with ":5672"
+
+Make sure to do the following in each of the machines:
+docker pull andrerj/potiondb
+
+And to make the modified configuration files available in each machine.
+
+Then run the following commands, each one on its respective machine:
+docker run -p 8087:8087 -p 5672:5672 -v /FULL_PATH_TO_FOLDER_WITH_CONFIGS/cluster/normal/R1:/go/bin/extern/ -e CONFIG=/go/bin/extern/ --name potiondb andrerj/potiondb
+docker run -p 8087:8087 -p 5672:5672 -v /FULL_PATH_TO_FOLDER_WITH_CONFIGS/cluster/normal/R2:/go/bin/extern/ -e CONFIG=/go/bin/extern/ --name potiondb andrerj/potiondb
+docker run -p 8087:8087 -p 5672:5672 -v /FULL_PATH_TO_FOLDER_WITH_CONFIGS/cluster/normal/R3:/go/bin/extern/ -e CONFIG=/go/bin/extern/ --name potiondb andrerj/potiondb
+docker run -p 8087:8087 -p 5672:5672 -v /FULL_PATH_TO_FOLDER_WITH_CONFIGS/cluster/normal/R4:/go/bin/extern/ -e CONFIG=/go/bin/extern/ --name potiondb andrerj/potiondb
+docker run -p 8087:8087 -p 5672:5672 -v /FULL_PATH_TO_FOLDER_WITH_CONFIGS/cluster/normal/R5:/go/bin/extern/ -e CONFIG=/go/bin/extern/ --name potiondb andrerj/potiondb
+

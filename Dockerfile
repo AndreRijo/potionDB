@@ -1,20 +1,11 @@
 # Debian image with go installed and configured at /go
 FROM golang as base
 
-# Dependencies
-#RUN go get github.com/golang/protobuf/proto
-#RUN go get github.com/twmb/murmur3
-#RUN go get github.com/streadway/amqp
-
 # Adding src and building
-COPY potionDB/go.mod potionDB/go.sum /go/potionDB/
-#ADD potionDB/go.sum /go/potionDB/
-ADD tpch_data/tpch /go/tpch_data/tpch/
-ADD tpch_data/go.mod /go/tpch_data/
-#RUN go install -race main
-#RUN go install main
+COPY go.mod go.sum /go/potionDB/
 RUN cd potionDB && go mod download
-ADD potionDB/src/ /go/potionDB/src/
+ADD src/ /go/potionDB/src/
+ADD tpch_helper/ /go/potionDB/tpch_helper/
 RUN cd potionDB/src/main && go build
 
 
@@ -29,20 +20,17 @@ COPY --from=base /usr/local/go/bin/ /go/
 COPY --from=base /go/potionDB/src/main/main /go/bin/
 
 #Add start script
-ADD potionDB/dockerStuff/start.sh /go/bin/
+ADD dockerStuff/start.sh /go/bin/
 
 #Default listen port
 EXPOSE 8087
 #RabbitMQ port
 EXPOSE 5672
 
-#Arguments
+#Arguments. You can add here more that you need, check dockerStuff/start.sh and src/main/protoServer.go, method loadConfigs().
 ENV CONFIG "/go/bin/configs/cluster/default"
 ENV RABBITMQ_WAIT 10s
 ENV BUCKETS "none"
-ENV DISABLE_REPLICATOR "none"
-ENV DISABLE_LOG "none"
-ENV DISABLE_READ_WAITING "none"
 ENV POOL_MAX "none"
 ENV POTIONDB_WAIT 0s
 ENV TOPK_SIZE 100
@@ -51,18 +39,13 @@ ENV SCALE 1
 ENV DATALOC "go/data/"
 ENV REGION "none"
 
-#If rabbitMQ takes a long time to start, add some delay to PotionDB startup
+#If RabbitMQ takes a long time to start, add some delay to PotionDB startup
 #ENV RABBITMQ_VHOST /crdts
 #ENV POTIONDB_WAIT 0s
 
-#TODO: Add config file to the right folder
 #Add config folders late to avoid having to rebuild multiple images
-#ENV RABBITMQ_PID_FILE /var/lib/rabbitmq/mnesia/rabbitmq
-#ADD potionDB/dockerStuff/rabbitmq.config /etc/rabbitmq/
-#ADD potionDB/dockerStuff/definitions.json /etc/rabbitmq/
-#RUN chown rabbitmq:rabbitmq /etc/rabbitmq/rabbitmq.config /etc/rabbitmq/definitions.json
-ADD potionDB/dockerStuff/rabbitmq.conf /etc/rabbitmq/
-ADD potionDB/configs /go/bin/configs
+ADD dockerStuff/rabbitmq.conf /etc/rabbitmq/
+ADD configs /go/bin/configs
 
 # Run the protoserver
 #CMD ["sh", "-c", "go/bin/start.sh $CONFIG"]
