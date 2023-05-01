@@ -1,7 +1,3 @@
-**IMPORTANT NOTE**: Please change to *remoteOp* branch, as the *main* branch is outdated as of now. 
-Reading this README file in the *main* branch may lead to broken links.
-[Click here to change to *remoteOp* branch](https://github.com/AndreRijo/potionDB/tree/remoteOp)
-
 # PotionDB
 
 A geo-distributed database featuring partial replication with transactional causal consistency.
@@ -21,7 +17,7 @@ Each PotionDB server replicates a subset (potentially all) of all buckets existi
 
 The version used to produce the results in our paper is ready in the Docker image andrerj/potiondb:vldb. Please use said version to reproduce any results obtained in the paper. Instructions on how to run PotionDB can be found [here](#Getting-Started) and [here](#Running-multiple-instances-of-PotionDB). You will also want to check the [PotionDB's TPC-H Client](https://github.com/AndreRijo/TPCH-Client), which implements TPC-H's benchmark and includes instructions on how to prepare and run a TPC-H workload.
 
-If building from source is a must, please refer to the instructions in [Building from source](#Building-from-source) and use the branch *remoteOp*.
+If building from source is a must, please refer to the instructions in [Building from source](#Building-from-source) and use the branch [*remoteOp*](https://github.com/AndreRijo/potionDB/tree/remoteOp).
 Usage of other branches may contain modifications/future work not included in the paper which may affect the results.
 
 ## Getting Started
@@ -218,7 +214,7 @@ If so, however, one terminal instance will be needed per PotionDB.
 #### Across multiple devices
 
 First and foremost, open the configuration files in [configs/cluster/normal](configs/cluster/normal).
-In each configuration file, modify the line "remoteRabbitMQAddresses =" to include the IP addresses of each node except the self, appended with ":5672".
+In each configuration file, modify the line "remoteRabbitMQAddresses =" to include the IP addresses of each device except the self, appended with ":5672".
 
 For example, if running three servers with addresses 192.168.10.1, 192.168.10.2, 192.168.10.3:
 ```
