@@ -24,6 +24,13 @@ The version used to produce the results in our paper is ready in the Docker imag
 If building from source is a must, please refer to the instructions in [Building from source](#Building-from-source) and use the branch [*remoteOp*](https://github.com/AndreRijo/potionDB/tree/remoteOp).
 Usage of other branches may contain modifications/future work not included in the paper which may affect the results.
 
+List of other relevant repositories:
+
+- [PotionDB's TPCH Client](https://github.com/AndreRijo/TPCH-Client)
+- [TPCH Locality Tool](https://github.com/AndreRijo/TPCH-LocalityTool)
+- [DockerManager](https://github.com/AndreRijo/DockerManager)
+- [Test configurations repository](https://github.com/AndreRijo/potiondb-vldb-configs-rep)
+
 ## Getting Started
 
 The easiest way to test PotionDB is to use its pre-compiled Docker image, which already contains all dependencies. To install Docker, please refer to https://docs.docker.com/engine/install/
