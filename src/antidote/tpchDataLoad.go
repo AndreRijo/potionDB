@@ -4,9 +4,9 @@ import (
 	fmt "fmt"
 	"potionDB/src/crdt"
 	"potionDB/src/proto"
+	tpch "potionDB/tpch_helper"
 	"strings"
 	"time"
-	"tpch_data/tpch"
 )
 
 type DataloadParameters struct {
