@@ -17,7 +17,7 @@ Each PotionDB server replicates a subset (potentially all) of all buckets existi
 
 The version used to produce the results in our paper is ready in the Docker image andrerj/potiondb:vldb. Please use said version to reproduce any results obtained in the paper. Instructions on how to run PotionDB can be found [here](#Getting-Started) and [here](#Running-multiple-instances-of-PotionDB). You will also want to check the [PotionDB's TPC-H Client](https://github.com/AndreRijo/TPCH-Client), which implements TPC-H's benchmark and includes instructions on how to prepare and run a TPC-H workload.
 
-If building from source is a must, please refer to the instructions in [Building from source](#Building-from-source) and use the branch *remoteOp*.
+If building from source is a must, please refer to the instructions in [Building from source](#Building-from-source) and use the branch [*remoteOp*](https://github.com/AndreRijo/potionDB/tree/remoteOp).
 Usage of other branches may contain modifications/future work not included in the paper which may affect the results.
 
 ## Getting Started
