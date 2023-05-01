@@ -300,8 +300,10 @@ func (crdt *TopSumCrdt) Update(args UpdateArguments) (downstreamArgs DownstreamA
 		return crdt.getTopSAddAllDownstreamArgs(typedArgs)
 	case TopSSubAll:
 		return crdt.getTopSSubAllDownstreamArgs(typedArgs)
+	case TopKInit:
+		downstreamArgs = typedArgs
 	}
-	return nil
+	return
 }
 
 func (crdt *TopSumCrdt) getTopSAddDownstreamArgs(addOp TopSAdd) (downstreamArgs DownstreamArguments) {
@@ -353,8 +355,19 @@ func (crdt *TopSumCrdt) applyDownstream(downstreamArgs UpdateArguments) (effect 
 		return crdt.applyTopSAddAllDownstreamArgs(typedArgs)
 	case DownstreamTopSSubAll:
 		return crdt.applyTopSSubAllDownstreamArgs(typedArgs), nil
+	case TopKInit:
+		return crdt.applyInit(typedArgs), nil
 	}
 	return nil, nil
+}
+
+func (crdt *TopSumCrdt) applyInit(op TopKInit) (effect *Effect) {
+	crdt.maxElems = int(op.TopSize)
+	//fmt.Printf("[TopSum]Set top size to %d\n", crdt.maxElems)
+	var effectValue Effect = NoEffect{}
+	effect = &effectValue
+	//TODO (potencially): consider giving support for this operation if there is already elements in the top.
+	return
 }
 
 //TODO: I need to check pointers, as they may be shared between multiple maps (mainly, non-propagated + other two.)

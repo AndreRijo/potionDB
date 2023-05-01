@@ -33,11 +33,11 @@ docker pull andrerj/potiondb
 docker build . -t mypotiondb
 
 Starting the servers:
-docker run -d -p 8087:8087 -p 5672:5672 --network potiondb-net --CONFIG=/go/bin/configs/singlePC/docker/R1 --name potiondb1 andrerj/potiondb
-docker run -d -p 8088:8087 -p 5673:5672 --network potiondb-net --CONFIG=/go/bin/configs/singlePC/docker/R2 --name potiondb2 andrerj/potiondb
-docker run -d -p 8089:8087 -p 5674:5672 --network potiondb-net --CONFIG=/go/bin/configs/singlePC/docker/R3 --name potiondb3 andrerj/potiondb
-docker run -d -p 8090:8087 -p 5675:5672 --network potiondb-net --CONFIG=/go/bin/configs/singlePC/docker/R4 --name potiondb4 andrerj/potiondb
-docker run -d -p 8091:8087 -p 5676:5672 --network potiondb-net --CONFIG=/go/bin/configs/singlePC/docker/R5 --name potiondb5 andrerj/potiondb
+docker run -d -p 8087:8087 -p 5672:5672 --network potiondb-net --cap-add=NET_ADMIN --CONFIG=/go/bin/configs/singlePC/docker/R1 --name potiondb1 andrerj/potiondb
+docker run -d -p 8088:8087 -p 5673:5672 --network potiondb-net --cap-add=NET_ADMIN --CONFIG=/go/bin/configs/singlePC/docker/R2 --name potiondb2 andrerj/potiondb
+docker run -d -p 8089:8087 -p 5674:5672 --network potiondb-net --cap-add=NET_ADMIN --CONFIG=/go/bin/configs/singlePC/docker/R3 --name potiondb3 andrerj/potiondb
+docker run -d -p 8090:8087 -p 5675:5672 --network potiondb-net --cap-add=NET_ADMIN --CONFIG=/go/bin/configs/singlePC/docker/R4 --name potiondb4 andrerj/potiondb
+docker run -d -p 8091:8087 -p 5676:5672 --network potiondb-net --cap-add=NET_ADMIN --CONFIG=/go/bin/configs/singlePC/docker/R5 --name potiondb5 andrerj/potiondb
 
 This will prepare a setup ready to be used by PotionDB's TPC-H Client, available at: https://github.com/AndreRijo/TPCH-Client
 
@@ -50,7 +50,8 @@ By default each server is configured to replicate the buckets relevant to TPC-H.
 *****Executing multiple servers across different machines*****
 
 If you wish to run PotionDB instances across multiple machines, modify the configuration files in configs/cluster/normal.
-In each configuration file modify the line "remoteRabbitMQAddresses =" to include the IP address of each node except the self, appended with ":5672"
+In each configuration file modify the line "remoteRabbitMQAddresses =" to include the IP address of each node except the self, appended with ":5672".
+You also need to update the line "localPotionDBAddress".
 
 Make sure to do the following in each of the machines:
 docker pull andrerj/potiondb
@@ -58,9 +59,9 @@ docker pull andrerj/potiondb
 And to make the modified configuration files available in each machine.
 
 Then run the following commands, each one on its respective machine:
-docker run -p 8087:8087 -p 5672:5672 -v /FULL_PATH_TO_FOLDER_WITH_CONFIGS/cluster/normal/R1:/go/bin/extern/ -e CONFIG=/go/bin/extern/ --name potiondb andrerj/potiondb
-docker run -p 8087:8087 -p 5672:5672 -v /FULL_PATH_TO_FOLDER_WITH_CONFIGS/cluster/normal/R2:/go/bin/extern/ -e CONFIG=/go/bin/extern/ --name potiondb andrerj/potiondb
-docker run -p 8087:8087 -p 5672:5672 -v /FULL_PATH_TO_FOLDER_WITH_CONFIGS/cluster/normal/R3:/go/bin/extern/ -e CONFIG=/go/bin/extern/ --name potiondb andrerj/potiondb
-docker run -p 8087:8087 -p 5672:5672 -v /FULL_PATH_TO_FOLDER_WITH_CONFIGS/cluster/normal/R4:/go/bin/extern/ -e CONFIG=/go/bin/extern/ --name potiondb andrerj/potiondb
-docker run -p 8087:8087 -p 5672:5672 -v /FULL_PATH_TO_FOLDER_WITH_CONFIGS/cluster/normal/R5:/go/bin/extern/ -e CONFIG=/go/bin/extern/ --name potiondb andrerj/potiondb
+docker run -p 8087:8087 -p 5672:5672 --cap-add=NET_ADMIN -v /FULL_PATH_TO_FOLDER_WITH_CONFIGS/cluster/normal/R1:/go/bin/extern/ -e CONFIG=/go/bin/extern/ --name potiondb andrerj/potiondb
+docker run -p 8087:8087 -p 5672:5672 --cap-add=NET_ADMIN -v /FULL_PATH_TO_FOLDER_WITH_CONFIGS/cluster/normal/R2:/go/bin/extern/ -e CONFIG=/go/bin/extern/ --name potiondb andrerj/potiondb
+docker run -p 8087:8087 -p 5672:5672 --cap-add=NET_ADMIN -v /FULL_PATH_TO_FOLDER_WITH_CONFIGS/cluster/normal/R3:/go/bin/extern/ -e CONFIG=/go/bin/extern/ --name potiondb andrerj/potiondb
+docker run -p 8087:8087 -p 5672:5672 --cap-add=NET_ADMIN -v /FULL_PATH_TO_FOLDER_WITH_CONFIGS/cluster/normal/R4:/go/bin/extern/ -e CONFIG=/go/bin/extern/ --name potiondb andrerj/potiondb
+docker run -p 8087:8087 -p 5672:5672 --cap-add=NET_ADMIN -v /FULL_PATH_TO_FOLDER_WITH_CONFIGS/cluster/normal/R5:/go/bin/extern/ -e CONFIG=/go/bin/extern/ --name potiondb andrerj/potiondb
 

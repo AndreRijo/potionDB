@@ -394,6 +394,8 @@ func (crdt *TopKRmvCrdt) Update(args UpdateArguments) (downstreamArgs Downstream
 		downstreamArgs = crdt.getTopKAddAllDownstreamArgs(&opType)
 	case TopKRemoveAll:
 		downstreamArgs = crdt.getTopKRemoveAllDownstreamArgs(&opType)
+	case TopKInit:
+		downstreamArgs = opType
 	}
 	return
 }
@@ -539,7 +541,18 @@ func (crdt *TopKRmvCrdt) applyDownstream(downstreamArgs UpdateArguments) (effect
 		effect, otherDownstreamArgs = crdt.applyAddAll(&opType)
 	case DownstreamTopKRemoveAll:
 		effect, otherDownstreamArgs = crdt.applyRemoveAll(&opType)
+	case TopKInit:
+		effect, otherDownstreamArgs = crdt.applyInit(&opType)
 	}
+	return
+}
+
+func (crdt *TopKRmvCrdt) applyInit(op *TopKInit) (effect *Effect, otherDownstreamArgs DownstreamArguments) {
+	crdt.maxElems = int(op.TopSize)
+	//fmt.Printf("[TOPKRmv]Set top sizes to (%d, %d)\n", crdt.maxElems, op.ShadowTopSize)
+	var effectValue Effect = NoEffect{}
+	effect = &effectValue
+	//TODO (potencially): consider giving support for this operation if there is already elements in the top.
 	return
 }
 

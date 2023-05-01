@@ -4,9 +4,11 @@ package tools
 
 import (
 	"fmt"
+	"net"
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -34,6 +36,22 @@ func MakeTcInfo(ips []string, myIpPos int, latencies []string) TcInfo {
 }
 
 func (tc TcInfo) FireTcCommands() {
+	//Sleep for a while to give time for the other replicas to start before doing ping
+	time.Sleep(5000 * time.Millisecond)
+
+	solvedIps := make([]string, len(tc.Ips))
+	for i, ip := range tc.Ips {
+		solvIp, err := net.LookupIP(ip)
+		if err != nil {
+			fmt.Println("[TC]Error solving addresses - tc may fail to work.")
+			solvedIps = tc.Ips
+			break
+		} else {
+			solvedIps[i] = solvIp[0].String()
+		}
+	}
+
+	tc.Ips = solvedIps
 
 	fmt.Printf("%v\n", tc)
 
@@ -91,9 +109,17 @@ func (tc TcInfo) FireTcCommands() {
 	}
 	catchAllCmd.Run()
 
+	fmt.Println(tc.Ips)
+	fmt.Println(testPings)
+
 	for i = 0; i < len(tc.Ips)-1; i++ {
 		go func(cmd *exec.Cmd) {
 			output, err := cmd.Output()
+			if output == nil {
+				fmt.Printf("%s; Error: %v\n", output, err)
+			} else if err != nil {
+				fmt.Printf("%s; Error: %v\n", output, err)
+			}
 			strOutput := string(output)
 			splitString := strings.Split(strOutput, "\n")
 			last := splitString[len(splitString)-2]

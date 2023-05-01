@@ -1173,6 +1173,9 @@ func applyUpdates(updates []*UpdateObjectParams, commitTimestamp *clocksi.Timest
 		//Due to non-uniform CRDTs, the downstream args might be noop (op with no effect/doesn't need to be propagated yet)
 		//Some "normal" CRDTs have also be optimized to do the same (e.g., setAWCrdt when removing element that doesn't exist)
 		downArgs := obj.Update(*upd.UpdateArgs)
+		if downArgs == nil {
+			fmt.Printf("[MAT]Nil downstream args!!! KeyParams %v, args %T %+v\n", upd.KeyParams, *upd.UpdateArgs, *upd.UpdateArgs)
+		}
 		if (downArgs != crdt.NoOp{}) {
 			//fmt.Printf("[MAT]Applying downstream update to %v with args %T %+v\n", upd.KeyParams, *upd.UpdateArgs, *upd.UpdateArgs)
 			obj.Downstream(copyTs, downArgs)
