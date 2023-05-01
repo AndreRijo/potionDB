@@ -749,7 +749,7 @@ func (part *partition) applyUpdates(updates []*UpdateObjectParams, commitClk clo
 		//Due to non-uniform CRDTs, the downstream args might be noop (op with no effect/doesn't need to be propagated yet)
 		//Some "normal" CRDTs have also be optimized to do the same (e.g., setAWCrdt when removing element that doesn't exist)
 		downArgs := obj.Update(*upd.UpdateArgs)
-		if (downArgs != crdt.NoOp{}) {
+		if (downArgs != nil && downArgs != crdt.NoOp{}) {
 			//fmt.Printf("[MAT]Applying downstream update to %v with args %T %+v\n", upd.KeyParams, *upd.UpdateArgs, *upd.UpdateArgs)
 			obj.Downstream(commitClk, downArgs)
 			if downArgs.MustReplicate() {
