@@ -1,9 +1,297 @@
-To run
+**IMPORTANT NOTE**: Please change to *remoteOp* branch, as the *main* branch is outdated as of now. 
+Reading this README file in the *main* branch may lead to broken links.
+[Click here to change to *remoteOp* branch](https://github.com/AndreRijo/potionDB/tree/remoteOp)
 
-export GOPATH=$(pwd)
-go get github.com/golang/protobuf/proto
-go get github.com/twmb/murmur3
-go get github.com/streadway/amqp
+# PotionDB
 
-go run src/main/...
+A geo-distributed database featuring partial replication with transactional causal consistency.
+PotionDB leverages on Conflict-free Replicated Datatypes (CRDTs) to offer a rich library of datatypes that stay always consistent.
+Furthermore, PotionDB offers efficient materialized views which can even be built upon data that is partitioned across multiple servers.
 
+Clients can interact with PotionDB using its protobuf interface.
+PotionDB's protobuf interface is compatible with AntidoteDB's interface, thus AntidoteDB clients implementing its protobuf interface can be used in PotionDB with no changes required.
+AntidoteDB clients can be found here: https://github.com/orgs/AntidoteDB/repositories.
+A PotionDB specific client implementing the [TPC-H benchmark](https://www.tpc.org/tpch/) can be found here: https://github.com/AndreRijo/TPCH-Client.
+
+Objects in the database are uniquely identified by a triple (*id*, *type*, *bucket*).
+*Id* is the name intended for the object, *type* represents the object's datatype while *bucket* represents to which "group" the object should belong.
+Each PotionDB server replicates a subset (potentially all) of all buckets existing in the system, thus achieving fine-grained partial replication.
+
+#### Notes for VLDB reviewers
+
+The version used to produce the results in our paper is ready in the Docker image andrerj/potiondb:vldb. Please use said version to reproduce any results obtained in the paper. Instructions on how to run PotionDB can be found [here](#Getting-Started) and [here](#Running-multiple-instances-of-PotionDB). You will also want to check the [PotionDB's TPC-H Client](https://github.com/AndreRijo/TPCH-Client), which implements TPC-H's benchmark and includes instructions on how to prepare and run a TPC-H workload.
+
+If building from source is a must, please refer to the instructions in [Building from source](#Building-from-source) and use the branch [*remoteOp*](https://github.com/AndreRijo/potionDB/tree/remoteOp).
+Usage of other branches may contain modifications/future work not included in the paper which may affect the results.
+
+## Getting Started
+
+The easiest way to test PotionDB is to use its pre-compiled Docker image, which already contains all dependencies. To install Docker, please refer to https://docs.docker.com/engine/install/
+
+Afterwards, run:
+
+```
+docker pull andrerj/potiondb
+```
+
+To start one instance of PotionDB:
+
+```
+docker run -p 8087:8087 -p 5672:5672 --name potiondb andrerj/potiondb
+```
+
+This will start an instance of PotionDB named *potiondb*. Port 8087 is used for clients to communicate with, while port 5672 is used for replication purposes. Parameter -p associates the internal ports of the container to the ports of your device. The ports that get associated to your device can be changed if so is desired (https://docs.docker.com/engine/reference/commandline/run/). The ports of PotionDB itself can also be changed through its configuration files in the [configs folder](configs).
+
+The following message will appear when PotionDB is ready to serve clients:
+
+```
+PotionDB started at port 8087 with ReplicaID 23781
+```
+
+*ReplicaID* will vary between executions, as said ID is generated randomly.
+To stop PotionDB, execute the following in another terminal:
+
+```
+docker stop -t 1 potiondb
+```
+
+## Customizing PotionDB
+
+#### PotionDB with pre-made configuration files
+
+To run PotionDB with one of the pre-made configuration files:
+
+```
+docker run -p 8087:8087 -p 5672:5672 -e CONFIG=/go/bin/configs/cluster/default --name potiondb andrerj/potiondb 
+```
+
+You can swap *cluster/default* with the path to any of the configuration files present in the [configs folder](configs).
+
+#### Custom-made configurations
+
+To run PotionDB with a custom made configuration, without having to rebuild the image:
+
+```
+docker run -p 8087:8087 -p 5672:5672 -v /FULL_PATH_TO_YOUR_FOLDER_WITH_CONFIG/:/go/bin/extern/ -e CONFIG=/go/bin/extern/ --name potiondb andrerj/potiondb
+```
+
+Parameter -v shares the folder with the desired configuration file with the container.
+PotionDB will automatically use the configuration file inside the shared folder. 
+Depending on your operating system and Docker installation, you may need to set up your Docker to allow sharing of folders.
+
+Many different settings can be changed through configuration files - check [protoServer.go](src/main/protoServer.go), method *loadConfigs()* for a list of settings.
+It is suggested to use one of the existing configuration files as a starting point.
+ [These ones are a good starting point](configs/singlePC/docker), as they showcase how to have multiple servers connected and achieve partial replication.
+
+ You can find out [here how to run multiple PotionDB instances](Running-multiple-instances-of-PotionDB), or [how to configure PotionDB's partial replication](Configuring-partial-replication).
+
+ 
+
+
+#### Advanced usage
+
+For advanced users, it is also possible to pass specific PotionDB parameters by setting environment variables on the creation of a docker container.
+A list of possible configurations and their environment names can be found on [src/main/protoServer.go](src/main/protoServer.go), method *loadConfigs()* and [dockerStuff/start.sh](dockerStuff/start.sh).
+For instructions on how to use environment variables (-e) on docker, as well as how to share folders/files with Docker (-v), please check https://docs.docker.com/engine/reference/commandline/run/.
+For most users, however, modifying one of the existing configuration files should be simpler and cleaner.
+
+A complete example:
+
+```
+docker run -p 8087:8087 -p 5672:5672 -v /home/myname/myPotionDBConfigs/myConfig1/:/go/bin/extern/ -e CONFIG=/go/bin/extern/ -e REPLICA_ID=12345 --name potiondb andrerj/potiondb
+```
+
+
+## Building from source
+
+**DISCLAIMER**: As of this moment, the main branch is outdated. For the most stable version (and also the one used for our VLDB paper submission), please use branch [*remoteOp*](https://github.com/AndreRijo/potionDB/tree/remoteOp). For the latest features (unstable), give the branches [*newMaterializer*](https://github.com/AndreRijo/potionDB/tree/newMaterializer) or [*clocks*](https://github.com/AndreRijo/potionDB/tree/clocks) a look.
+
+First, make sure you are in one of the branches mentioned above:
+
+```
+git status
+```
+
+If not:
+
+```
+git checkout remoteOp
+```
+
+Afterwards, go inside the folder *potionDB* and run
+
+```
+docker build . -t mypotiondb
+```
+
+This will build a docker image named *mypotiondb* from the source code.
+Afterwards, follow the steps (skip the step with `docker pull`) in [Getting Started](#Getting-Started) to run your own image.
+Simply replace *andrerj/potiondb* with *mypotiondb*.
+
+
+
+## Building and running from source without docker
+
+**Note**: this involves a fairly lengthly amount of steps.
+Please consider using the pre-built docker image or building your own image if you desire to experiment with changes to the code.
+
+Make sure you have Go installed with the following command:
+
+```
+go version
+```
+
+If not, check https://go.dev/doc/install on how to install Go.
+
+After Go is installed, install RabbitMQ or use its docker image (recommended): https://www.rabbitmq.com/download.html
+
+Afterwards, configure RabbitMQ to create the vhost */crdts* and configure the user *guest* to have access to it.
+Alternatively, alter the PotionDB configuration file that you desire to use and add the following line:
+```
+rabbitVHost = /
+```
+
+Whenever you decide to go with RabbitMQ's docker image or install RabbitMQ, make sure to respectively run a container or the RabbitMQ server. The link above contains instructions for both.
+
+After RabbitMQ is started, go inside the folder *potionDB/src/* and run:
+
+```
+go run ./main/protoServer.go --config=../configs/cluster/default
+```
+
+You can use one of the other provided configuration files or use your own.
+For a list of PotionDB's supported arguments:
+
+```
+go run ./main/protoServer.go --help
+```
+
+## Running multiple instances of PotionDB
+
+Some starting notes:
+
+- This tutorial assumes that Docker will be used, but you can adapt the example to not use docker. Check [Building and running from source without docker](#Building-and-running-from-source-without-docker) on how to run a single PotionDB without Docker.
+- At the end of this tutorial, you will have PotionDB running and ready for the TPC-H benchmark.
+You can find PotionDB's TPC-H client [here](https://github.com/AndreRijo/TPCH-Client).
+- Check [Configuring partial replication](#Configuring-partial-replication) on how to configure PotionDB's partial replication for a different setup.
+
+#### In the same device
+
+First, obtain or build the image:
+
+```
+docker pull andrerj/potiondb
+OR
+docker build . -t mypotiondb
+```
+
+Create a docker network to easily connect the 5 instances of PotionDB:
+
+```
+docker network create potiondb-net
+```
+
+Now, start the servers as follows:
+
+```
+docker run -d -p 8087:8087 -p 5672:5672 --network potiondb-net --cap-add=NET_ADMIN -e CONFIG=/go/bin/configs/singlePC/docker/R1 --name potiondb1 andrerj/potiondb
+docker run -d -p 8088:8087 -p 5673:5672 --network potiondb-net --cap-add=NET_ADMIN -e CONFIG=/go/bin/configs/singlePC/docker/R2 --name potiondb2 andrerj/potiondb
+docker run -d -p 8089:8087 -p 5674:5672 --network potiondb-net --cap-add=NET_ADMIN -e CONFIG=/go/bin/configs/singlePC/docker/R3 --name potiondb3 andrerj/potiondb
+docker run -d -p 8090:8087 -p 5675:5672 --network potiondb-net --cap-add=NET_ADMIN -e CONFIG=/go/bin/configs/singlePC/docker/R4 --name potiondb4 andrerj/potiondb
+docker run -d -p 8091:8087 -p 5676:5672 --network potiondb-net --cap-add=NET_ADMIN -e CONFIG=/go/bin/configs/singlePC/docker/R5 --name potiondb5 andrerj/potiondb
+```
+
+This will initialize 5 instances of PotionDB, ready to be used by [PotionDB's TPC-H Client](https://github.com/AndreRijo/TPCH-Client) for benchmarking.
+
+You can modify the configuration files to run a different number of servers.
+If doing so, check the next subsection on how to use the modified configuration files.
+
+You can check the log of each PotionDB with the following command:
+
+```
+docker logs potiondb1
+```
+
+Alternatively, you can do `docker run` without `-d` in order to see the output directly.
+If so, however, one terminal instance will be needed per PotionDB.
+
+#### Across multiple devices
+
+First and foremost, open the configuration files in [configs/cluster/normal](configs/cluster/normal).
+In each configuration file, modify the line "remoteRabbitMQAddresses =" to include the IP addresses of each device except the self, appended with ":5672".
+
+For example, if running three servers with addresses 192.168.10.1, 192.168.10.2, 192.168.10.3:
+```
+R1: remoteRabbitMQAddresses = 192.168.10.2:5672 192.168.10.3:5672
+R2: remoteRabbitMQAddresses = 192.168.10.1:5672 192.168.10.3:5672
+R3: remoteRabbitMQAddresses = 192.168.10.1:5672 192.168.10.2:5672
+```
+
+The order of the servers is not relevant.
+You will also need to modify the line regarding the server's own IP (localPotionDBAddress), and append the IP with ":8087". For example, for server 192.168.10.1:
+```
+localPotionDBAddress = 192.168.10.1:8087
+```
+
+After modifying the configurations and making said configurations reachable in the devices to be used, proceed as follows.
+
+First, obtain or build the image in each device:
+
+```
+docker pull andrerj/potiondb
+OR
+docker build . -t mypotiondb
+```
+
+Then run the following commands, each on its respective device:
+
+```
+docker run -p 8087:8087 -p 5672:5672 --cap-add=NET_ADMIN -v /FULL_PATH_TO_FOLDER_WITH_CONFIGS/cluster/normal/R1:/go/bin/extern/ -e CONFIG=/go/bin/extern/ --name potiondb1 andrerj/potiondb
+docker run -p 8087:8087 -p 5672:5672 --cap-add=NET_ADMIN -v /FULL_PATH_TO_FOLDER_WITH_CONFIGS/cluster/normal/R2:/go/bin/extern/ -e CONFIG=/go/bin/extern/ --name potiondb2 andrerj/potiondb
+docker run -p 8087:8087 -p 5672:5672 --cap-add=NET_ADMIN -v /FULL_PATH_TO_FOLDER_WITH_CONFIGS/cluster/normal/R3:/go/bin/extern/ -e CONFIG=/go/bin/extern/ --name potiondb3 andrerj/potiondb
+docker run -p 8087:8087 -p 5672:5672 --cap-add=NET_ADMIN -v /FULL_PATH_TO_FOLDER_WITH_CONFIGS/cluster/normal/R4:/go/bin/extern/ -e CONFIG=/go/bin/extern/ --name potiondb4 andrerj/potiondb
+docker run -p 8087:8087 -p 5672:5672 --cap-add=NET_ADMIN -v /FULL_PATH_TO_FOLDER_WITH_CONFIGS/cluster/normal/R5:/go/bin/extern/ -e CONFIG=/go/bin/extern/ --name potiondb5 andrerj/potiondb
+```
+
+The setup above starts 5 instances of PotionDB, ready for TPC-H benchmarking with [PotionDB's TPC-H Client](https://github.com/AndreRijo/TPCH-Client).
+
+## Configuring partial replication
+
+PotionDB's partial replication is configured by associating objects to buckets, and then for each server defining the subset of buckets it replicates.
+
+Objects are uniquely identified by the triple (*id*, *type*, *bucket*).
+Thus, associating an object to a bucket consists of, on the object's creation, to set *bucket* to the desired value.
+
+To set the list of buckets for a given server to replicate, simply modify one of the configuration files and, on the line starting with `buckets = `, put the list of buckets desired, each separated by a space.
+
+For example:
+
+```
+buckets = myBucket1, myBucket2
+buckets = *
+```
+
+The first one replicates two buckets, *myBucket1* and *myBucket2*.
+The latter replicates all buckets.
+
+Make sure when starting PotionDB to pass as a parameter the modified configuration file, as explained previously [here](#Customizing-PotionDB).
+
+## Simulating latency between servers
+
+Through the usage of [tc](), it is possible to impose artificial latency in communications between PotionDB servers.
+If you desire to use *tc*, **please make sure to run PotionDB with Docker**, otherwise this will mess up with your computer(s)' network configurations.
+
+To be able to simulate latency, open the desired PotionDB configuration file and scroll until its end.
+You will find something like this:
+
+```
+useTC = false
+tcIPs = 172.19.0.2 172.19.0.3 172.19.0.4 172.19.0.5 172.19.0.6
+tcMyPos = 0
+tcLatency = 0 41.43 42.98 108.38 61.92
+```
+
+- `useTC (true/false)`: Whenever to have added latency or not;
+- `tcIPs`: List of IPs of each PotionDB. Make sure all IPs appear by the same order in all server's configuration files;
+- `tcMyPos`: the position of the current server in the list above, from 0 to #servers - 1;
+- `tcLatency`: one-way latency from the current server to each of the other servers, following the same order as in `tcIPs`.
