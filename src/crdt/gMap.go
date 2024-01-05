@@ -37,9 +37,9 @@ type GMapAddAllEffect struct {
 	ReplicaID       int16               //ReplicaID of the Ts before this effect
 }
 
-func (crdt *GMapCrdt) GetCRDTType() proto.CRDTType { return proto.CRDTType_GMAP }
+func (crdt *GMapCrdt) GetCRDTType() proto.CRDTType { return proto.CRDTType_RRMAP }
 
-func (args DownstreamGMapAddAll) GetCRDTType() proto.CRDTType { return proto.CRDTType_GMAP }
+func (args DownstreamGMapAddAll) GetCRDTType() proto.CRDTType { return proto.CRDTType_RRMAP }
 
 func (args DownstreamGMapAddAll) MustReplicate() bool { return true }
 

@@ -3,6 +3,9 @@ option java_package = "com.basho.riak.protobuf";
 option java_outer_classname = "AntidotePB";
 option go_package = "potionDB/src/proto";
 
+//Optimization tips:
+//Fields 1-16 only need 1 byte to encode instead of 2: use 1-16 for the most common fields.
+//The above restriction does not apply to enums.
 
 enum CRDT_type {
     COUNTER = 3;
@@ -14,7 +17,8 @@ enum CRDT_type {
     RRMAP = 11;
     FATCOUNTER = 12;
     FLAG_EW = 13;
-    //FLAG_DW = 14;
+    FLAG_DW = 16;
+    FLAG_LWW = 17;
     TOPK = 1;
     TOPK_RMV = 2;
     AVG = 7;
@@ -207,6 +211,17 @@ message ApbGetMaxMinResp {
     required int64 value = 1;
 }
 
+//--------------------
+// BoundedCounter
+
+//This message is only intended to be used once by CRDT, to set the limit and initial value
+//For increments/decrements, use ApbCounterUpdate
+message ApbBoundCounterUpdate {
+    required int64 limit = 1;
+    required int64 initialValue = 2;
+    required bool compEq = 3;
+}
+
 
 //--------------------------------------------------------------
 
@@ -240,6 +255,7 @@ message ApbUpdateOperation { // TODO use this above
     optional ApbCounterUpdate counterop = 1;
     optional ApbSetUpdate setop = 2;
     optional ApbRegUpdate regop = 3;
+    optional ApbBoundCounterUpdate bcounterop = 4;
     optional ApbMapUpdate mapop = 5;
     optional ApbCrdtReset resetop = 6;
     optional ApbFlagUpdate flagop = 7;

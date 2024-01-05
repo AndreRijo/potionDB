@@ -111,10 +111,11 @@ func (crdt *LwwRegisterCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool
 
 func (crdt *LwwRegisterCrdt) Copy() (copyCRDT InversibleCRDT) {
 	newCRDT := LwwRegisterCrdt{
-		CRDTVM:    crdt.CRDTVM.copy(),
-		value:     crdt.value,
-		ts:        crdt.ts,
-		replicaID: crdt.replicaID,
+		CRDTVM:         crdt.CRDTVM.copy(),
+		value:          crdt.value,
+		ts:             crdt.ts,
+		replicaID:      crdt.replicaID,
+		localReplicaID: crdt.localReplicaID,
 	}
 	return &newCRDT
 }

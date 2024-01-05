@@ -4,6 +4,7 @@ import (
 	"container/heap"
 	fmt "fmt"
 	"math"
+	"math/rand"
 	"potionDB/src/clocksi"
 	"potionDB/src/crdt"
 	"potionDB/src/proto"
@@ -146,6 +147,22 @@ type MatGCArgs struct {
 	SafeClk clocksi.Timestamp //Can clean anything "before" (<) this clock.
 }
 
+//Request
+type MatBCUpdPermissions struct {
+	ReplyChan chan MatBCUpdPermissionsReply
+}
+
+type MatBCUpdPermissionsReply struct {
+	ReqsMap map[int16]map[KeyParams]int32
+	PartID  int16
+}
+
+//Applying txn for permissions updates
+type MatBCTxnPermissions struct {
+	Values    map[KeyParams]int32
+	ReplicaID int16
+}
+
 type MatRequestType byte
 
 type Materializer struct {
@@ -161,7 +178,18 @@ type partition struct {
 	pendingOps       map[TransactionId][]*UpdateObjectParams //prepared transactions waiting for a commit to be issued
 	pendingOpsRemote map[TransactionId][]*UpdateObjectParams //prepared NuCRDT transactions for other replicas (not to be applied locally)
 	commitsOnHold    commitHeap                              //commited transactions that couldn't be applied yet due to other prepared (not commited) clocks
+	rng              rand.Source
+	bcInfo           //Keeps track of all BCounters in this partition
 	debugPart
+}
+
+type bcInfo struct {
+	bcKeys          []KeyParams
+	nKeys           int
+	replicaIDs      []int16
+	partID          int16
+	opsForTxn       map[TransactionId]map[KeyParams]int32
+	permsForReplica map[TransactionId]int16
 }
 
 //Manages the multiple clocks of the partition
@@ -461,6 +489,22 @@ func (args MatGCArgs) getChannel() (channelId uint64) {
 	return 0 //MatGCArgs is always sent to all partitions
 }
 
+func (args MatBCUpdPermissions) getRequestType() (requestType MatRequestType) {
+	return bcUpdPermRequest
+}
+
+func (args MatBCUpdPermissions) getChannel() (channelId uint64) {
+	return 0 //MatBCUpdPermissions is always sent to all partitions
+}
+
+func (args MatBCTxnPermissions) getRequestType() (requestType MatRequestType) {
+	return bcTxnPermRequest
+}
+
+func (args MatBCTxnPermissions) getChannel() (channelId uint64) {
+	return 0 //MatBCTxnPermissions is always sent to all partitions
+}
+
 // /////*****************CONSTANTS AND VARIABLES***********************/////
 
 const (
@@ -483,8 +527,9 @@ const (
 	waitForReplicasRequest   MatRequestType = 15
 	remoteGroupTxnMatRequest MatRequestType = 16
 	gcMatRequest             MatRequestType = 17
+	bcUpdPermRequest         MatRequestType = 18
+	bcTxnPermRequest         MatRequestType = 19
 	versionMatRequest        MatRequestType = 255
-	//TODO: At the end, delete unused requests from above
 
 	initialPrepSize = 100 //Initial size for the prepClocks heap
 )
@@ -534,11 +579,13 @@ func listenToTM(id int64, logger Logger, replicaID int16, commitCh chan TMCommit
 		pendingOps:       make(map[TransactionId][]*UpdateObjectParams),
 		pendingOpsRemote: make(map[TransactionId][]*UpdateObjectParams),
 		commitsOnHold:    commitHeap{entries: make([]MatCommitArgs, heapSize), nEntries: new(int)},
+		rng:              rand.NewSource(time.Now().Unix() + id),
 	}
 	channel := mat.channels[id]
 
 	waitForReplicas(channel)
 	part.initializePartitionClock(replicaID)
+	part.initializeBCInfo(int16(id))
 
 	if debugMode {
 		part.hashToParams = make(map[uint64]KeyParams)
@@ -571,6 +618,17 @@ func (part *partition) initializePartitionClock(replicaID int16) {
 	}
 }
 
+func (part *partition) initializeBCInfo(partID int16) {
+	part.bcInfo = bcInfo{
+		bcKeys:          make([]KeyParams, 10),
+		nKeys:           0,
+		replicaIDs:      clocksi.GetKeys(),
+		partID:          int16(part.id),
+		opsForTxn:       make(map[TransactionId]map[KeyParams]int32),
+		permsForReplica: make(map[TransactionId]int16),
+	}
+}
+
 func (part *partition) handleRequest(request MaterializerRequest) {
 	switch request.getRequestType() {
 	case readStaticMatRequest:
@@ -600,6 +658,10 @@ func (part *partition) handleRequest(request MaterializerRequest) {
 		//For Replicator's join
 	case commitedClkMatRequest:
 		part.handleMatCommitedClk(request.MatRequestArgs.(MatCommitedClkArgs))
+	case bcUpdPermRequest:
+		part.handleMatBCUpdPerm(request.MatRequestArgs.(MatBCUpdPermissions))
+	case bcTxnPermRequest:
+		part.handleMatPermsTxn(request.MatRequestArgs.(MatBCTxnPermissions))
 	case resetMatRequest:
 		part.handleMatReset(request.MatRequestArgs.(MatResetArgs))
 		//TODO: snapshots, version, etc.
@@ -664,6 +726,16 @@ func (part *partition) handleMatStaticWrite(args MatStaticUpdateArgs) {
 	part.debugLogUpdParams(args.Updates)
 }
 
+func (part *partition) handleMatPermsTxn(args MatBCTxnPermissions) {
+	txnID := TransactionId(part.rng.Int63())
+	part.prepareClock(txnID)
+	part.bcInfo.permsForReplica[txnID] = args.ReplicaID
+	part.bcInfo.opsForTxn[txnID] = args.Values
+	clk := part.prepClks.PeekMax().clk
+	part.commitChan <- TMCommitNPartitions{nPartitions: 1, txnId: txnID, clk: clk.Copy()}
+	part.handleMatCommit(MatCommitArgs{TransactionId: txnID, CommitTimestamp: clk})
+}
+
 func (part *partition) handleMatAbort(args MatAbortArgs) {
 	delete(part.pendingOps, args.TransactionId)
 }
@@ -695,9 +767,11 @@ func (part *partition) applyCommit(args MatCommitArgs) {
 	if has { //Normal commit
 		//fmt.Println("[MAT]Commiting")
 		downstreamUpds = part.applyUpdates(ops, args.CommitTimestamp)
-	} else { //Commit only for remote (NuCRDTs)
+	} else if remoteOps, has := part.pendingOpsRemote[args.TransactionId]; has { //Commit only for remote (NuCRDTs)
 		//fmt.Println("[MAT]Commiting for remote", args)
-		downstreamUpds = part.pendingOpsRemote[args.TransactionId]
+		downstreamUpds = remoteOps
+	} else {
+		downstreamUpds = part.applyBCPermsUpds(args.TransactionId, args.CommitTimestamp)
 	}
 	part.updatePartitionWithCommit(args, downstreamUpds)
 	part.commitChan <- TMPartCommitReply{txnId: args.TransactionId}
@@ -734,6 +808,7 @@ func (part *partition) applyUpdates(updates []*UpdateObjectParams, commitClk clo
 
 	for _, upd := range updates {
 		hashKey = getHash(getCombinedKey(upd.KeyParams))
+		fmt.Println("[MAT]ApplyUpdates", upd.KeyParams, upd.UpdateArgs)
 
 		//If it's a reset, delete the CRDT, generate the downstream and continue to the next upd.
 		//Note that reads may recreate the CRDT, but with an empty state.
@@ -741,11 +816,13 @@ func (part *partition) applyUpdates(updates []*UpdateObjectParams, commitClk clo
 			downstreamUpds[i] = upd
 			i++
 			delete(part.db, hashKey)
+			//TODO: Remove BCounter
 			//fmt.Println("Reset Op, continuing.")
 			continue
 		}
 
-		obj = part.getObjectForUpd(hashKey, upd.CrdtType, commitClk)
+		obj = part.getObjectForUpd(hashKey, upd.KeyParams, commitClk)
+		fmt.Printf("[MAT]ApplyUpdates. Obj type: %T\n", obj.GetLatestCRDT())
 		//Due to non-uniform CRDTs, the downstream args might be noop (op with no effect/doesn't need to be propagated yet)
 		//Some "normal" CRDTs have also be optimized to do the same (e.g., setAWCrdt when removing element that doesn't exist)
 		downArgs := obj.Update(*upd.UpdateArgs)
@@ -866,7 +943,7 @@ func (part *partition) applyRemoteUpds(args MatRemoteTxn, newDownstream []*Updat
 	var obj VersionManager
 	for _, upd := range args.Upds {
 		hashKey = getHash(getCombinedKey(upd.KeyParams))
-		obj = part.getObjectForUpd(hashKey, upd.CrdtType, args.Timestamp)
+		obj = part.getObjectForUpd(hashKey, upd.KeyParams, args.Timestamp)
 		//TODO: Update this in order to avoid forced cast
 		var generatedDownstream crdt.UpdateArguments = obj.Downstream(args.Timestamp, (*upd.UpdateArgs).(crdt.DownstreamArguments))
 		//non-uniform CRDTs may generate downstream updates when applying remote ops. We'll "commit" those upds with the stable clock
@@ -916,6 +993,39 @@ func (part *partition) handleMatGC(args MatGCArgs) {
 	}
 }
 
+func (part *partition) handleMatBCUpdPerm(args MatBCUpdPermissions) {
+	part.bcInfo.updatePermissions(part.db, args.ReplyChan)
+}
+
+func (part *partition) applyBCPermsUpds(txnId TransactionId, ts clocksi.Timestamp) (downstreamUpds []*UpdateObjectParams) {
+	ops, replicaID := part.bcInfo.opsForTxn[txnId], part.bcInfo.permsForReplica[txnId]
+	downstreamUpds = make([]*UpdateObjectParams, len(ops))
+	var obj *crdt.BoundedCounterCrdt
+	var hashKey uint64
+	i := 0
+
+	for key, value := range ops {
+		hashKey = getHash(getCombinedKey(key))
+		obj = part.getObjectForUpd(hashKey, key, ts).GetLatestCRDT().(*crdt.BoundedCounterCrdt)
+		downArgs := obj.Update(crdt.TransferCounter{ToTransfer: value, FromID: part.replicaID, ToID: replicaID, ToReplicate: new(bool)})
+		if (downArgs != nil && downArgs != crdt.NoOp{}) {
+			obj.Downstream(ts, downArgs)
+			if downArgs.MustReplicate() {
+				updArgs := downArgs.(crdt.UpdateArguments)
+				downstreamUpds[i] = &UpdateObjectParams{
+					KeyParams:  key,
+					UpdateArgs: &updArgs,
+				}
+				i++
+			}
+		}
+	}
+	delete(part.bcInfo.opsForTxn, txnId)
+	delete(part.bcInfo.permsForReplica, txnId)
+
+	return downstreamUpds[:i]
+}
+
 //Generic helper functions
 
 func (part *partition) getObject(keyParams KeyParams, clk clocksi.Timestamp) VersionManager {
@@ -928,11 +1038,14 @@ func (part *partition) getObject(keyParams KeyParams, clk clocksi.Timestamp) Ver
 }
 
 //Also stores the object if non-existent
-func (part *partition) getObjectForUpd(hashKey uint64, crdtType proto.CRDTType, clk clocksi.Timestamp) VersionManager {
+func (part *partition) getObjectForUpd(hashKey uint64, keyP KeyParams, clk clocksi.Timestamp) VersionManager {
 	obj, hasKey := part.db[hashKey]
 	if !hasKey {
-		obj = part.initializeVersionManager(crdtType, clk)
+		obj = part.initializeVersionManager(keyP.CrdtType, clk)
 		part.db[hashKey] = obj
+		if keyP.CrdtType == proto.CRDTType_FATCOUNTER {
+			part.bcInfo.addKey(keyP)
+		}
 	}
 	return obj
 }
@@ -1014,6 +1127,10 @@ func getHash(combKey string) (hash uint64) {
 	return
 }
 
+func GetNumberPartitions() int {
+	return int(nGoRoutines)
+}
+
 //PartitionClock functions
 
 func (partClock *partitionClock) prepareClock(txnId TransactionId) {
@@ -1070,6 +1187,34 @@ func (partClock *partitionClock) reset() {
 	partClock.lastUsedTs = 0
 	partClock.stableClk = clocksi.NewClockSiTimestamp()
 	partClock.prepClks = prepClockHeap{entries: make([]TxnIdClkPair, heapSize), nEntries: new(int), innerMap: make(map[TransactionId]int)}
+}
+
+//BoundedCounter Info methods
+func (bc *bcInfo) addKey(keyP KeyParams) {
+	if len(bc.bcKeys) == bc.nKeys {
+		bc.bcKeys = append(bc.bcKeys, keyP)
+	} else {
+		bc.bcKeys[bc.nKeys] = keyP
+		bc.nKeys++
+	}
+}
+
+func (bc *bcInfo) updatePermissions(db map[uint64]VersionManager, replyChan chan MatBCUpdPermissionsReply) {
+	reqsMap := make(map[int16]map[KeyParams]int32) //replicaID -> (keyP -> value)
+	for _, id := range bc.replicaIDs {
+		reqsMap[id] = make(map[KeyParams]int32)
+	}
+	var toAsk int32
+	var askID int16
+	var keyP KeyParams
+	for i := 0; i < bc.nKeys; i++ {
+		keyP = bc.bcKeys[i]
+		toAsk, askID = db[getHash(getCombinedKey(keyP))].GetLatestCRDT().(*crdt.BoundedCounterCrdt).RequestTransfer()
+		if toAsk != -1 { //-1: doesn't need to ask for permissions
+			reqsMap[askID][keyP] = toAsk
+		}
+	}
+	replyChan <- MatBCUpdPermissionsReply{ReqsMap: reqsMap, PartID: bc.partID}
 }
 
 //Debug methods

@@ -548,6 +548,10 @@ func convertAntidoteStatesToProto(objectStates []crdt.State) (protobufs []*proto
 	return
 }
 
+func fromBoundObjectToKeyParams(boundObj *proto.ApbBoundObject) KeyParams {
+	return KeyParams{string(boundObj.GetKey()), boundObj.GetType(), string(boundObj.GetBucket())}
+}
+
 /*****REQUEST PROTOS*****/
 
 func createUpdateOps(updates []UpdateObjectParams) (protobufs []*proto.ApbUpdateOp) {

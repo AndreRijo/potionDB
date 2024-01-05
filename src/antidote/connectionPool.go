@@ -175,7 +175,8 @@ func (pool *connPool) receiver(conn net.Conn, channel chan<- msgReply) {
 //Returns true if the request is static, commit or abort
 func (pool *connPool) lastClientReq(msgType byte) bool {
 	convMsgType := proto.WrapperType(msgType)
-	return convMsgType == proto.WrapperType_STATIC_READ_OBJS || convMsgType == proto.WrapperType_STATIC_UPDATE || convMsgType == proto.WrapperType_COMMIT
+	return convMsgType == proto.WrapperType_STATIC_READ_OBJS || convMsgType == proto.WrapperType_STATIC_UPDATE ||
+		convMsgType == proto.WrapperType_COMMIT || convMsgType == proto.WrapperType_BC_PERMS_REQ
 }
 
 /*

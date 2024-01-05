@@ -504,12 +504,12 @@ func (repl *Replicator) groupTxns(txns []RemoteTxn) {
 func (repl *Replicator) receiveRemoteTxns() {
 	fmt.Println("[Replicator]Ready to receive requests from RabbitMQ.")
 	for {
-		fmt.Println("[REPL]Iterating receiveRemoteTxns. Ts:", time.Now().String())
+		//fmt.Println("[REPL]Iterating receiveRemoteTxns. Ts:", time.Now().String())
 		tools.FancyInfoPrint(tools.REPL_PRINT, repl.replicaID, "iterating receiveRemoteTxns")
 		remoteReq := repl.remoteConn.GetNextRemoteRequest()
-		fmt.Println("[REPL]Received something from RabbitMQ, handling request.")
+		//fmt.Println("[REPL]Received something from RabbitMQ, handling request.")
 		repl.handleRemoteRequest(remoteReq)
-		fmt.Println("[REPL]Finish interating receiveRemoteTxns. Ts:", time.Now().String())
+		//fmt.Println("[REPL]Finish interating receiveRemoteTxns. Ts:", time.Now().String())
 	}
 }
 
@@ -524,9 +524,9 @@ func (repl *Replicator) handleRemoteRequest(remoteReq ReplicatorMsg) {
 			fmt.Println("[REPL]Finished sending TMRemoteTxn to TM due to clock. Ts:", time.Now().String())
 			repl.receiveHold[typedReq.SenderID] = TMRemoteTxn{}
 		}*/
-		fmt.Println("[REPL]Sending TMRemoteClk to TM. Ts:", time.Now().String())
+		//fmt.Println("[REPL]Sending TMRemoteClk to TM. Ts:", time.Now().String())
 		repl.tm.SendRemoteMsg(TMRemoteClk{ReplicaID: typedReq.SenderID, StableTs: typedReq.Ts})
-		fmt.Println("[REPL]Finished sending TMRemoteClk to TM. Ts:", time.Now().String())
+		//fmt.Println("[REPL]Finished sending TMRemoteClk to TM. Ts:", time.Now().String())
 	case *RemoteTxn:
 		//repl.tm.SendRemoteMsg(TMRemoteTxn{ReplicaID: typedReq.SenderID, Clk: typedReq.Clk, Upds: typedReq.Upds})
 		repl.tm.SendRemoteMsg(*typedReq)

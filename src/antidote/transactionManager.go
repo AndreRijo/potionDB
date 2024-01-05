@@ -115,6 +115,11 @@ type TMServerConn struct {
 	ReplyChan chan TMS2SReply
 }
 
+type TMBCPermsArgs struct {
+	Perms        []map[KeyParams]int32
+	ReqReplicaID int16
+}
+
 /*****Remote/Replicator interaction structs*****/
 
 //Used by the Replication Layer. Use a different thread to handle this
@@ -237,12 +242,6 @@ type TMRequestType int
 
 type ClientId uint64
 
-/*
-type TransactionId struct {
-	ClientId  ClientId
-	Timestamp clocksi.Timestamp
-}
-*/
 type TransactionId uint64
 
 type ongoingRemote struct {
@@ -295,11 +294,12 @@ type TransactionManager struct {
 }
 
 type RemoteInfo struct {
-	remoteBks     [][]string //Note: This gets turned to nil after all replicas are known
-	remoteIPs     []string
-	bucketToIndex map[string][]int
-	ownBuckets    []string
-	hasAll        bool //In case server is replicating "*"
+	remoteBks       [][]string //Note: This gets turned to nil after all replicas are known
+	remoteIPs       []string
+	bucketToIndex   map[string][]int
+	remoteIDToIndex map[int16]int
+	ownBuckets      []string
+	hasAll          bool //In case server is replicating "*"
 }
 
 type TMIdsInfo struct {
@@ -321,6 +321,7 @@ const (
 	abortTMRequest        TMRequestType = 6
 	newTriggerTMRequest   TMRequestType = 7
 	getTriggersTMRequest  TMRequestType = 8
+	bcPermsTMRequest      TMRequestType = 9
 	serverConnRequest     TMRequestType = 80
 	lostConnRequest       TMRequestType = 255
 
@@ -385,6 +386,10 @@ func (args TMServerConn) getRequestType() (requestType TMRequestType) {
 
 func (args TMS2SRequest) getRequestType() (requestType TMRequestType) {
 	return args.Args.getRequestType()
+}
+
+func (args TMBCPermsArgs) getRequestType() (requestType TMRequestType) {
+	return bcPermsTMRequest
 }
 
 //TMRemoteMsg
@@ -493,8 +498,9 @@ func Initialize(replicaID int16) (tm *TransactionManager) {
 		waitStartChan:    make(chan bool, 1),
 		triggerDB:        ProtectedTriggerDB{RWMutex: sync.RWMutex{}, TriggerDB: InitializeTriggerDB()},
 		RemoteInfo: RemoteInfo{
-			bucketToIndex: make(map[string][]int),
-			hasAll:        false,
+			bucketToIndex:   make(map[string][]int),
+			remoteIDToIndex: make(map[int16]int),
+			hasAll:          false,
 		},
 		commitChan: commitCh,
 		TMIdsInfo: TMIdsInfo{
@@ -649,7 +655,7 @@ func (tm *TransactionManager) handleRemoteMsgs() {
 		case TMStart:
 			tm.handleTMStart(&typedReq)
 		}
-		fmt.Println("[TM]Finished request from Replicator")
+		//fmt.Println("[TM]Finished request from Replicator")
 	}
 }
 
@@ -712,7 +718,9 @@ func (tm *TransactionManager) handleServerRequests(channel chan TransactionManag
 		case abortTMRequest:
 			tm.handleTMAbort(TransactionManagerRequest{TransactionId: txnID,
 				Timestamp: request.Timestamp, Args: innerArgs.Args}, ongoingInfo[clientID], id)
-		//Doesn't need reply
+			//Doesn't need reply
+		case bcPermsTMRequest:
+			tm.handleTMBCPerms(innerArgs.Args.(TMBCPermsArgs))
 		default:
 			fmt.Println("[TM]Unknown request type for S2S:", innerArgs.Args.getRequestType())
 		}
@@ -1167,14 +1175,12 @@ func (tm *TransactionManager) handleTMAbort(request TransactionManagerRequest, t
 	txnPartitions.reset()
 }
 
-/*
-type RemoteInfo struct {
-	idToBuckets map[int16][]string
-	idToIp      map[int16]string
-	bucketToIPs map[string][]string
-	ownBuckets  []string
+func (tm *TransactionManager) handleTMBCPerms(bcArgs TMBCPermsArgs) {
+	for partId, partPerms := range bcArgs.Perms {
+		tm.mat.SendRequestToChannel(MaterializerRequest{MatRequestArgs: MatBCTxnPermissions{
+			Values: partPerms, ReplicaID: bcArgs.ReqReplicaID}}, uint64(partId))
+	}
 }
-*/
 
 func (tm *TransactionManager) getClockToUse(clientTs clocksi.Timestamp, id int) (tsToUse clocksi.Timestamp) {
 	//fmt.Println("[TM]Requesting clock...")
@@ -1239,11 +1245,11 @@ func (tm *TransactionManager) applyRemoteClk(request *TMRemoteClk) {
 		tm.localClock.Timestamp = tm.localClock.Timestamp.UpdatePos(request.ReplicaID, request.StableTs)
 		copyClk := tm.localClock.Timestamp.Copy()
 		tm.localClock.Unlock()
-		fmt.Println("[TM]Remote clk applied.")
+		//fmt.Println("[TM]Remote clk applied.")
 		tm.checkPendingRemoteTxns(copyClk)
 	} else {
 		//Queue
-		fmt.Println("[TM]Remote clk queued.")
+		//fmt.Println("[TM]Remote clk queued.")
 		tm.downstreamQueue[request.ReplicaID] = append(tm.downstreamQueue[request.ReplicaID], request)
 	}
 }
@@ -1501,6 +1507,7 @@ func (tm *TransactionManager) handleReplicaID(replica *TMReplicaID) {
 	clocksi.AddNewID(remoteID)
 	tm.RemoteInfo.remoteBks = append(tm.RemoteInfo.remoteBks, replica.Buckets)
 	tm.RemoteInfo.remoteIPs = append(tm.RemoteInfo.remoteIPs, replica.IP)
+	tm.RemoteInfo.remoteIDToIndex[remoteID] = len(tm.RemoteInfo.remoteIPs) - 1
 }
 
 func (tm *TransactionManager) handleRemoteTrigger(trigger *TMRemoteTrigger) {
@@ -1529,6 +1536,7 @@ func (tm *TransactionManager) handleTMStart(start *TMStart) {
 	MAX_POOL_PER_SERVER = tools.SharedConfig.GetIntConfig("poolMax", 100)
 	pool := initializeConnPool(tm.remoteIPs)
 	tm.connPool = pool
+	StartBCTimer(tm.mat, tm.connPool, tm.remoteIDToIndex, tm.replicaID)
 	tm.waitStartChan <- true
 }
 

@@ -245,7 +245,7 @@ func processConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID
 			s2sChan = handleServerConn(tmChan, conn)
 			continue
 		case antidote.S2S:
-			handleServerToServer(protobuf.(*proto.S2SWrapper), tmChan, s2sChan, conn)
+			handleServerToServer(protobuf.(*proto.S2SWrapper), tmChan, s2sChan, conn, tm)
 			continue
 		default:
 			tools.FancyErrPrint(tools.PROTO_PRINT, replicaID, "Received unknown proto, ignored... sort of")
@@ -522,7 +522,8 @@ func handleServerConn(tmChan chan antidote.TransactionManagerRequest, conn net.C
 	return replyChan
 }
 
-func handleServerToServer(protobf *proto.S2SWrapper, tmChan chan antidote.TransactionManagerRequest, s2sChan chan antidote.TMS2SReply, conn net.Conn) {
+func handleServerToServer(protobf *proto.S2SWrapper, tmChan chan antidote.TransactionManagerRequest, s2sChan chan antidote.TMS2SReply,
+	conn net.Conn, tm *antidote.TransactionManager) {
 	//"Just" send appropriate request
 	var req antidote.TMRequestArgs
 	var txnId antidote.TransactionId
@@ -601,6 +602,12 @@ func handleServerToServer(protobf *proto.S2SWrapper, tmChan chan antidote.Transa
 		tmChan <- createTMRequest(req, txnId, clientClock)
 		reply, replyType = antidote.TMCommitReply{Timestamp: clientClock}, proto.WrapperType_COMMIT
 		//antidote.SendProto(antidote.CommitTransReply, antidote.CreateCommitOkResp(txnId, clientClock), conn)
+
+	case proto.WrapperType_BC_PERMS_REQ:
+		inProto := protobf.BcPermsReq
+		req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.ProtoBCPermissionsReqToTM(inProto)}
+		tmChan <- createTMRequest(req, 578902378, nil) //Random txID value
+		return                                         //No reply
 
 	default:
 		fmt.Println("[PROTOSERVER]Error - Unknown type of S2S message:", protobf.MsgID)

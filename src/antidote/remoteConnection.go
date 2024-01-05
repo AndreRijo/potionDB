@@ -287,8 +287,8 @@ func (remote *RemoteConn) SendGroupTxn(txns []RemoteTxn) {
 				fmt.Println("[RC]Error marshalling ProtoReplicateGroupTxn proto. Protobuf:", *protobuf)
 				os.Exit(0)
 			}
-			fmt.Printf("[RC%d]Sending group txns with IDs %d-%d for bucket %s with len %d.\n", remote.connID,
-				remote.txnCount, remote.txnCount+int32(len(txns)), bkt, len(bktTxns))
+			//fmt.Printf("[RC%d]Sending group txns with IDs %d-%d for bucket %s with len %d.\n", remote.connID,
+			//remote.txnCount, remote.txnCount+int32(len(txns)), bkt, len(bktTxns))
 			//remote.sendCh.Publish(exchangeName, strconv.FormatInt(int64(remote.txnCount), 10)+"."+bkt, false, false, amqp.Publishing{CorrelationId: remote.replicaString, Body: data})
 			remote.sendCh.Publish(exchangeName, groupTopicPrefix+bkt, false, false, amqp.Publishing{CorrelationId: remote.replicaString, Body: data})
 		}
@@ -338,7 +338,7 @@ func (remote *RemoteConn) SendTxn(txn RemoteTxn) {
 			remote.checkProtoError(err, protobuf, upds)
 			os.Exit(0)
 		}
-		fmt.Printf("[RC%d]Sending individual txn %d for bucket %s.\n", remote.connID, remote.txnCount, bucket)
+		//fmt.Printf("[RC%d]Sending individual txn %d for bucket %s.\n", remote.connID, remote.txnCount, bucket)
 		//remote.sendCh.Publish(exchangeName, strconv.FormatInt(int64(remote.txnCount), 10)+"."+bucket, false, false, amqp.Publishing{CorrelationId: remote.replicaString, Body: data})
 		remote.sendCh.Publish(exchangeName, bucketTopicPrefix+bucket, false, false, amqp.Publishing{CorrelationId: remote.replicaString, Body: data})
 	}
@@ -454,7 +454,7 @@ func (remote *RemoteConn) startReceiver() {
 	nTxnReceived := 0
 	for data := range remote.recCh {
 		tools.FancyInfoPrint(tools.REMOTE_PRINT, remote.replicaID, "Received something!")
-		fmt.Printf("[RC%d]Receiving something (%s) at: %s\n", remote.connID, data.RoutingKey, time.Now().String())
+		//fmt.Printf("[RC%d]Receiving something (%s) at: %s\n", remote.connID, data.RoutingKey, time.Now().String())
 		switch data.RoutingKey {
 		case clockTopic:
 			remote.handleReceivedStableClock(data.Body)
@@ -471,7 +471,7 @@ func (remote *RemoteConn) startReceiver() {
 			}
 			nTxnReceived++
 		}
-		fmt.Printf("[RC%d]Finished receiving something at: %s\n", remote.connID, time.Now().String())
+		//fmt.Printf("[RC%d]Finished receiving something at: %s\n", remote.connID, time.Now().String())
 		//}
 	}
 }
@@ -484,7 +484,7 @@ func (remote *RemoteConn) handleReceivedGroupOps(data []byte) {
 		os.Exit(0)
 	}
 	bktGroup := protoToRemoteTxnGroup(protobuf)
-	fmt.Printf("[RC%d]Received txn group %d-%d with size %d\n", remote.connID, bktGroup.MinTxnID, bktGroup.MaxTxnID, len(bktGroup.Txns))
+	//fmt.Printf("[RC%d]Received txn group %d-%d with size %d\n", remote.connID, bktGroup.MinTxnID, bktGroup.MaxTxnID, len(bktGroup.Txns))
 	if bktGroup.MinTxnID != remote.txnID {
 		remote.sendMerged()
 		remote.createHold(bktGroup.MinTxnID)
@@ -502,7 +502,7 @@ func (remote *RemoteConn) handleReceivedOps(data []byte) {
 	//Each transaction must be hold until we receive all buckets
 	//This is identified by receiving another transaction or a clock.
 	bktTxn := protoToRemoteTxn(protobuf)
-	fmt.Printf("[RC%d]Received txn %d\n", remote.connID, bktTxn.TxnID)
+	//fmt.Printf("[RC%d]Received txn %d\n", remote.connID, bktTxn.TxnID)
 	if bktTxn.TxnID != remote.txnID {
 		//Need to send the previous txn that is now complete
 		remote.sendMerged()
@@ -527,8 +527,8 @@ func (remote *RemoteConn) getMergedTxn() (merged *RemoteTxn) {
 	merged = &RemoteTxn{}
 	merged.Upds = make(map[int][]*UpdateObjectParams)
 	var currReq *RemoteTxn
-	fmt.Printf("[RC%d]Merging txn. TxnID: %d; nReceived: %d, isGroup: %t. Msgs: %v\n",
-		remote.connID, remote.txnID, remote.nReceived, remote.isGroup, remote.onHold)
+	//fmt.Printf("[RC%d]Merging txn. TxnID: %d; nReceived: %d, isGroup: %t. Msgs: %v\n",
+	//remote.connID, remote.txnID, remote.nReceived, remote.isGroup, remote.onHold)
 	for _, msg := range remote.onHold[:remote.nReceived] {
 		currReq = msg.(*RemoteTxn)
 		for partID, partUpds := range currReq.Upds {
@@ -558,8 +558,8 @@ func (remote *RemoteConn) getMergedTxnGroup() (merged *RemoteTxnGroup) {
 	var currClk clocksi.Timestamp
 	potencialSkip := int32(math.MaxInt32) //If for all entries the nextID is bigger than currID, we can jump to the minimum on next iteration.
 
-	fmt.Printf("[RC%d]Merging txn group. TxnID: %d; nReceived: %d, isGroup: %t, MinID: %d, MaxID: %d, Msgs: %v\n",
-		remote.connID, remote.txnID, remote.nReceived, remote.isGroup, currID, maxID, remote.onHold[:remote.nReceived])
+	//fmt.Printf("[RC%d]Merging txn group. TxnID: %d; nReceived: %d, isGroup: %t, MinID: %d, MaxID: %d, Msgs: %v\n",
+	//remote.connID, remote.txnID, remote.nReceived, remote.isGroup, currID, maxID, remote.onHold[:remote.nReceived])
 	for currID <= maxID {
 		//fmt.Printf("[RC%d]Outer cycle. CurrID: %d\n", remote.connID, currID)
 		for i, group := range convReqs {
@@ -592,7 +592,7 @@ func (remote *RemoteConn) getMergedTxnGroup() (merged *RemoteTxnGroup) {
 		}
 		potencialSkip = math.MaxInt32
 	}
-	fmt.Printf("[RC%d]Finished txn group merge. Size: %d\n", remote.connID, len(merged.Txns))
+	//fmt.Printf("[RC%d]Finished txn group merge. Size: %d\n", remote.connID, len(merged.Txns))
 	return
 }
 

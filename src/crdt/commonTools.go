@@ -96,6 +96,14 @@ func InitializeCrdt(crdtType proto.CRDTType, replicaID int16) (newCrdt CRDT) {
 		newCrdt = (&RWEmbMapCrdt{}).Initialize(nil, replicaID)
 	case proto.CRDTType_TOPSUM:
 		newCrdt = (&TopSumCrdt{}).Initialize(nil, replicaID)
+	case proto.CRDTType_FLAG_LWW:
+		newCrdt = (&LwwFlagCrdt{}).Initialize(nil, replicaID)
+	case proto.CRDTType_FLAG_EW:
+		newCrdt = (&EwFlagCrdt{}).Initialize(nil, replicaID)
+	case proto.CRDTType_FLAG_DW:
+		newCrdt = (&DwFlagCrdt{}).Initialize(nil, replicaID)
+	case proto.CRDTType_FATCOUNTER:
+		newCrdt = (&BoundedCounterCrdt{}).Initialize(nil, replicaID)
 	default:
 		newCrdt = nil
 	}
@@ -152,4 +160,11 @@ func max(f int, s int) int {
 		return f
 	}
 	return s
+}
+
+func MinInt32(a, b int32) int32 {
+	if a < b {
+		return a
+	}
+	return b
 }

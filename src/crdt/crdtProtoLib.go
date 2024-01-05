@@ -1,6 +1,7 @@
 package crdt
 
 import (
+	"fmt"
 	"potionDB/src/clocksi"
 	"potionDB/src/proto"
 )
@@ -62,6 +63,7 @@ type ProtoCRDT interface {
 func UpdateProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation, crdtType proto.CRDTType) (op *UpdateArguments) {
 	var tmpUpd UpdateArguments = NoOp{}
 
+	fmt.Println("[CRDTProtoLib]Proto->Antidote. CRDTType: ", crdtType)
 	if protobuf.GetResetop() != nil {
 		tmpUpd = ResetOp{}
 		return &tmpUpd
@@ -86,6 +88,10 @@ func UpdateProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation, crdtType pr
 		tmpUpd = updateMaxMinProtoToAntidoteUpdate(protobuf)
 	case proto.CRDTType_TOPSUM:
 		tmpUpd = updateTopsProtoToAntidoteUpdate(protobuf)
+	case proto.CRDTType_FLAG_EW, proto.CRDTType_FLAG_DW, proto.CRDTType_FLAG_LWW:
+		tmpUpd = updateFlagProtoToAntidoteUpdate(protobuf)
+	case proto.CRDTType_FATCOUNTER:
+		tmpUpd = updateBCounterProtoToAntidoteUpdate(protobuf)
 	}
 
 	return &tmpUpd
@@ -152,8 +158,10 @@ func ReadRespProtoToAntidoteState(protobuf *proto.ApbReadObjectResp, crdtType pr
 		state = AvgState{}.FromReadResp(protobuf)
 	case proto.CRDTType_MAXMIN:
 		state = MaxMinState{}.FromReadResp(protobuf)
-		//case proto.CRDTType_TOPSUM:
-		//state = TopSValueState{}.FromReadResp(protobuf)
+	//case proto.CRDTType_TOPSUM:
+	//state = TopSValueState{}.FromReadResp(protobuf)
+	case proto.CRDTType_FLAG_EW:
+		state = FlagState{}.FromReadResp(protobuf)
 	}
 
 	return
@@ -189,6 +197,7 @@ func partialReadRespProtoToAntidoteState(protobuf *proto.ApbReadObjectResp, crdt
 }
 
 func DownstreamProtoToAntidoteDownstream(protobuf *proto.ProtoOpDownstream, crdtType proto.CRDTType) (downOp DownstreamArguments) {
+	fmt.Println("[CRDTProtoLib]Repl->Antidote. CRDTType:", crdtType)
 	switch crdtType {
 	case proto.CRDTType_COUNTER:
 		downOp = downstreamProtoCounterToAntidoteDownstream(protobuf)
@@ -209,6 +218,14 @@ func DownstreamProtoToAntidoteDownstream(protobuf *proto.ProtoOpDownstream, crdt
 	case proto.CRDTType_TOPSUM:
 		//downOp = DownstreamTopSAdd{}.FromReplicatorObj(protobuf)
 		downOp = downstreamProtoTopSToAntidoteDownstream(protobuf)
+	case proto.CRDTType_FLAG_EW:
+		downOp = downstreamProtoFlagEWToAntidoteDownstream(protobuf)
+	case proto.CRDTType_FLAG_DW:
+		downOp = downstreamProtoFlagDWToAntidoteDownstream(protobuf)
+	case proto.CRDTType_FLAG_LWW:
+		downOp = downstreamProtoFlagLWWToAntidoteDownstream(protobuf)
+	case proto.CRDTType_FATCOUNTER:
+		downOp = downstreamProtoBCounterToAntidoteDownstream(protobuf)
 	}
 
 	return
@@ -234,6 +251,14 @@ func StateProtoToCrdt(protobuf *proto.ProtoState, crdtType proto.CRDTType, ts *c
 		crdt = (&MaxMinCrdt{}).FromProtoState(protobuf, ts, replicaID)
 	case proto.CRDTType_TOPSUM:
 		crdt = (&TopSumCrdt{}).FromProtoState(protobuf, ts, replicaID)
+	case proto.CRDTType_FLAG_EW:
+		crdt = (&EwFlagCrdt{}).FromProtoState(protobuf, ts, replicaID)
+	case proto.CRDTType_FLAG_DW:
+		crdt = (&DwFlagCrdt{}).FromProtoState(protobuf, ts, replicaID)
+	case proto.CRDTType_FLAG_LWW:
+		crdt = (&LwwFlagCrdt{}).FromProtoState(protobuf, ts, replicaID)
+	case proto.CRDTType_FATCOUNTER:
+		crdt = (&BoundedCounterCrdt{}).FromProtoState(protobuf, ts, replicaID)
 	}
 	return
 }
@@ -301,6 +326,26 @@ func updateTopsProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation) (op Upd
 		return TopSAddAll{}.FromUpdateObject(protobuf)
 	}
 	return TopSSubAll{}.FromUpdateObject(protobuf)
+}
+
+func updateFlagProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
+	flag := protobuf.GetFlagop().GetValue()
+	if flag {
+		return EnableFlag{}
+	}
+	return DisableFlag{}
+}
+
+func updateBCounterProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
+	counter := protobuf.GetCounterop()
+	if value := counter.GetInc(); value != 0 {
+		if value > 0 {
+			return Increment{}.FromUpdateObject(protobuf)
+		} else {
+			return Decrement{}.FromUpdateObject(protobuf)
+		}
+	}
+	return SetCounterBound{}.FromUpdateObject(protobuf)
 }
 
 func partialHasKeyRespProtoToAntidoteState(protobuf *proto.ApbReadObjectResp, crdtType proto.CRDTType) (state State) {
@@ -412,6 +457,46 @@ func downstreamProtoTopSToAntidoteDownstream(protobuf *proto.ProtoOpDownstream) 
 		return DownstreamTopSAddAll{}.FromReplicatorObj(protobuf)
 	}
 	return DownstreamTopSSubAll{}.FromReplicatorObj(protobuf)
+}
+
+func downstreamProtoFlagEWToAntidoteDownstream(protobuf *proto.ProtoOpDownstream) (downOp DownstreamArguments) {
+	fmt.Println("[CRDTProtoLib]Making EW Downstream:. Enable:", protobuf.GetFlagOp().GetEnableEW(), "Disable:", protobuf.GetFlagOp().GetDisableEW())
+	flag := protobuf.GetFlagOp()
+	if enable := flag.GetEnableEW(); enable != nil {
+		return DownstreamEnableFlagEW{}.FromReplicatorObj(protobuf)
+	}
+	return DownstreamDisableFlagEW{}.FromReplicatorObj(protobuf)
+}
+
+func downstreamProtoFlagDWToAntidoteDownstream(protobuf *proto.ProtoOpDownstream) (downOp DownstreamArguments) {
+	fmt.Println("[CRDTProtoLib]Making DW Downstream. Enable:", protobuf.GetFlagOp().GetEnableDW(), "Disable:", protobuf.GetFlagOp().GetDisableDW())
+	flag := protobuf.GetFlagOp()
+	if disable := flag.GetDisableDW(); disable != nil {
+		return DownstreamDisableFlagDW{}.FromReplicatorObj(protobuf)
+	}
+	return DownstreamEnableFlagDW{}.FromReplicatorObj(protobuf)
+}
+
+func downstreamProtoFlagLWWToAntidoteDownstream(protobuf *proto.ProtoOpDownstream) (downOp DownstreamArguments) {
+	flag := protobuf.GetFlagOp()
+	if enable := flag.GetEnableLWW(); enable != nil {
+		return DownstreamEnableFlagLWW{}.FromReplicatorObj(protobuf)
+	}
+	return DownstreamDisableFlagLWW{}.FromReplicatorObj(protobuf)
+}
+
+func downstreamProtoBCounterToAntidoteDownstream(protobuf *proto.ProtoOpDownstream) (downOp DownstreamArguments) {
+	bcounter := protobuf.GetBcounterOp()
+	if inc := bcounter.GetInc(); inc != nil {
+		return DownstreamIncBCounter{}.FromReplicatorObj(protobuf)
+	}
+	if dec := bcounter.GetDec(); dec != nil {
+		return DownstreamDecBCounter{}.FromReplicatorObj(protobuf)
+	}
+	if transfer := bcounter.GetTransfer(); transfer != nil {
+		return TransferCounter{}.FromReplicatorObj(protobuf)
+	}
+	return SetCounterBound{}.FromReplicatorObj(protobuf)
 }
 
 /***OTHER HELPERS***/

@@ -54,6 +54,8 @@ message ProtoOpDownstream {
     optional ProtoMaxMinDownstream maxminOp = 7;
     optional ProtoRWEmbMapDownstream rwembmapOp = 8;
     optional ProtoTopSumDownstream topsumOp = 9;
+    optional ProtoFlagDownstream flagOp = 10;
+    optional ProtoBCounterDownstream bcounterOp = 11;
     optional ProtoResetDownstream resetOp = 15;
 }
 
@@ -174,6 +176,70 @@ message ProtoTopSumDownstream {
     required bool isPositive = 2;
 }
 
+message ProtoFlagDownstream {
+    optional ProtoEnableLWWDownstream enableLWW = 1;
+    optional ProtoDisableLWWDownstream disableLWW = 2;
+    optional ProtoEnableEWDownstream enableEW = 3;
+    optional ProtoDisableEWDownstream disableEW = 4;
+    optional ProtoEnableDWDownstream enableDW = 5;
+    optional ProtoDisableDWDownstream disableDW = 6;
+}
+
+message ProtoEnableLWWDownstream {
+    required int64 ts = 1;
+    required int32 replicaID = 2;
+}
+
+message ProtoDisableLWWDownstream {
+    required int64 ts = 1;
+    required int32 replicaID = 2;
+}
+
+message ProtoEnableEWDownstream {
+    required uint64 unique = 1;
+}
+
+message ProtoDisableEWDownstream {
+    repeated uint64 seenUniques = 1; 
+}
+
+message ProtoEnableDWDownstream {
+    repeated uint64 seenUniques = 1;
+}
+
+message ProtoDisableDWDownstream {
+    required uint64 unique = 1;
+}
+
+message ProtoBCounterDownstream {
+    optional ProtoSetBoundCounterDownstream setBounds = 1;
+    optional ProtoTransferCounterDownstream transfer = 2;
+    optional ProtoIncBCounterDownstream inc = 3;
+    optional ProtoDecBCounterDownstream dec = 4;
+}
+
+message ProtoSetBoundCounterDownstream {
+    required int32 limit = 1;
+    required bool compEq = 2;
+    required int32 value = 3;
+}
+
+message ProtoTransferCounterDownstream {
+    required int32 transferValue = 1;
+    required int32 fromID = 2;
+    required int32 toID = 3;
+}
+
+message ProtoIncBCounterDownstream {
+    required int32 change = 1;
+    required int32 replicaID = 2;
+}
+
+message ProtoDecBCounterDownstream {
+    required int32 change = 1;
+    required int32 replicaID = 2;
+}
+
 message ProtoResetDownstream {
 }
 
@@ -242,6 +308,8 @@ message ProtoState {
     optional ProtoTopKState topk = 7;
     optional ProtoAvgState avg = 8;
     optional ProtoTopSumState topsum = 9;
+    optional ProtoFlagState flag = 10;
+    optional ProtoBoundedCounterState bcounter = 11;
 }
 
 message ProtoReplyEmpty {
@@ -306,4 +374,27 @@ message ProtoTopSumState {
     optional ProtoTopSumElement smallest = 3;
     required int32 maxElems = 4;
     //Note: notPropagated isn't included.
+}
+message ProtoFlagState {
+    optional ProtoFlagLWWState lww = 1;
+    optional ProtoFlagEWState ew = 2;
+    optional ProtoFlagDWState dw = 3;
+}
+message ProtoFlagLWWState {
+    required bool flag = 1;
+    required int64 ts = 2;
+    required int32 replicaID = 3;
+}
+message ProtoFlagEWState {
+    repeated uint64 uniques = 1; 
+}
+message ProtoFlagDWState {
+    repeated uint64 uniques = 1;
+}
+
+message ProtoBoundedCounterState {
+    map<int32,int32> permissions = 1;
+    map<int32,int32> decs = 2;
+    required int32 limit = 3;
+    required int32 value = 4;
 }

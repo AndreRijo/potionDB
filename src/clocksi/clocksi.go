@@ -77,6 +77,8 @@ type Timestamp interface {
 	Copy() (copyTs Timestamp)
 	//Returns true if this TS happened before otherTS or, if they are concurrent, if by a total order TS should be before orderTS. Also returns true if they are equal.
 	IsLowerOrEqualTotalOrder(otherTs Timestamp) (compResult bool)
+	//For vector clocks, get the list of IDs sorted numerically
+	GetSortedKeys() (keys []int16)
 }
 
 type ClockSiTimestamp struct {
@@ -128,6 +130,13 @@ var (
 func AddNewID(id int16) {
 	knownIDs = append(knownIDs, id)
 	addToHighestTs(id)
+}
+
+//Returns a copy of the known IDs
+func GetKeys() (ids []int16) {
+	ids = make([]int16, len(knownIDs))
+	copy(ids, knownIDs)
+	return ids
 }
 
 //Creates a new timestamp. This gives the same result as doing: newTs = ClockSiTimestamp{}.NewTimestamp().
@@ -575,7 +584,7 @@ func (ts ClockSiTimestamp) ToString() (tsString string) {
 
 func (ts ClockSiTimestamp) ToSortedString() (tsString string) {
 	//Need to ensure this is written in order, since go randomizes map iteration order
-	keys := ts.getSortedKeys()
+	keys := ts.GetSortedKeys()
 	var builder strings.Builder
 	builder.WriteString("{[")
 	for _, key := range keys {
@@ -602,7 +611,7 @@ func (ts ClockSiTimestamp) GetMapKey() (key TimestampKey) {
 //Byte representation. Unused atm, probably no longer needed.
 func (ts ClockSiTimestamp) getMapByteKey() (key TimestampKey) {
 	//Need to ensure this is written in order, since go randomizes map iteration order
-	keys := ts.getSortedKeys()
+	keys := ts.GetSortedKeys()
 	byteSlice := make([]byte, len(keys)*8)
 	for i, key := range keys {
 		binary.BigEndian.PutUint64(byteSlice[i*8:i*8+8], uint64(ts.VectorClock[key]))
@@ -625,7 +634,7 @@ func (ts ClockSiTimestamp) GetMapSliceKey() (key TimestampKey) {
 
 func (ts ClockSiTimestamp) getMapStringKey() (key TimestampKey) {
 	//Need to ensure this is written in order, since go randomizes map iteration order
-	keys := ts.getSortedKeys()
+	keys := ts.GetSortedKeys()
 	var builder strings.Builder
 	for _, key := range keys {
 		builder.WriteString(fmt.Sprint(ts.VectorClock[key], ","))
@@ -633,7 +642,7 @@ func (ts ClockSiTimestamp) getMapStringKey() (key TimestampKey) {
 	return StringKey(builder.String())
 }
 
-func (ts ClockSiTimestamp) getSortedKeys() (keys []int16) {
+func (ts ClockSiTimestamp) GetSortedKeys() (keys []int16) {
 	keys = make([]int16, len(ts.VectorClock))
 	i := 0
 	for key := range ts.VectorClock {
