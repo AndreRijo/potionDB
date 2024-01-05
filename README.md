@@ -13,7 +13,7 @@ Objects in the database are uniquely identified by a triple (*id*, *type*, *buck
 *Id* is the name intended for the object, *type* represents the object's datatype while *bucket* represents to which "group" the object should belong.
 Each PotionDB server replicates a subset (potentially all) of all buckets existing in the system, thus achieving fine-grained partial replication.
 
-#### Notes for VLDB reviewers
+#### Notes for Eurosys reviewers
 
 The version used to produce the results in our paper is ready in the Docker image andrerj/potiondb:vldb. Please use said version to reproduce any results obtained in the paper. Instructions on how to run PotionDB can be found [here](#Getting-Started) and [here](#Running-multiple-instances-of-PotionDB). You will also want to check the [PotionDB's TPC-H Client](https://github.com/AndreRijo/TPCH-Client), which implements TPC-H's benchmark and includes instructions on how to prepare and run a TPC-H workload.
 
@@ -107,7 +107,7 @@ docker run -p 8087:8087 -p 5672:5672 -v /home/myname/myPotionDBConfigs/myConfig1
 
 ## Building from source
 
-**DISCLAIMER**: As of this moment, the main branch is outdated. For the most stable version (and also the one used for our VLDB paper submission), please use branch [*remoteOp*](https://github.com/AndreRijo/potionDB/tree/remoteOp). For the latest features (unstable), give the branches [*newMaterializer*](https://github.com/AndreRijo/potionDB/tree/newMaterializer) or [*clocks*](https://github.com/AndreRijo/potionDB/tree/clocks) a look.
+**DISCLAIMER**: As of this moment, the main branch is outdated. For the most stable version (and also the one used for our Eurosys paper submission), please use branch [*remoteOp*](https://github.com/AndreRijo/potionDB/tree/remoteOp). For the latest features (unstable), give the branches [*newMaterializer*](https://github.com/AndreRijo/potionDB/tree/newMaterializer) or [*clocks*](https://github.com/AndreRijo/potionDB/tree/clocks) a look.
 
 First, make sure you are in one of the branches mentioned above:
 
