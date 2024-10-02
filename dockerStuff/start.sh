@@ -1,22 +1,12 @@
 #!/bin/bash
 
-/opt/rabbitmq/sbin/rabbitmq-server &
-#echo $PWD ;
-#echo $1 ;
-#echo $0 ;
-#echo $CONFIG ;
-#echo $SERVERS ;
-#echo $RABBITMQ ;
-sleep $RABBITMQ_WAIT ; 
-rabbitmqctl add_vhost $RABBITMQ_VHOST ;
-sleep 5s ;
-rabbitmqctl add_user test test ; 
-rabbitmqctl set_user_tags test administrator;
-rabbitmqctl set_permissions -p $RABBITMQ_VHOST test ".*" ".*" ".*";
-sleep 5s;
-#/go/bin/monitor-fetch/main $1 ;
-
-/go/bin/main --config=$CONFIG --servers=$SERVERS --rabbitMQIP=$RABBITMQ --rabbitVHost=$RABBITMQ_VHOST;
+echo $DO_DATALOAD;
+echo $SCALE;
+echo $DATALOC;
+echo $REGION;
+/opt/rabbitmq/sbin/rabbitmq-server & (
+/go/bin/main --config=$CONFIG --servers=$SERVERS --rabbitMQIP=$RABBITMQ --rabbitVHost=$RABBITMQ_VHOST --buckets=$BUCKETS --disableReplicator=$DISABLE_REPLICATOR --disableLog=$DISABLE_LOG --disableReadWaiting=$DISABLE_READ_WAITING --useTC=$USE_TC --tcIPs=$TC_IPS --selfIP=$SELF_IP --poolMax=$POOL_MAX --topKSize=$TOPK_SIZE --doDataload=$DO_DATALOAD --scale=$SCALE --dataLoc=$DATALOC --region=$REGION --doIndexload=$DO_INDEXLOAD --isGlobal=$IS_GLOBAL --indexFullData=$IS_FULL --useTopKAll=$USE_TOPK_ALL --useTopSum=$USE_TOP_SUM --initialMem=$INITIAL_MEM --queryNumbers=$QUERY_NUMBERS --protoTestMode=$PROTO_TEST_MODE
+)
 
 #srv=${SERVERS:-nil}
 #rab=${RABBITMQ:-nil}

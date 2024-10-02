@@ -1,0 +1,30 @@
+{
+ "rabbit_version": "3.7.14",
+ "users": [
+  {
+   "name": "test",
+   "password_hash": "OTA4REM2MEE5RkQ4ODZGOEYzMEM5MUVDM0FCMUJENTFFQjZDMjBFRkRENjkzMkJENzlEMTUyQTQ0Mjc0RUE5REMxNTU4QTQw",
+   "hashing_algorithm": "rabbit_password_hashing_sha256",
+   "tags": ""
+  }
+ ],
+ "vhosts": [
+  {
+   "name": "\/crdts"
+  }
+ ],
+ "permissions": [
+  {
+   "user": "test",
+   "vhost": "\/crdts",
+   "configure": ".*",
+   "write": ".*",
+   "read": ".*"
+  }
+ ],
+ "parameters": [],
+ "policies": [],
+ "queues": [],
+ "exchanges": [],
+ "bindings": []
+}
