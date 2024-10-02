@@ -1,0 +1,174 @@
+package components
+
+import (
+	"potionDB/crdt/clocksi"
+	"time"
+)
+
+//TODO: Consider if a linear scan of TsCount is OK - I'd say yes as GC doesn't happen too often and the map should be small-ish.
+//Otherwise, a sorted structure will be needed.
+
+type GCRequest interface {
+}
+
+//*****Requests*****//
+
+type GCUseClock struct {
+	Clk clocksi.Timestamp
+}
+
+type GCFreeClock struct {
+	Clk clocksi.Timestamp
+}
+
+type GCClean struct {
+}
+
+//*****Rest of the code*****//
+//Some way to control the "aggressivity" of the GC would be nice.
+//But this would require extra metadata from the outside
+//GC does not need to be informed of staticUpds or remoteUpds - only of staticReads and startTxns.
+//As only those clocks are "being used" to read in the past.
+//Possibly the goroutine that handles updating the TM's clock can periodically inform the GC.
+
+type GarbageCollector struct {
+	reqChan           chan GCRequest
+	tsCount           map[clocksi.TimestampKey]TsCountPair
+	highestClkDeleted clocksi.Timestamp //This is used to know which clock is safe to clean when no txn is pending.
+	tmChan            chan TMCommitInfo
+	mat               *Materializer
+}
+
+type TsCountPair struct {
+	clk   clocksi.Timestamp
+	count *int
+}
+
+const (
+	gcChanSize       = 1000
+	gcCleanFrequency = 5000 //ms
+)
+
+func (gc GarbageCollector) Initialize(tmChan chan TMCommitInfo, mat *Materializer) (newGc GarbageCollector) {
+	newGc = GarbageCollector{
+		reqChan: make(chan GCRequest, gcChanSize),
+		tsCount: make(map[clocksi.TimestampKey]TsCountPair),
+		tmChan:  tmChan,
+		mat:     mat,
+	}
+	go newGc.handleGCRequests()
+	go newGc.cleanRoutine()
+	return newGc
+}
+
+func (gc GarbageCollector) handleGCRequests() {
+	for {
+		switch typedReq := (<-gc.reqChan).(type) {
+		case GCUseClock:
+			gc.handleUseClock(typedReq)
+		case GCFreeClock:
+			gc.handleFreeClock(typedReq)
+		case GCClean:
+			gc.handleClean()
+		}
+	}
+}
+
+func (gc GarbageCollector) handleUseClock(req GCUseClock) {
+	tsKey := req.Clk.GetMapKey()
+	pair, has := gc.tsCount[tsKey]
+	if !has {
+		pair = TsCountPair{clk: req.Clk, count: new(int)}
+		gc.tsCount[tsKey] = pair
+	}
+	*pair.count++
+}
+
+func (gc GarbageCollector) handleFreeClock(req GCFreeClock) {
+	tsKey := req.Clk.GetMapKey()
+	pair := gc.tsCount[tsKey]
+	*pair.count--
+	if *pair.count == 0 {
+		delete(gc.tsCount, tsKey)
+	}
+}
+
+//TODO: What if we're only doing updates???
+func (gc GarbageCollector) handleClean() {
+	//Go through all the entries
+	var minClk clocksi.Timestamp = nil
+	for _, pair := range gc.tsCount {
+		if minClk == nil || pair.clk.IsLower(minClk) {
+			minClk = pair.clk
+		}
+	}
+	//TODO: Case where minClk == nil (nothing pending)
+
+}
+
+func (gc GarbageCollector) cleanRoutine() {
+	for {
+		time.Sleep(gcCleanFrequency * time.Millisecond)
+		gc.reqChan <- GCClean{}
+	}
+}
+
+/*
+	Problems:
+	- What if another txn asks to read the clock we're cleaning?
+		- This can happen if, e.g., no updates are happening.
+		- Cleaning "-1" on local entry is not enough (what if the last txns applied are external?)
+		-
+
+		- If we assume the clocks are sent during locks
+		- The previous should always be safe. At the very least is if we assume msgs are sent while on the tm lock
+		- The difficulty is, figuring out this clock.
+	- What if there's no reads (only updates)?
+		- Ask TM for clock. TM should send the previous clock.
+		- The previous clock will be safe to clean.
+*/
+
+/*
+	Maybe a solution would be...
+	- A routine executes on TM, periodically asks GC to do GC and gives two clocks - actual & previous
+	- GC receives this, checks pending clocks. GC then knows, any goroutine that not yet contacted GC, must use actual clock
+		- This is only true if the TMs contact GC as soon as they get the clock.
+		- Otherwise, one could get the clock, then thread sleeps, clock gets updated, GC starts collecting, then thread awakes and lets GC know too late
+		- But doing so during lock would make the lock be hold for longer and possibly cause a deadlock.
+
+*/
+
+/*
+	Cleaning partitions
+	- Maybe two ways of operating?
+	- Way one: when partition has no further request, leave a mark for cleanup
+		- The idea is, as updates/read happen, the CRDTs are cleaned.
+		- Question is: should this mark be put inside each CRDT (means iterating the whole DB) or on materializer?
+			- The former has the benefict that each CRDT knows whenever to clean or not.
+			- The latter implies the Mat will always be asking to clean the CRDT. The CRDT will need to know when to ignore (prob keep clock or some ID?)
+				- An ID of cleaning could be used. If the ID of last clean is the same as the current one, do nothing.
+		- At some point later, when Mat is free for a while, it should force clean of all other CRDTs.
+			- It's okay if this is very delayed - if CRDTs are not being written/read, then no new history is being created - is OK to not clean.
+			- Maybe period full check of the DB when idle?
+			- Maybe this can be done by a timeout? If a timeout happens and there's no request, force clean.
+				- Maybe can use select with timeout.
+	- Way two: when no request is pending, do a full clean
+		- Go through all CRDTs, force clean them on the spot
+	- I like this plan. I think it balances the "load" of cleaning when doing operations
+
+	- I would like this to be generic. Ideally, not require every CRDT to have a method for cleaning
+	- Maybe can if every CRDT has some generic component, and that generic component has access to the history component.
+		- This would likely only require to change the initializer which is OK
+	- Need to also clean the VMs. This may be tough given how we store the clocks.
+		- String comparisons are heavy.
+		- I could however store them as sorted arrays. Sorted arrays can be compared. Comparison is reasonable (cheaper than a map)
+*/
+
+/*
+	A better way to solve the problem of VM only storing TS keys... I can have a shared map in each partition with TSKey -> TS.
+		This is safe concurrency wise as there's only 1 goroutine per partition.
+		While there's still some duplication (across partitions), it's much more reasonable (at least not duplication across objects)
+		Now that I think of it, the logging of effects already suffers from this :)
+		Maybe I just let the duplication happen and consider optimizing it later
+		If I want to save space, I think I can make TSKeys become a hash.
+*/

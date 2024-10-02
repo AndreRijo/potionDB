@@ -1,0 +1,597 @@
+// Java package specifiers
+option java_package = "com.basho.riak.protobuf";
+option java_outer_classname = "AntidotePB";
+option go_package = "potionDB/crdt/proto";
+
+//Optimization tips:
+//Fields 1-16 only need 1 byte to encode instead of 2: use 1-16 for the most common fields.
+//The above restriction does not apply to enums.
+
+enum CRDT_type {
+    COUNTER = 3;
+    COUNTER_FLOAT = 18;
+    ORSET = 4;
+    LWWREG = 5;
+    MVREG = 6;
+    GMAP = 8;
+    RWSET = 10;
+    RRMAP = 11;
+    FATCOUNTER = 12;
+    FLAG_EW = 13;
+    FLAG_DW = 16;
+    FLAG_LWW = 17;
+    TOPK = 1;
+    TOPK_RMV = 2;
+    AVG = 7;
+    LEADERBOARD = 9;
+    MAXMIN = 0;
+    ORMAP = 15;
+    TOPSUM = 14;
+}
+
+// Riak Error response
+message ApbErrorResp {
+    required bytes errmsg = 1;
+    required uint32 errcode = 2;
+}
+
+message TmpProto {
+    required bytes data = 1;
+}
+
+//------------------
+// Counter
+
+// Counter increment request
+message ApbCounterUpdate {
+    // inc indicates the value to be incremented. To decrement, use a negative value. If no value is given, it will be considered as an increment by 1
+    optional sint64 inc = 1;
+}
+
+// Response operation
+message ApbGetCounterResp {
+    required sint32 value = 1;
+}
+
+message ApbCounterFloatUpdate {
+    required double inc = 1;
+}
+
+message ApbGetCounterFloatResp {
+    required double value = 1;
+}
+
+
+//------------------
+// Set
+
+// Set updates request
+message ApbSetUpdate{
+    enum SetOpType // TODO merge adds/removes
+    {
+        ADD = 1;
+        REMOVE = 2;
+    }
+    required SetOpType optype = 1;
+    repeated bytes adds = 2;
+    repeated bytes rems = 3;
+}
+
+// Get set request
+message ApbGetSetResp {
+    repeated bytes value = 1;
+}
+
+//------------------
+// LWW-register
+
+// Register update
+message ApbRegUpdate {
+    required bytes value = 1;
+}
+
+// Response operation
+message ApbGetRegResp {
+    required bytes value = 1;
+}
+
+//------------------
+// MV-register
+
+// use ApbRegUpdate for updates
+
+// response:
+message ApbGetMVRegResp {
+    repeated bytes values = 1;
+}
+
+//------------------
+// Map
+
+
+message ApbMapKey {
+    required bytes key = 1;
+    required CRDT_type type = 2;
+}
+
+message ApbMapUpdate {
+    repeated ApbMapNestedUpdate updates = 1;
+    repeated ApbMapKey removedKeys = 2;
+    optional bool isAddsArray = 3;      //If not present, it is assumed to be false.
+}
+
+message ApbMapNestedUpdate {
+    required ApbMapKey key = 1;
+    required ApbUpdateOperation update = 2;
+}
+
+message ApbGetMapResp {
+    repeated ApbMapEntry entries = 1;
+}
+
+message ApbMapEntry {
+    required ApbMapKey key = 1;
+    required ApbReadObjectResp value = 2;
+}
+
+//-------------------
+// Flags
+
+message ApbFlagUpdate {
+    required bool value = 1;
+}
+
+message ApbGetFlagResp {
+    required bool value = 1;
+}
+
+// General reset operation
+message ApbCrdtReset {
+
+}
+
+// Response operation
+message ApbOperationResp {
+    required bool success = 1;
+    optional uint32 errorcode = 2;
+}
+
+
+//--------------------
+// Topk and Topk-rmv
+
+// Topk-rmv updates request
+message ApbTopkRmvUpdate{
+    repeated ApbIntPair adds = 1;
+    repeated sint32 rems = 2;
+}
+
+//Topk updates request
+message ApbTopkUpdate{
+	required sint64 playerId = 1;
+	required sint64 score = 2;
+}
+
+//Initializer to give a non-default size to the top
+message ApbTopKInit{
+    required uint32 topSize = 1;
+}
+
+// Value topk/topk-rmv request
+/*
+message ApbGetTopkResp {
+    repeated sint32 values = 1;
+}
+*/
+message ApbGetTopkResp {
+	repeated ApbIntPair values = 1;
+}
+
+//Holds a (playerId, score, data) triple
+message ApbIntPair {
+	required sint32 playerId = 1;
+    required sint32 score = 2;
+    optional bytes data = 3;
+}
+
+//--------------------
+// Leaderboard
+
+message ApbLeaderboardUpdate {
+	repeated ApbIntPair adds = 1;
+    repeated int32 rems = 2;
+}
+
+message ApbGetLeaderboardResp {
+	repeated int32 values = 1;
+}
+
+//--------------------
+// Average
+
+message ApbAverageUpdate {
+	required int64 value = 1;
+	optional int64 nValues = 2;
+}
+
+message ApbGetAverageResp {
+	required double avg = 1;
+}
+
+//--------------------
+// MaxMin
+
+message ApbMaxMinUpdate {
+    required int64 value = 1;
+    required bool isMax = 2;
+}
+
+message ApbGetMaxMinResp {
+    required int64 value = 1;
+}
+
+//--------------------
+// BoundedCounter
+
+//This message is only intended to be used once by CRDT, to set the limit and initial value
+//For increments/decrements, use ApbCounterUpdate
+message ApbBoundCounterUpdate {
+    required int64 limit = 1;
+    required int64 initialValue = 2;
+    required bool compEq = 3;
+}
+
+
+//--------------------------------------------------------------
+
+// Properties parameters of a transaction
+message ApbTxnProperties {
+    optional uint32 read_write = 1 ; //default = 0 = read_write, 1 = read_only, 2 = write_only
+    optional uint32 red_blue = 2 ; // default = 0 = blue, 1 = red
+}
+
+// Object (Key) representation
+message ApbBoundObject {
+    required bytes key = 1;
+    required CRDT_type type = 2;
+    required bytes bucket = 3;
+}
+
+// Objects to be read
+message ApbReadObjects {
+    repeated ApbBoundObject boundobjects = 1;
+    required bytes transaction_descriptor = 2;
+}
+
+
+// An Object to be updated with specified operation
+message ApbUpdateOp {
+    required ApbBoundObject boundobject = 1;
+    required ApbUpdateOperation operation = 2;
+}
+
+message ApbUpdateOperation { // TODO use this above
+    optional ApbCounterUpdate counterop = 1;
+    optional ApbSetUpdate setop = 2;
+    optional ApbRegUpdate regop = 3;
+    optional ApbBoundCounterUpdate bcounterop = 4;
+    optional ApbMapUpdate mapop = 5;
+    optional ApbCrdtReset resetop = 6;
+    optional ApbFlagUpdate flagop = 7;
+    optional ApbTopKInit topkinitop = 10;
+    optional ApbMaxMinUpdate maxminop = 11;
+    optional ApbTopkRmvUpdate topkrmvop = 12;
+    optional ApbTopkUpdate topkop = 13;
+    optional ApbLeaderboardUpdate leaderboardop = 14;
+    optional ApbAverageUpdate avgop = 15;
+    optional ApbCounterFloatUpdate counterfloatop = 16;
+}
+
+// Objects to be updated
+message ApbUpdateObjects {
+    repeated ApbUpdateOp updates = 1;
+    required bytes transaction_descriptor = 2;
+}
+
+// Start Transaction
+message ApbStartTransaction {
+    optional bytes timestamp = 1;
+    optional ApbTxnProperties properties = 2;
+}
+
+// Abort Transaction
+message ApbAbortTransaction {
+    required bytes transaction_descriptor = 1;
+}
+
+// Commit Transaction
+message ApbCommitTransaction {
+    required bytes transaction_descriptor = 1;
+}
+
+
+message ApbStaticUpdateObjects{
+    required ApbStartTransaction transaction = 1;
+    repeated ApbUpdateOp updates = 2;
+}
+
+message ApbStaticReadObjects{
+    required ApbStartTransaction transaction = 1;
+    repeated ApbBoundObject objects = 2;
+}
+
+//Start transaction response
+message ApbStartTransactionResp {
+    required bool success = 1;
+    optional bytes transaction_descriptor = 2;
+    optional uint32 errorcode = 3;
+}
+
+//Read Objects Response
+message ApbReadObjectResp {
+    // one of the following:
+    optional ApbGetCounterResp counter = 1;
+    optional ApbGetSetResp set = 2;
+    optional ApbGetRegResp reg = 3;
+    optional ApbGetMVRegResp mvreg = 4;
+    optional ApbGetMapResp map = 6;
+    optional ApbGetFlagResp flag = 7;
+    optional ApbGetMaxMinResp maxmin = 12;
+    optional ApbGetTopkResp topk = 13;      //Also used for TopSum
+    optional ApbGetLeaderboardResp leadb = 14;
+    optional ApbGetAverageResp avg = 15;
+    optional ApbGetCounterFloatResp counterfloat = 16;
+	optional ApbPartialReadResp partread = 8;	//Generic for non-full state reads from any CRDT
+}
+
+message ApbReadObjectsResp {
+    required bool success = 1;
+    repeated ApbReadObjectResp objects = 2;
+    optional uint32 errorcode = 3;
+}
+
+// Commit Response
+message ApbCommitResp {
+    required bool success = 1;
+    optional bytes commit_time = 2;
+    optional uint32 errorcode = 3;
+}
+
+message ApbStaticReadObjectsResp {
+    required ApbReadObjectsResp objects = 1;
+    required ApbCommitResp committime = 2;
+}
+
+
+
+//Replica connection
+message ApbConnectReplica {
+    required int64 id = 1;
+}
+
+message ApbConnectReplicaResp {
+    repeated int64 knownIDs = 1;
+}
+
+
+
+//Others
+//Resets server state, i.e., deletes all CRDTs and replication status
+message ApbResetServer {}
+message ApbResetServerResp {}
+
+//Triggers
+message ApbNewTrigger {
+    required ApbTriggerInfo source = 1;
+    required ApbTriggerInfo target = 2;
+    required bool isGeneric = 3;
+}
+
+message ApbTriggerInfo {
+    required ApbBoundObject obj = 1;
+    required int32 opType = 2;
+    required int32 nArgs = 3;
+    required bytes args = 4;            //gob
+}
+
+message ApbNewTriggerReply {}
+
+message ApbGetTriggers {}
+
+message ApbGetTriggersReply {
+    repeated ApbNewTrigger mapping = 1;
+    repeated ApbNewTrigger genericMapping = 2;
+}
+
+message ApbStringSQL {required string sql = 1;}
+
+message ApbTypedSQL {
+    optional ApbSQLCreateTable createTable = 1;
+    optional ApbSQLCreateIndex createIndex = 2;
+    optional ApbSQLCreateView createView = 3;
+    optional ApbSQLInsert insert = 4;
+    optional ApbSQLUpdate update = 5;
+    optional ApbSQLDelete delete = 6;;
+    optional ApbSQLDrop drop = 7;
+    optional ApbSQLQuery query = 8;
+}
+
+message ApbSQLCreateTable {required string tableName = 1;}
+message ApbSQLCreateIndex {required string tableName = 1;}
+message ApbSQLCreateView {required string tableName = 1;}
+message ApbSQLInsert {required string tableName = 1;}
+message ApbSQLUpdate{required string tableName = 1;}
+message ApbSQLDelete {required string tableName = 1;}
+message ApbSQLDrop {required string tableName = 1;}
+message ApbSQLQuery {required string tableName = 1;}
+
+//Partial reading
+
+enum READ_type {
+    FULL = 0;
+	//Set
+    LOOKUP = 1;
+    N_ELEMS = 10;
+	//Maps
+	GET_VALUE = 2;
+	HAS_KEY = 3;
+	GET_KEYS = 4;
+    GET_VALUES = 5;	//Return value for a given set of keys
+    GET_ALL_VALUES = 9; //Return value for all keys
+    GET_COND = 11;  //Returns values only if they meet a certain criteria
+    GET_ALL_COND = 12;
+    GET_EXCEPT = 13;
+    GET_EXCEPT_COND = 14;
+	//TopK
+	GET_N = 6;
+    GET_ABOVE_VALUE = 7;
+    //Avg
+    GET_FULL_AVG = 8;
+}
+
+enum COMP_type {EQ = 0; NEQ = 1; LEQ = 2; L = 3; H = 4; HEQ = 5;}
+
+//Allows both "full state reads" (ApbReadObjects) and "partial reads"
+message ApbRead {
+	repeated ApbBoundObject fullreads = 1;
+	repeated ApbPartialRead partialreads = 2;
+	required bytes transaction_descriptor = 3;
+}
+
+message ApbStaticRead {
+	repeated ApbBoundObject fullreads = 1;
+	repeated ApbPartialRead partialreads = 2;
+	required ApbStartTransaction transaction = 3;
+}
+
+message ApbPartialRead {
+	required ApbBoundObject object = 1;
+	required READ_type readtype = 2;
+	required ApbPartialReadArgs args = 3; 
+}
+
+message ApbPartialReadArgs {
+	optional ApbSetPartialRead set = 1;
+	optional ApbMapPartialRead map = 2;
+    optional ApbTopkPartialRead topk = 3;
+    optional ApbAvgPartialRead avg = 4;
+}
+
+message ApbSetPartialRead {
+    optional ApbSetLookupRead lookup = 1;
+    optional ApbSetNElemsRead nelems = 2;
+}
+
+message ApbMapPartialRead {
+	optional ApbMapGetValueRead getvalue = 1;
+	optional ApbMapHasKeyRead haskey = 2;
+	optional ApbMapGetKeysRead getkeys = 3;
+    optional ApbMapGetValuesRead getvalues = 4;
+    optional ApbMapGetAllValuesRead getallvalues = 5;
+    optional ApbMapCondRead condread = 6;
+    optional ApbMapAllCondRead condallread = 7;
+    optional ApbMapExceptRead exceptread = 8;
+    optional ApbMapExceptCondRead exceptcondread = 9;
+}
+
+message ApbTopkPartialRead {
+	optional ApbTopkGetNRead getn = 1;
+	optional ApbTopkAboveValueRead getabovevalue = 2;
+}
+
+message ApbAvgPartialRead {optional ApbAvgFullRead getfull = 1;}
+
+//SET
+message ApbSetLookupRead {required bytes element = 1;}
+message ApbSetNElemsRead {}
+
+//MAP
+message ApbMapGetValueRead {
+    required bytes key = 1;
+    optional ApbMapEmbPartialArgs args = 2;
+}
+message ApbMapHasKeyRead {required bytes key = 1;}
+message ApbMapGetKeysRead {}
+//Note: The 2nd argument is optional.
+//However, if it's present, then its len must be equal to keys'
+message ApbMapGetValuesRead {
+	repeated bytes keys = 1;
+	repeated ApbMapEmbPartialArgs args = 2;
+}
+//If the argument is not present, a full state read is assumed.
+message ApbMapGetAllValuesRead {optional ApbMapEmbPartialArgs args = 1;}
+message ApbMapCondRead {repeated ApbMapCondArgs condargs = 1;}
+message ApbMapAllCondRead {required ApbMapCondArgs condarg = 1; optional ApbMapEmbPartialArgs args = 2;}
+message ApbMapExceptCondRead {repeated bytes keys = 1; required ApbMapCondArgs condarg = 2;}
+message ApbMapExceptRead {repeated bytes keys = 1; optional ApbMapEmbPartialArgs args = 2;}
+message ApbMapCondArgs {
+    optional string key = 1;    //Required for ApbMapCondRead
+    optional ApbCondIntCompare intcomp = 2;
+    optional ApbCondFloatCompare floatcomp = 3;
+    optional ApbCondBoolCompare boolcomp = 4;
+    optional ApbCondStringCompare stringcomp = 5;
+    optional ApbCondBytesCompare bytescomp = 6;
+    optional ApbCondMapCompare mapcomp = 7;
+    optional ApbCondGetNoCompare nocomp = 8;
+}
+
+message ApbCondIntCompare {required int64 value = 1; required COMP_type comp = 2;}
+message ApbCondFloatCompare {required double value = 1; required COMP_type comp = 2;}
+message ApbCondBoolCompare {required bool value = 1; required bool isEqualComp = 2;}
+message ApbCondStringCompare {required string value = 1; required bool isEqualComp = 2;}
+message ApbCondBytesCompare {required bytes value = 1; required bool isEqualComp = 2;}
+message ApbCondMapCompare {repeated ApbMapCondArgs value = 1;}
+message ApbCondGetNoCompare {}
+
+//Helper for identifying a partial read of an embedded CRDT
+message ApbMapEmbPartialArgs {
+    optional CRDT_type type = 1;
+    required READ_type readtype = 2;
+    optional ApbPartialReadArgs args = 3;   //If not present, then it's a full read
+}
+
+//TOPK
+message ApbTopkGetNRead {required int32 amount = 1;}
+message ApbTopkAboveValueRead {required int32 minValue = 1;}
+
+//AVG
+message ApbAvgFullRead {}
+
+//RESP
+message ApbPartialReadResp {
+	optional ApbSetPartialReadResp set = 1;
+	optional ApbMapPartialReadResp map = 2;
+    optional ApbTopkPartialReadResp topk = 3;
+    optional ApbAvgPartialReadResp avg = 4;
+}
+
+message ApbSetPartialReadResp {
+    optional ApbSetLookupReadResp lookup = 1;
+    optional ApbSetNElemsReadResp nelems = 2;
+}
+
+message ApbMapPartialReadResp {
+	optional ApbMapGetValueResp getvalue = 1;	//Used for both mapGetValue and mapGetPartial
+	optional ApbMapHasKeyReadResp haskey = 2;
+    optional ApbMapGetKeysReadResp getkeys = 3;
+    optional ApbMapGetValuesResp getvalues = 4;
+}
+
+message ApbAvgPartialReadResp {optional ApbAvgGetFullReadResp getfull = 1;}
+
+message ApbTopkPartialReadResp {required ApbGetTopkResp pairs = 1;}
+
+message ApbSetLookupReadResp {required bool has = 1;}
+message ApbSetNElemsReadResp {required int32 count = 1;}
+
+message ApbMapGetValueResp {
+    required ApbReadObjectResp value = 1;
+    optional CRDT_type crdttype = 2;
+    optional READ_type parttype = 3;
+}
+
+message ApbMapHasKeyReadResp {required bool has = 1;}
+message ApbMapGetKeysReadResp {repeated string keys = 1;}
+message ApbMapGetValuesResp {repeated bytes keys = 1; repeated ApbMapGetValueResp values = 2;}
+
+message ApbAvgGetFullReadResp {required int64 sum = 1; required int64 nAdds = 2;}

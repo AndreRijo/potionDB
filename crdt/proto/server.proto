@@ -1,0 +1,59 @@
+//Server to server direct communication protos
+//Note: Static write and read use the exact same interface.
+
+import "antidote.proto";
+option go_package = "potionDB/crdt/proto";
+
+message ApbServerConn {}
+
+message S2SWrapper {
+    required int32 clientID = 1;
+    required wrapperType msgID = 12;
+    optional ApbStaticReadObjects staticReadObjs = 2;
+    optional ApbStaticRead staticRead = 3;
+    optional ApbStaticUpdateObjects staticUpd = 4;
+    optional ApbStartTransaction startTxn = 5;
+    optional ApbReadObjects readObjs = 6;
+    optional ApbRead read = 7;
+    optional ApbUpdateObjects upd = 8;
+    optional ApbCommitTransaction commitTxn = 9;
+    optional ApbAbortTransaction abortTxn = 10;
+    optional ProtoBCPermissionsReq bcPermsReq = 11;
+}
+
+message S2SWrapperReply {
+    required int32 clientID = 1;
+    required wrapperType msgID = 12;
+    optional ApbStaticReadObjectsResp staticReadObjs = 2;
+    optional ApbStartTransactionResp startTxn = 3;
+    optional ApbReadObjectsResp readObjs = 4;
+    optional ApbOperationResp upd = 5;
+    optional ApbCommitResp commitTxn = 6;
+}
+
+enum wrapperType {
+    STATIC_READ_OBJS = 1;
+    STATIC_READ = 2;
+    STATIC_UPDATE = 3;
+    START_TXN = 4;
+    READ_OBJS = 5;
+    READ = 6;
+    UPD = 7;
+    COMMIT = 8;
+    ABORT = 9;
+    BC_PERMS_REQ = 10;
+}
+
+message ProtoBCPermissionsReq {
+    repeated ProtoBCPermissionsPartReq partReqs = 1;
+    required int32 reqReplicaID = 2;
+}
+
+message ProtoBCPermissionsPartReq {
+    repeated ProtoBCPermissionsPair pairs = 1;
+}
+
+message ProtoBCPermissionsPair {
+    required ApbBoundObject keyParams = 1;;
+    required int32 value = 2;
+}
