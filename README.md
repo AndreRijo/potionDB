@@ -16,11 +16,13 @@ Each PotionDB server replicates a subset (potentially all) of all buckets existi
 
 #### Notes for Eurosys reviewers
 
-The version used to produce the results in our paper is ready in the Docker image andrerj/potiondb:vldb. Please use said version to reproduce any results obtained in the paper. Instructions on how to run PotionDB can be found [here](#Getting-Started) and [here](#Running-multiple-instances-of-PotionDB). You will also want to check the [PotionDB's TPC-H Client](https://github.com/AndreRijo/TPCH-Client), which implements TPC-H's benchmark and includes instructions on how to prepare and run a TPC-H workload.
+The version used to produce the results in our paper is ready in the Docker image andrerj/potiondb. Please use said version to reproduce any results obtained in the paper. Instructions on how to run PotionDB can be found [here](#Getting-Started) and [here](#Running-multiple-instances-of-PotionDB). You will also want to check the [PotionDB's TPC-H Client](https://github.com/AndreRijo/TPCH-Client), which implements TPC-H's benchmark and includes instructions on how to prepare and run a TPC-H workload.
 Furthermore, to reproduce the PostgreSQL experiments in our paper, please refer to our [PostgreSQL TPC-H Go Client](https://github.com/AndreRijo/postgres-tpch-client).
 
-If building from source is a must, please refer to the instructions in [Building from source](#Building-from-source) and use the branch [*remoteOp*](https://github.com/AndreRijo/potionDB/tree/remoteOp).
+If building from source is a must, please refer to the instructions in [Building from source](#Building-from-source) and use the master branch
 Usage of other branches may contain modifications/future work not included in the paper which may affect the results.
+The master branch will remain stable during the review process of the paper.
+Any future modification to the master branch after the review process will be proceeded by a copy of the current state of master to another branch.
 
 List of other relevant repositories:
 
@@ -200,6 +202,13 @@ Afterwards, go inside the `baseFolder` and clone the following repositories:
 git clone https://github.com/AndreRijo/potionDB.git potionDB
 git clone https://github.com/AndreRijo/tpch-data-processor.git tpch_data_processor
 git clone https://github.com/AndreRijo/potiondbSQL sqlToKeyValue
+```
+
+Please ensure all repositories are on the master branch.
+If unsure, go into the folder of each repository and run:
+
+```
+git checkout master
 ```
 
 If not already done, install Docker. for reference: https://docs.docker.com/engine/install/
