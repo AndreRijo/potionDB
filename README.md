@@ -32,6 +32,7 @@ List of other relevant repositories:
 - [PostgreSQL TPC-H Go Client](https://github.com/AndreRijo/postgres-tpch-client)
 - [PostgreSQL TPC-H Go Library](https://github.com/AndreRijo/postgres-tpch-go-lib)
 - [DockerManager](https://github.com/AndreRijo/DockerManager)
+- [CVSProcessor] (https://github.com/AndreRijo/cvsprocessor)
 - [Test configurations repository](https://github.com/AndreRijo/potiondb-vldb-configs-rep)
 - [PotionDB SQL](https://github.com/AndreRijo/potiondbSQL)
 - [Go Tools](https://github.com/AndreRijo/go-tools)
