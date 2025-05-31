@@ -133,20 +133,24 @@ func (args MapKeysState) GetREADType() proto.READType { return proto.READType_GE
 
 // Queries
 func (args HasKeyArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
-
 func (args HasKeyArguments) GetREADType() proto.READType { return proto.READType_HAS_KEY }
+func (args HasKeyArguments) HasInnerReads() bool         { return false }
+func (args HasKeyArguments) HasVariables() bool          { return false }
 
 func (args GetKeysArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
-
 func (args GetKeysArguments) GetREADType() proto.READType { return proto.READType_GET_KEYS }
+func (args GetKeysArguments) HasInnerReads() bool         { return false }
+func (args GetKeysArguments) HasVariables() bool          { return false }
 
 func (args GetValueArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
-
 func (args GetValueArguments) GetREADType() proto.READType { return proto.READType_GET_VALUE }
+func (args GetValueArguments) HasInnerReads() bool         { return false }
+func (args GetValueArguments) HasVariables() bool          { return false }
 
 func (args GetValuesArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
-
 func (args GetValuesArguments) GetREADType() proto.READType { return proto.READType_GET_VALUES }
+func (args GetValuesArguments) HasInnerReads() bool         { return false }
+func (args GetValuesArguments) HasVariables() bool          { return false }
 
 // Note: crdt can (and most often will be) nil
 func (crdt *ORMapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
@@ -162,6 +166,8 @@ func (crdt *ORMapCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replic
 	crdt.CRDTVM, crdt.random = (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete), rand.NewSource(time.Now().Unix())
 	return crdt
 }
+
+func (crdt *ORMapCrdt) IsBigCRDT() bool { return len(crdt.entries) > 100 }
 
 func (crdt *ORMapCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
 	switch typedArg := args.(type) {

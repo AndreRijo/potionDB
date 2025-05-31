@@ -111,6 +111,8 @@ func (crdt *BoundedCounterCrdt) initializeFromSnapshot(startTs *clocksi.Timestam
 	return crdt
 }
 
+func (crdt *BoundedCounterCrdt) IsBigCRDT() bool { return false }
+
 func (crdt *BoundedCounterCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
 	fmt.Println("[BC][Read]Value: ", crdt.value)
 	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
@@ -121,7 +123,8 @@ func (crdt *BoundedCounterCrdt) Read(args ReadArguments, updsNotYetApplied []Upd
 }
 
 func (crdt *BoundedCounterCrdt) GetValue() (state State) {
-	return CounterState{Value: crdt.value}
+	return CounterState(crdt.value)
+	//return CounterState{Value: crdt.value}
 }
 
 func (crdt *BoundedCounterCrdt) Update(args UpdateArguments) (downstreamArgs DownstreamArguments) {

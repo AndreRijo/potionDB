@@ -38,6 +38,16 @@ type MatRequestArgs interface {
 	getChannel() (channelId uint64)
 }
 
+type StateClockPair struct {
+	crdt.State
+	clocksi.Timestamp
+}
+
+type MatStaticSingleReadArgs struct { //Used for single-read transactions, as they do not need a clock
+	crdt.ReadObjectParams
+	ReplyChan chan StateClockPair
+}
+
 type MatStaticReadArgs struct {
 	MatReadCommonArgs
 }
@@ -177,7 +187,8 @@ type CRDTPosPair struct {
 type MatRequestType byte
 
 type Materializer struct {
-	channels []chan MaterializerRequest
+	channels     []chan MaterializerRequest
+	clkReadyChan chan bool
 }
 
 type partition struct {
@@ -369,6 +380,14 @@ func (args MatStaticReadArgs) getChannel() (channelId uint64) {
 	return GetChannelKey(args.KeyParams)
 }
 
+func (args MatStaticSingleReadArgs) getRequestType() (requestType MatRequestType) {
+	return singleReadStaticMatRequest
+}
+
+func (args MatStaticSingleReadArgs) getChannel() (channelId uint64) {
+	return GetChannelKey(args.KeyParams)
+}
+
 func (args MatStaticUpdateArgs) getRequestType() (requestType MatRequestType) {
 	return writeStaticMatRequest
 }
@@ -539,28 +558,29 @@ func (args MatGetCRDTArgs) getChannel() (channelId uint64) {
 
 const (
 	//Types of requests
-	readStaticMatRequest     MatRequestType = 0
-	writeStaticMatRequest    MatRequestType = 1
-	readMatRequest           MatRequestType = 2
-	writeMatRequest          MatRequestType = 3
-	commitMatRequest         MatRequestType = 4
-	abortMatRequest          MatRequestType = 5
-	prepareMatRequest        MatRequestType = 6
-	safeClkMatRequest        MatRequestType = 7
-	remoteTxnMatRequest      MatRequestType = 8
-	clkPosUpdMatRequest      MatRequestType = 9
-	prepareForRemoteRequest  MatRequestType = 10
-	commitedClkMatRequest    MatRequestType = 11
-	getSnapshotMatRequest    MatRequestType = 12
-	applySnapshotMatRequest  MatRequestType = 13
-	resetMatRequest          MatRequestType = 14
-	waitForReplicasRequest   MatRequestType = 15
-	remoteGroupTxnMatRequest MatRequestType = 16
-	gcMatRequest             MatRequestType = 17
-	bcUpdPermRequest         MatRequestType = 18
-	bcTxnPermRequest         MatRequestType = 19
-	getCrdtRequest           MatRequestType = 20
-	versionMatRequest        MatRequestType = 255
+	readStaticMatRequest       MatRequestType = 0
+	writeStaticMatRequest      MatRequestType = 1
+	readMatRequest             MatRequestType = 2
+	writeMatRequest            MatRequestType = 3
+	commitMatRequest           MatRequestType = 4
+	abortMatRequest            MatRequestType = 5
+	prepareMatRequest          MatRequestType = 6
+	safeClkMatRequest          MatRequestType = 7
+	remoteTxnMatRequest        MatRequestType = 8
+	clkPosUpdMatRequest        MatRequestType = 9
+	prepareForRemoteRequest    MatRequestType = 10
+	commitedClkMatRequest      MatRequestType = 11
+	getSnapshotMatRequest      MatRequestType = 12
+	applySnapshotMatRequest    MatRequestType = 13
+	resetMatRequest            MatRequestType = 14
+	waitForReplicasRequest     MatRequestType = 15
+	remoteGroupTxnMatRequest   MatRequestType = 16
+	gcMatRequest               MatRequestType = 17
+	bcUpdPermRequest           MatRequestType = 18
+	bcTxnPermRequest           MatRequestType = 19
+	getCrdtRequest             MatRequestType = 20
+	singleReadStaticMatRequest MatRequestType = 21
+	versionMatRequest          MatRequestType = 255
 
 	initialPrepSize = 100 //Initial size for the prepClocks heap
 )
@@ -581,6 +601,7 @@ func InitializeMaterializer(replicaID int16, commitCh chan TMCommitInfo) (mat *M
 	requestQueueSize = 1000
 	mat = &Materializer{channels: make([]chan MaterializerRequest, nGoRoutines)}
 	loggers = make([]Logger, nGoRoutines)
+	mat.clkReadyChan = make(chan bool, nGoRoutines)
 	var i uint64
 	for i = 0; i < nGoRoutines; i++ {
 		loggers[i] = &MemLogger{}
@@ -589,6 +610,7 @@ func InitializeMaterializer(replicaID int16, commitCh chan TMCommitInfo) (mat *M
 		mat.channels[i] = make(chan MaterializerRequest, requestQueueSize)
 		go listenToTM(int64(i), loggers[i], replicaID, commitCh, mat)
 	}
+	fmt.Printf("[MAT]Finished initializing at %s\n", time.Now().Format("2006-01-02 15:04:05.000"))
 
 	/*lineKey1 := crdt.KeyParams{Key: "lineitem", Bucket: "R1", CrdtType: proto.CRDTType_RRMAP}
 	orderKey1 := crdt.KeyParams{Key: "orders", Bucket: "R1", CrdtType: proto.CRDTType_RRMAP}
@@ -627,7 +649,8 @@ func listenToTM(id int64, logger Logger, replicaID int16, commitCh chan TMCommit
 	}
 	channel := mat.channels[id]
 
-	waitForReplicas(channel)
+	//waitForReplicas(channel)
+	<-mat.clkReadyChan
 	part.initializePartitionClock(replicaID)
 	part.initializeBCInfo(int16(id))
 
@@ -726,12 +749,19 @@ func getCriticalPartId(region int8) int16 {
 }
 
 // Makes the partition wait for the rest of the system to start before processing requests.
-func waitForReplicas(channel chan MaterializerRequest) {
+/*func waitForReplicas(channel chan MaterializerRequest) {
 	for {
 		msg := <-channel
 		if msg.getRequestType() == waitForReplicasRequest {
 			break
 		}
+	}
+}*/
+
+func (mat *Materializer) NotifyClkReady() {
+	//Notifies all partitions that the clock is ready and they can start processing requests.
+	for i := 0; i < len(mat.channels); i++ {
+		mat.clkReadyChan <- true
 	}
 }
 
@@ -757,6 +787,8 @@ func (part *partition) initializeBCInfo(partID int16) {
 
 func (part *partition) handleRequest(request MaterializerRequest) {
 	switch request.getRequestType() {
+	case singleReadStaticMatRequest:
+		part.handleMatStaticSingleRead(request.MatRequestArgs.(MatStaticSingleReadArgs))
 	case readStaticMatRequest:
 		part.handleMatStaticRead(request.MatRequestArgs.(MatStaticReadArgs))
 	case readMatRequest:
@@ -808,6 +840,14 @@ func (part *partition) handleMatRead(args MatReadArgs) {
 	args.ReplyChan <- part.getState(readLatest, obj, args.ReadArgs, args.Timestamp, objPending)
 }
 
+// As it is a single read transaction, clock is not necessary.
+func (part *partition) handleMatStaticSingleRead(args MatStaticSingleReadArgs) {
+	copyClk := part.partitionClock.stableClk.Copy()
+	obj := part.getObject(args.KeyParams, copyClk)
+	state := part.getState(true, obj, args.ReadArgs, copyClk, nil)
+	args.ReplyChan <- StateClockPair{Timestamp: copyClk, State: state}
+}
+
 func (part *partition) handleMatStaticRead(args MatStaticReadArgs) {
 	//Static read does not need to check for pending ops
 	readLatest := part.canReadLatest(args.Timestamp)
@@ -818,8 +858,13 @@ func (part *partition) handleMatStaticRead(args MatStaticReadArgs) {
 	}*/
 	//fmt.Println("[MAT][StaticRead]HashKey: ", *args.HashKey)
 	//obj := part.getObject(args.KeyParams, *args.HashKey, args.Timestamp)
+	//fmt.Printf("[MAT][StaticRead]***************Key: %v. Args: %+v (%T)\n", args.KeyParams, args.ReadArgs, args.ReadArgs)
 	obj := part.getObject(args.KeyParams, args.Timestamp)
+	//start := time.Now().UnixNano()
 	state := part.getState(readLatest, obj, args.ReadArgs, args.Timestamp, nil)
+	//diff := (time.Now().UnixNano() - start) / int64(time.Duration(time.Microsecond))
+	//fmt.Printf("[MAT][StaticRead][Part%d]Time to calculate state of key %v: %d (microseconds).\n", part.id, args.KeyParams, diff)
+	//fmt.Printf("[MAT][StaticRead]***************(Finish)Key: %v, Args: %+v (%T). State: %+v (%T)\n", args.KeyParams, args.ReadArgs, args.ReadArgs, state, state)
 	/*if hasKey {
 		//fmt.Printf("[MAT][StaticRead]Key: %v, Args: %+v (%T)\nCRDT: %v\nState: %+v\n", args.KeyParams, args.ReadArgs, args.ReadArgs, obj.GetLatestCRDT(), state)
 		fmt.Printf("[MAT][StaticRead]Key: %v, Args: %+v (%T)\n", args.KeyParams, args.ReadArgs, args.ReadArgs)
@@ -1000,11 +1045,12 @@ func (part *partition) applyUpdates(updates []crdt.UpdateObjectParams, commitClk
 	var hashKey uint64
 	var obj VersionManager
 
-	/*startTime := time.Now()
-	startTimeMs := startTime.UnixNano() / 1000000
-	fmt.Printf("[MAT][Part%d]Start time for keys %+v: %v\n", part.partID, updates[0].KeyParams, startTime.Format("2006-01-02 15:04:05.000"))*/
+	//startTime := time.Now()
+	//startTimeMs := startTime.UnixNano() / 1000000
+	//fmt.Printf("[MAT][Part%d]Start time for keys %+v: %v\n", part.partID, updates[0].KeyParams, startTime.Format("2006-01-02 15:04:05.000"))*/
 
 	for _, upd := range updates {
+		//currUpdStart := time.Now()
 		hashKey = getHash(getCombinedKey(upd.KeyParams))
 		//fmt.Println("[MAT]ApplyUpdates", upd.KeyParams, upd.UpdateArgs)
 		//fmt.Printf("[MAT]ApplyUpdates for key: %v. Are updates nil: %v. Updates type: %T\n", upd.KeyParams, upd.UpdateArgs == nil, upd.UpdateArgs)
@@ -1021,6 +1067,14 @@ func (part *partition) applyUpdates(updates []crdt.UpdateObjectParams, commitClk
 		}
 
 		obj = part.getObjectForUpd(hashKey, upd.KeyParams, commitClk)
+		/*if upd.Key == "q9" {
+			fmt.Printf("[MAT][ApplyUpdates]Q9 upd! Upd: %+v\n", upd.UpdateArgs)
+		} else {
+			fmt.Printf("[MAT][ApplyUpdates]Upd for another key! Key: %v.\n", upd.Key)
+		}*/
+		/*if strings.HasPrefix(upd.KeyParams.Key, "q") {
+			fmt.Printf("[MAT]Applying update for key: %v\n", upd.KeyParams)
+		}*/
 		/*if strings.HasPrefix(upd.KeyParams.Key, "q5nr") {
 			fmt.Printf("[MAT%d]ApplyUpdates for Q5. Key: %v. Obj type: %T. Upd: %v\n", part.id, upd.KeyParams, obj.GetLatestCRDT(), upd.UpdateArgs)
 		} else if strings.HasPrefix(upd.KeyParams.Key, "q14pp") {
@@ -1048,7 +1102,16 @@ func (part *partition) applyUpdates(updates []crdt.UpdateObjectParams, commitClk
 			fmt.Printf("[MAT]ApplyUpdates. DownArgs is nil or NoOp! Key: %v. Are updates nil: %v. Updates: %v. DownUpds: %v. Updates type: %T Down updates type: %T\n",
 				upd.KeyParams, upd.UpdateArgs != nil, upd.UpdateArgs, downArgs, upd.UpdateArgs, downArgs)
 		}*/
+		//currTimeEnd := time.Now()
+		//currDiff := (currTimeEnd.UnixNano() - currUpdStart.UnixNano()) / int64(time.Millisecond)
+		/*if part.partID == 2 {		//Lineitems partition
+			fmt.Printf("[MAT][Part%d]Time taken to apply update for key %v: %dms (finish at %s).\n", part.partID, upd.KeyParams, currDiff, currTimeEnd.Format("2006-01-02 15:04:05.000"))
+		}*/
 	}
+	/*if part.partID == 2 {
+		fmt.Printf("[MAT][Part%d]Total time taken for txn (%d upds) with clk %s: %dms (finish at %s).\n", part.partID, len(updates), commitClk.ToSortedString(),
+			(time.Now().UnixNano()/1000000)-startTimeMs, time.Now().Format("2006-01-02 15:04:05.000"))
+	}*/
 
 	/*endTime := time.Now()
 	fmt.Printf("[MAT][Part%d]Time taken to apply updates: %dms\n. EndTime: %s. Number of updates: %d. Key: %+v\n",
@@ -1282,8 +1345,11 @@ func (part *partition) getObject(keyParams crdt.KeyParams, clk clocksi.Timestamp
 	hashKey := getHash(getCombinedKey(keyParams))
 	obj, hasKey := part.db[hashKey]
 	if !hasKey {
+		//fmt.Printf("[MAT][GetObject]Does not have key %v. Creating new object.\n", keyParams)
 		obj = part.initializeVersionManager(keyParams.CrdtType, clk)
-	}
+	} /*else {
+		fmt.Printf("[MAT][GetObject]Has key %v!\n", keyParams)
+	}*/
 	return obj
 }
 

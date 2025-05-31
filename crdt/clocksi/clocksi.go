@@ -79,8 +79,10 @@ type Timestamp interface {
 	Copy() (copyTs Timestamp)
 	//Performs a fast copy of the values according to the order in knownIDs
 	FastCopy() (values []int64)
-	//Performs a copy of the current timestamp into copyTs. It is assumed thhat copyTs is empty or its entries' keys are a subset of the current timestamp's.
+	//Performs a copy of the current timestamp into copyTs. It is assumed that copyTs is empty or its entries' keys are a subset of the current timestamp's.
 	CopyInto(copyTs ClockSiTimestamp)
+	//Performs a fast copy of the current timestamp into values, according to the order in knownIDs
+	FastCopyInto(values []int64)
 	//Returns true if this TS happened before otherTS or, if they are concurrent, if by a total order TS should be before orderTS. Also returns true if they are equal.
 	IsLowerOrEqualTotalOrder(otherTs Timestamp) (compResult bool)
 	//For vector clocks, get the list of IDs sorted numerically
@@ -147,6 +149,14 @@ func GetCopyKeys() (ids []int16) {
 
 func GetKeys() (ids []int16) {
 	return knownIDs
+}
+
+func FromSliceValuesToClockSiTimestamp(values []int64) (ts Timestamp) {
+	vc := make(map[int16]int64, len(knownIDs))
+	for i, id := range knownIDs {
+		vc[id] = values[i]
+	}
+	return ClockSiTimestamp{VectorClock: vc}
 }
 
 // Creates a new timestamp. This gives the same result as doing: newTs = ClockSiTimestamp{}.NewTimestamp().
@@ -694,6 +704,12 @@ func (ts ClockSiTimestamp) FastCopy() (values []int64) {
 func (ts ClockSiTimestamp) CopyInto(copyTs ClockSiTimestamp) {
 	for key, value := range ts.VectorClock {
 		copyTs.VectorClock[key] = value
+	}
+}
+
+func (ts ClockSiTimestamp) FastCopyInto(values []int64) {
+	for i, id := range knownIDs {
+		values[i] = ts.VectorClock[id]
 	}
 }
 

@@ -123,13 +123,14 @@ func (args SetAWNElementsState) GetCRDTType() proto.CRDTType { return proto.CRDT
 func (args SetAWNElementsState) GetREADType() proto.READType { return proto.READType_N_ELEMS }
 
 // Queries
-func (args LookupReadArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORSET }
-
-func (args LookupReadArguments) GetREADType() proto.READType { return proto.READType_LOOKUP }
-
+func (args LookupReadArguments) GetCRDTType() proto.CRDTType   { return proto.CRDTType_ORSET }
+func (args LookupReadArguments) GetREADType() proto.READType   { return proto.READType_LOOKUP }
+func (args LookupReadArguments) HasInnerReads() bool           { return false }
+func (args LookupReadArguments) HasVariables() bool            { return false }
 func (args GetNElementsArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORSET }
-
 func (args GetNElementsArguments) GetREADType() proto.READType { return proto.READType_N_ELEMS }
+func (args GetNElementsArguments) HasInnerReads() bool         { return false }
+func (args GetNElementsArguments) HasVariables() bool          { return false }
 
 // Note: crdt can (and most often will be) nil
 func (crdt *SetAWCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
@@ -145,6 +146,8 @@ func (crdt *SetAWCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replic
 	crdt.CRDTVM, crdt.random = (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete), rand.NewSource(time.Now().Unix())
 	return crdt
 }
+
+func (crdt *SetAWCrdt) IsBigCRDT() bool { return len(crdt.elems) > 100 }
 
 func (crdt *SetAWCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
 	switch typedArg := args.(type) {

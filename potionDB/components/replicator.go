@@ -240,9 +240,11 @@ func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, buc
 			//bucketsToListen[0] = "*"
 			bucketsToListen := buckets
 
-			remoteConn, err := CreateRemoteGroupStruct(bucketsToListen, replicaID)
+			//remoteConn, err := CreateRemoteGroupStruct(bucketsToListen, replicaID)
 			//TODO: Not ignore err
-			ignore(err)
+			//ignore(err)
+			//repl.remoteConn = remoteConn
+			remoteConn := CreateRemoteGroupStruct(bucketsToListen, replicaID)
 			repl.remoteConn = remoteConn
 			repl.txnCache = make(map[int][]PairClockUpdates, nGoRoutines)
 			repl.buckets = bucketsToListen
@@ -287,30 +289,39 @@ func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, buc
 }
 
 func (repl *Replicator) replicateCycle() {
-	for {
+	//TODO: I think Replicator also needs early access to the replicaIDs.
+	//Check if that's the case and, if so, make the fast S2S replicaID update here (and adapt for below.)
+	//If not, just remove the for below alltogether.
+	//On Initializer, the Replicator puts a dummy TS in cacheEntry, but then this clk is simply removed as soon as a transaction arrives.
+	//So it basically goes unused.
+	/*for {
 		if repl.JoinInfo.allDone {
 			break
 		} else {
 			time.Sleep(100 * time.Millisecond)
 		}
-	}
+	}*/
+	//time.Sleep(2 * time.Second)
 	count, start, finish, toSleep := time.Duration(0), int64(0), int64(0), time.Duration(0)
 	var startFull time.Time
 	previousLen := 0
+	//fmt.Printf("[REPLICATOR]Starting replicator cycle at %s\n", time.Now().Format("15:04:05.000"))
 	for {
 		//start = time.Now().UnixNano()
 		startFull = time.Now()
 		start = startFull.UnixNano()
 		utilities.FancyDebugPrint(utilities.REPL_PRINT, repl.replicaID, "starting replicateCycle")
 
+		//fmt.Printf("[REPLICATOR]Waiting for getNewTxns() at %s\n", time.Now().Format("15:04:05.000")) //TODO: CHeck if this is happening
 		repl.getNewTxns()
+		//fmt.Printf("[REPLICATOR]Got new txns to replicate at %s. Number of partitions: %d\n", time.Now().Format("15:04:05.000"), len(repl.localPartitions))
 
 		count++
 		toSend := repl.preparateDataToSend()
 		if len(toSend) > 0 {
 			//fmt.Printf("[REPLICATOR]Sending ops at %s. Started processing at %s. Number of remote txns: %d\n",
 			//time.Now().Format("2006-01-02 15:04:05.000"), startFull.Format("2006-01-02 15:04:05.000"), len(toSend))
-			fmt.Println("[REPLICATOR]Sending ops.", "Number of remote txns:", len(toSend))
+			fmt.Println("[REPLICATOR]Sending ops.", "Number of remote txns:", len(toSend), "at", time.Now().Format("15:04:05.000"))
 			repl.sendTxns(toSend)
 			//end := time.Now()
 			//fmt.Printf("[REPLICATOR]Finished sending ops at %s. Started at: %s. Total time taken: %d (ms)\n",
@@ -356,6 +367,7 @@ func (repl *Replicator) getNewTxns() {
 				//ReplyChan: replyChans[id],
 			},
 		})
+		//fmt.Printf("[REPLICATOR]Sent request to obtain transactions from partition %d at %s\n", id, time.Now().Format("15:04:05.000"))
 	}
 	utilities.FancyDebugPrint(utilities.REPL_PRINT, repl.replicaID, "getNewTxns() second part")
 
@@ -363,6 +375,7 @@ func (repl *Replicator) getNewTxns() {
 	//for id, replyChan := range replyChans {
 	for i := uint64(0); i < nGoRoutines; i++ {
 		//reply := <-replyChan
+		//fmt.Printf("[REPLICATOR]Waiting for reply from partition %d at %s\n", i, time.Now().Format("15:04:05.000"))
 		reply := <-repl.partsChan
 		cacheEntry := repl.txnCache[int(reply.partID)]
 		//Remove last entry which is the previous, old, stable clock
@@ -378,6 +391,7 @@ func (repl *Replicator) getNewTxns() {
 		}*/
 		repl.txnCache[int(reply.partID)] = append(cacheEntry, PairClockUpdates{clk: reply.stableClock, upds: []crdt.UpdateObjectParams{}})
 	}
+	//fmt.Printf("[REPLICATOR]Received reply from all partitions at %s\n", time.Now().Format("15:04:05.000"))
 	/*end := time.Now()
 	if atLeastOneUpd {
 		fmt.Printf("[REPLICATOR][GetNewTxns()]Asked for txns to replicate at %s, got reply at %s.\n", start.Format("2006-01-02 15:04:05.000"), end.Format("2006-01-02 15:04:05.000"))
@@ -607,7 +621,7 @@ func (repl *Replicator) handleRemoteRequest(remoteReq ReplicatorMsg) {
 		if repl.waitFor == 0 {
 			repl.initialDummyTs.Update()
 			repl.allDone = true
-			fmt.Println("[RC]All IDs received, sending signal to TM.")
+			fmt.Println("[RC]All IDs received, sending signal to TM at", time.Now().Format("15:04:05.000"))
 			repl.tm.SendRemoteMsg(TMStart{})
 		}
 	case *RemoteTrigger:

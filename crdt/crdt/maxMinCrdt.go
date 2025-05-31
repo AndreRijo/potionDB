@@ -67,6 +67,8 @@ func (crdt *MaxMinCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, repli
 	return crdt
 }
 
+func (crdt *MaxMinCrdt) IsBigCRDT() bool { return false }
+
 func (crdt *MaxMinCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
 	if updsNotYetApplied == nil || len(updsNotYetApplied) > 0 {
 		return crdt.GetValue()

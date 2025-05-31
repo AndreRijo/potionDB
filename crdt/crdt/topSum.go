@@ -74,6 +74,8 @@ type TopSSubAll struct {
 	Scores []TopKScore
 }
 
+type TopSInit uint32
+
 // Just passing the score is enough
 // However, we need to keep a bool pointer to know whenever this operation must be replicated or not
 // Reason for pointer: structs are copied by value, thus this CRDT receives a copy of the version in materializer.
@@ -153,46 +155,38 @@ func (score TopKScore) isHigher(other *TopKScore) bool {
 func (crdt *TopSumCrdt) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPSUM }
 
 // Ops
-func (args TopSAdd) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPSUM }
-
+func (args TopSAdd) GetCRDTType() proto.CRDTType    { return proto.CRDTType_TOPSUM }
 func (args TopSAddAll) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPSUM }
-
-func (args TopSSub) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPSUM }
-
+func (args TopSSub) GetCRDTType() proto.CRDTType    { return proto.CRDTType_TOPSUM }
 func (args TopSSubAll) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPSUM }
+func (args TopSInit) GetCRDTType() proto.CRDTType   { return proto.CRDTType_TOPSUM }
 
 // Downstreams
-func (args DownstreamTopSAdd) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPSUM }
-
-func (args DownstreamTopSAdd) MustReplicate() bool { return *args.replicate }
-
+func (args DownstreamTopSAdd) GetCRDTType() proto.CRDTType    { return proto.CRDTType_TOPSUM }
+func (args DownstreamTopSAdd) MustReplicate() bool            { return *args.replicate }
 func (args DownstreamTopSAddAll) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPSUM }
-
-func (args DownstreamTopSAddAll) MustReplicate() bool { return len(*args.Scores) > 0 }
-
-func (args DownstreamTopSSub) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPSUM }
-
-func (args DownstreamTopSSub) MustReplicate() bool { return *args.replicate }
-
+func (args DownstreamTopSAddAll) MustReplicate() bool         { return len(*args.Scores) > 0 }
+func (args DownstreamTopSSub) GetCRDTType() proto.CRDTType    { return proto.CRDTType_TOPSUM }
+func (args DownstreamTopSSub) MustReplicate() bool            { return *args.replicate }
 func (args DownstreamTopSSubAll) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPSUM }
-
-func (args DownstreamTopSSubAll) MustReplicate() bool { return len(*args.Scores) > 0 }
+func (args DownstreamTopSSubAll) MustReplicate() bool         { return len(*args.Scores) > 0 }
+func (args TopSInit) MustReplicate() bool                     { return true }
 
 // States
 func (args TopSValueState) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPSUM }
-
 func (args TopSValueState) GetREADType() proto.READType { return proto.READType_FULL }
 
 // Reads
-func (args GetTopSumNArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPSUM }
-
-func (args GetTopSumNArguments) GetREADType() proto.READType { return proto.READType_GET_N }
-
+func (args GetTopSumNArguments) GetCRDTType() proto.CRDTType          { return proto.CRDTType_TOPSUM }
+func (args GetTopSumNArguments) GetREADType() proto.READType          { return proto.READType_GET_N }
+func (args GetTopSumNArguments) HasInnerReads() bool                  { return false }
+func (args GetTopSumNArguments) HasVariables() bool                   { return false }
 func (args GetTopSumAboveValueArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPSUM }
-
 func (args GetTopSumAboveValueArguments) GetREADType() proto.READType {
 	return proto.READType_GET_ABOVE_VALUE
 }
+func (args GetTopSumAboveValueArguments) HasInnerReads() bool { return false }
+func (args GetTopSumAboveValueArguments) HasVariables() bool  { return false }
 
 var (
 	defaultTopSSize = 100 //Default number of top positions
@@ -220,6 +214,8 @@ func (crdt *TopSumCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, repli
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete)
 	return crdt
 }
+
+func (crdt *TopSumCrdt) IsBigCRDT() bool { return crdt.maxElems > 100 && len(crdt.elems) > 100 }
 
 // Note: Also accepts TopK types of reads.
 func (crdt *TopSumCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
@@ -302,7 +298,7 @@ func (crdt *TopSumCrdt) Update(args UpdateArguments) (downstreamArgs DownstreamA
 		return crdt.getTopSAddAllDownstreamArgs(typedArgs)
 	case TopSSubAll:
 		return crdt.getTopSSubAllDownstreamArgs(typedArgs)
-	case TopKInit:
+	case TopSInit:
 		return typedArgs
 	}
 	return nil
@@ -357,14 +353,14 @@ func (crdt *TopSumCrdt) applyDownstream(downstreamArgs UpdateArguments) (effect 
 		return crdt.applyTopSAddAllDownstreamArgs(typedArgs)
 	case DownstreamTopSSubAll:
 		return crdt.applyTopSSubAllDownstreamArgs(typedArgs), nil
-	case TopKInit:
-		return crdt.applyInit(typedArgs)
+	case TopSInit:
+		return crdt.applyInit(uint32(typedArgs))
 	}
 	return nil, nil
 }
 
-func (crdt *TopSumCrdt) applyInit(op TopKInit) (effect *Effect, otherDownstreamArgs DownstreamArguments) {
-	crdt.maxElems = int(op.TopSize)
+func (crdt *TopSumCrdt) applyInit(size uint32) (effect *Effect, otherDownstreamArgs DownstreamArguments) {
+	crdt.maxElems = int(size)
 	var effectValue Effect = NoEffect{}
 	effect = &effectValue
 	//fmt.Println("[TopSum]Max top size set to", crdt.maxElems)
@@ -1014,6 +1010,14 @@ func (crdtOp TopSSubAll) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
 	return &proto.ApbUpdateOperation{Topkrmvop: &proto.ApbTopkRmvUpdate{Adds: protoSubs}}
 }
 
+func (crdtOp TopSInit) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
+	return TopSInit(protobuf.GetTopkinitop().GetTopSize())
+}
+
+func (crdtOp TopSInit) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
+	return &proto.ApbUpdateOperation{Topkinitop: &proto.ApbTopKInit{TopSize: pb.Uint32(uint32(crdtOp)), IsTopSum: pb.Bool(true)}}
+}
+
 // Same as for TopK
 func (crdtState TopSValueState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
 	protoScores := protobuf.GetTopk().GetValues()
@@ -1101,6 +1105,14 @@ func (downOp DownstreamTopSSubAll) ToReplicatorObj() (protobuf *proto.ProtoOpDow
 		protoElems[i] = &proto.ProtoTopSumElement{Id: pb.Int32(score.Id), Score: pb.Int32(score.Score), Data: *score.Data}
 	}
 	return &proto.ProtoOpDownstream{TopsumOp: &proto.ProtoTopSumDownstream{Elems: protoElems, IsPositive: new(bool)}}
+}
+
+func (downOp TopSInit) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
+	return TopSInit(protobuf.GetTopkinitOp().GetTopSize())
+}
+
+func (downOp TopSInit) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
+	return &proto.ProtoOpDownstream{TopkinitOp: &proto.ProtoTopKInitDownstream{TopSize: pb.Uint32(uint32(downOp)), IsTopSum: pb.Bool(true)}}
 }
 
 //Uses same queries and states as TopKRmv.

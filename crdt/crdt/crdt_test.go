@@ -90,8 +90,6 @@ func addDownIfNotEmpty(list []DownstreamArguments, downArgs DownstreamArguments)
 	return list
 }
 
-func ignore(a interface{}) {}
-
 // Copy paste from tools, since we can't have import cycles
 func StateToString(state State) (stateString string) {
 	var sb strings.Builder
@@ -114,7 +112,7 @@ func StateToString(state State) (stateString string) {
 	//Counter
 	case CounterState:
 		sb.WriteString("Value: ")
-		sb.WriteRune(typedState.Value)
+		sb.WriteRune(int32(typedState))
 	//TopK
 	case TopKValueState:
 		sb.WriteRune('[')

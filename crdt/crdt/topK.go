@@ -127,6 +127,8 @@ func (crdt *TopKCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replica
 	return crdt
 }
 
+func (crdt *TopKCrdt) IsBigCRDT() bool { return crdt.maxElems > 100 && len(crdt.elems) > 100 }
+
 func (crdt *TopKCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
 	//TODO: Consider updsNotYetApplied in all of these
 	switch typedArgs := args.(type) {

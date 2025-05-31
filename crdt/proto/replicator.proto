@@ -60,6 +60,9 @@ message ProtoOpDownstream {
     optional ProtoCounterFloatDownstream counterfloatOp = 13;
     optional ProtoTopKInitDownstream topkinitOp = 14;
     optional ProtoResetDownstream resetOp = 15;
+    optional ProtoPairCounterDownstream pairCounterOp = 16;
+    optional ProtoArrayCounterDownstream arrayCounterOp = 17;
+    optional ProtoMultiArrayDownstream multiArrayOp = 18;
 }
 
 message ProtoCounterDownstream {
@@ -104,6 +107,7 @@ message ProtoTopKRmvRemove {
 
 message ProtoTopKInitDownstream {
     required uint32 topSize = 1;
+    optional bool isTopSum = 2; //If not present, it's assumed to be TopK.
 }
 
 message ProtoAvgDownstream {
@@ -266,6 +270,186 @@ message ProtoDecBCounterDownstream {
 message ProtoResetDownstream {
 }
 
+message ProtoPairCounterDownstream {
+    required bool isInc = 1;
+    optional sint32 firstChange = 2;
+    optional double secondChange = 3;
+}
+
+message ProtoArrayCounterDownstream {
+    required bool isInc = 1;
+    optional ProtoArrayCounterIncrementDownstream inc = 2;
+    optional ProtoArrayCounterIncrementAllDownstream incAll = 3;
+    optional ProtoArrayCounterIncrementMultiDownstream incMulti = 4;
+    optional ProtoArrayCounterIncrementSubDownstream incSub = 5;
+    optional ProtoArraySetSize size = 6;
+}
+
+message ProtoArrayCounterIncrementDownstream {
+    required int32 index = 1;
+    required int64 inc = 2;
+}
+
+message ProtoArrayCounterIncrementAllDownstream {
+    required int64 inc = 1;
+}
+
+message ProtoArrayCounterIncrementMultiDownstream {
+    repeated int64 incs = 1;
+}
+
+message ProtoArrayCounterIncrementSubDownstream {
+    repeated int32 indexes = 1;
+    repeated int64 incs = 2;
+}
+
+message ProtoArraySetSize {
+    required int32 size = 1;
+}
+
+message ProtoMultiArrayDownstream {
+    required MultiArrayType type = 1;
+    optional ProtoMultiArrayIntDownstream intUpd = 2;
+    optional ProtoMultiArrayFloatDownstream floatUpd = 3;
+    optional ProtoMultiArrayDataDownstream dataUpd = 4;
+    optional ProtoMultiArrayAvgDownstream avgUpd = 5;
+    optional ProtoMultiArrayMultiUpdateDownstream multiUpd = 6;
+    optional ProtoMultiArraySetSizeDownstream sizeUpd = 7;
+}
+
+message ProtoMultiArrayIntDownstream {
+    optional ProtoMultiArrayIntIncDownstream inc = 1;
+    optional ProtoMultiArrayIntIncSingleDownstream incSingle = 2;
+    optional ProtoMultiArrayIntIncPositionsDownstream incPos = 3;
+    optional ProtoMultiArrayIntIncRangeDownstream incRange = 4;
+}
+
+message ProtoMultiArrayFloatDownstream {
+    optional ProtoMultiArrayFloatIncDownstream inc = 1;
+    optional ProtoMultiArrayFloatIncSingleDownstream incSingle = 2;
+    optional ProtoMultiArrayFloatIncPositionsDownstream incPos = 3;
+    optional ProtoMultiArrayFloatIncRangeDownstream incRange = 4;
+}
+
+message ProtoMultiArrayDataDownstream {
+    optional ProtoMultiArrayDataSetDownstream set = 1;
+    optional ProtoMultiArrayDataSetSingleDownstream setSingle = 2;
+    optional ProtoMultiArrayDataSetPositionsDownstream setPos = 3;
+    optional ProtoMultiArrayDataSetRangeDownstream setRange = 4;
+}
+
+message ProtoMultiArrayAvgDownstream {
+    optional ProtoMultiArrayAvgIncDownstream inc = 1;
+    optional ProtoMultiArrayAvgIncSingleDownstream incSingle = 2;
+    optional ProtoMultiArrayAvgIncPositionsDownstream incPos = 3;
+    optional ProtoMultiArrayAvgIncRangeDownstream incRange = 4;
+}
+
+message ProtoMultiArrayIntIncDownstream {
+    repeated int64 changes = 1;
+}
+
+message ProtoMultiArrayIntIncSingleDownstream {
+    required int32 pos = 1;
+    required int64 change = 2;
+}
+
+message ProtoMultiArrayIntIncPositionsDownstream {
+    repeated int32 pos = 1;
+    repeated int64 change = 2; //If only 1 value, the same value will be applied to all of pos.
+}
+
+message ProtoMultiArrayIntIncRangeDownstream {
+    required int32 from = 1;
+    required int32 to = 2;
+    required int64 change = 3;
+}
+
+message ProtoMultiArrayFloatIncDownstream {
+    repeated double changes = 1;
+}
+
+message ProtoMultiArrayFloatIncSingleDownstream {
+    required int32 pos = 1;
+    required double change = 2;
+}
+
+message ProtoMultiArrayFloatIncPositionsDownstream {
+    repeated int32 pos = 1;
+    repeated double change = 2; //If only 1 value, the same value will be applied to all of pos.
+}
+
+message ProtoMultiArrayFloatIncRangeDownstream {
+    required int32 from = 1;
+    required int32 to = 2;
+    required double change = 3;
+}
+
+message ProtoMultiArrayDataSetDownstream {
+    repeated bytes data = 1;
+    required uint64 tsId = 2;
+}
+
+message ProtoMultiArrayDataSetSingleDownstream {
+    required int32 pos = 1;
+    required bytes data = 2;
+    required uint64 tsId = 3;
+}
+
+message ProtoMultiArrayDataSetPositionsDownstream {
+    repeated int32 pos = 1;
+    repeated bytes data = 2;    //If only 1 value, the same value will be applied to all of pos.
+    required uint64 tsId = 3;
+}
+
+message ProtoMultiArrayDataSetRangeDownstream {
+    required int32 from = 1;
+    required int32 to = 2;
+    required bytes data = 3;
+    required uint64 tsId = 4;
+}
+
+message ProtoMultiArrayAvgIncDownstream {
+    repeated int64 value = 1;
+    repeated int32 count = 2;
+}
+
+message ProtoMultiArrayAvgIncSingleDownstream {
+    required int32 pos = 1;
+    optional int32 count = 2;   //If not present, 1 is assumed.
+    required int64 value = 3;
+}
+
+message ProtoMultiArrayAvgIncPositionsDownstream {
+    repeated int32 pos = 1;
+    repeated int64 value = 2;
+    repeated int32 count = 3;
+}
+
+message ProtoMultiArrayAvgIncRangeDownstream {
+    required int32 from = 1;
+    required int32 to = 2;
+    required int64 value = 3;
+    required int32 count = 4;
+}
+
+message ProtoMultiArrayMultiUpdateDownstream {
+    repeated int64 ints = 1;
+    repeated double floats = 2;
+    repeated bytes data = 3;
+    optional uint64 tsId = 4;    //Only needed if data is set.
+    repeated int32 counts = 5;
+    repeated int64 sums = 6;
+}
+
+message ProtoMultiArraySetSizeDownstream {
+    optional int32 intSize = 1;
+    optional int32 floatSize = 2;
+    optional int32 dataSize = 3;
+    optional int32 avgSize = 4;
+}
+
+
 /*****REPLICA MANAGEMENT*****/
 
 message ProtoRemoteID {
@@ -335,6 +519,9 @@ message ProtoState {
     optional ProtoBoundedCounterState bcounter = 11;
     optional ProtoTopKState topk = 12;
     optional ProtoCounterFloatState counterfloat = 13;
+    optional ProtoPairCounterState pairCounter = 14;
+    optional ProtoArrayCounterState arrayCounter = 15;
+    optional ProtoMultiArrayState multiArray = 16;
 }
 
 message ProtoReplyEmpty {
@@ -401,6 +588,7 @@ message ProtoTopKState {
     required bool keepTiedEntries = 4;
     repeated ProtoTopKScore tied = 5;
 }
+
 message ProtoFlagState {
     optional ProtoFlagLWWState lww = 1;
     optional ProtoFlagEWState ew = 2;
@@ -413,9 +601,27 @@ message ProtoFlagLWWState {
 }
 message ProtoFlagEWState {repeated uint64 uniques = 1; }
 message ProtoFlagDWState {repeated uint64 uniques = 1;}
+
 message ProtoBoundedCounterState {
     map<int32,int32> permissions = 1;
     map<int32,int32> decs = 2;
     required int32 limit = 3;
     required int32 value = 4;
+}
+
+message ProtoPairCounterState {
+    required sint32 first = 1;
+    required double second = 2;
+}
+
+message ProtoArrayCounterState {
+    repeated int64 counts = 1;
+}
+
+message ProtoMultiArrayState {
+    repeated int64 intCounters = 1;
+    repeated double floatCounters = 2;
+    repeated bytes data = 3;
+    repeated int64 sums = 4;
+    repeated int64 counts = 5;
 }

@@ -30,6 +30,7 @@ var (
 	updChan     chan crdt.UpdateObjectParams
 	iCfg        tpch.IndexConfigs
 	ic          InternalClient
+	startTime   int64
 )
 
 /*
@@ -43,22 +44,24 @@ Maybe can just do this "easily" with go mod? Make the repository public so that 
 //TODO: CRDT_PER_OBJ option
 
 func LoadData(dataP DataloadParameters) {
-	fmt.Println("[TPCH-DL]Start time of dataload: ", time.Now().Format("2006-01-02 15:04:05.000"))
+	start := time.Now()
+	startTime = start.UnixNano() / 1000000
+	fmt.Println("[TPCH-DL]Start time of dataload: ", start.Format("2006-01-02 15:04:05.000"))
 	LoadBaseData(dataP)
 }
 
 func LoadBaseData(dataP DataloadParameters) {
-	data, dp = &tpch.TpchData{TpchConfigs: tpch.TpchConfigs{Sf: dataP.Sf, DataLoc: dataP.DataLoc, IsSingleServer: false}, Tables: &tpch.Tables{}}, dataP
+	data, dp = &tpch.TpchData{TpchConfigs: tpch.TpchConfigs{Sf: dataP.Sf, DataLoc: dataP.DataLoc, IsSingleServer: false}, Tables: &tpch.Tables{NOrders: int(float64(tpch.TableEntries[tpch.ORDERS]) * dp.Sf)}}, dataP
 	//Part and lineitem are nil
 	regionFuncs = [8]func([]string) int8{data.Tables.CustSliceToRegion, nil, data.Tables.NationSliceToRegion, data.Tables.OrdersSliceToRegion, nil,
 		data.Tables.PartSuppSliceToRegion, data.Tables.RegionSliceToRegion, data.Tables.SupplierSliceToRegion}
 	data.Initialize()
 	go PrepareBaseDataUpdsAndSend()
 	fmt.Println("[TPCH-DL]Starting to prepare base data...")
-	start := time.Now().UnixNano()
+	//start := time.Now().UnixNano()
 	data.PrepareBaseData()
-	end := time.Now().UnixNano()
-	fmt.Printf("[TPCH-DL]Base data read and prepared. Time taken: %dms\n", (end-start)/int64(time.Millisecond))
+	//end := time.Now()
+	//fmt.Printf("[TPCH-DL]Base data read and prepared. Time taken: %dms at %s\n", (end.UnixNano()-start)/int64(time.Millisecond), end.Format("15:04:05.000"))
 }
 
 func LoadIndexData() {
@@ -76,7 +79,7 @@ func LoadIndexData() {
 	}
 	tpch.InitializeIndexInfo(iCfg, data.Tables)
 	tpch.PrepareIndexes()
-	fmt.Printf("[TPCH-DL]Finished loading and preparing index. My Region: %d. Current time: %v\n", dp.Region, time.Now().Format("2006-01-02 15:04:05.000"))
+	fmt.Printf("[TPCH-DL]Finished loading and preparing index. My Region: %d. Current time: %v.\n", dp.Region, time.Now().Format("2006-01-02 15:04:05.000"))
 }
 
 func SendIndexData() {
@@ -139,9 +142,13 @@ func PrepareCrdtUpdates() []crdt.UpdateObjectParams {
 	nUpds := nTables - 1 + getLineitemsNRoutines()
 	updChan = make(chan crdt.UpdateObjectParams, nUpds)
 
+	start := int64(0)
 	for i := 0; i < nTables; i++ {
 		//fmt.Printf("[TPCH-DL]NTables: %d. Size of channel: %d.\n", nTables, cap(data.ProcChan))
 		tableN := <-data.ProcChan
+		if start == 0 {
+			start = time.Now().UnixNano() / 1000000
+		}
 		fmt.Println("[TPCH-DL]Preparing protos", tpch.TableNames[tableN], tableN)
 		if tableN == tpch.PART {
 			go prepareTableEverywhere(tableN, tpch.Buckets[PART_BKT_INDEX])
@@ -153,23 +160,25 @@ func PrepareCrdtUpdates() []crdt.UpdateObjectParams {
 	}
 	//Only at this point we know that we have all the tables created
 	if dp.QueryNumbers != nil {
+		//time.Sleep(5000 * time.Millisecond)
 		go LoadIndexData()
 	}
-	nUpds-- //TODO: REMOVE THIS!!!
+	//nUpds-- //TODO: REMOVE THIS!!!
 	upds := make([]crdt.UpdateObjectParams, nUpds)
 	for i := 0; i < nUpds; i++ {
 		upds[i] = <-updChan
 	}
-	fmt.Println("[TPCH-DL]Finished creating all data protos.")
+	end := time.Now()
+	fmt.Printf("[TPCH-DL]Finished creating all data protos at %s. Took %dms. Time taken since DL start: %dms\n", end.Format("15:04:05.000"), (end.UnixNano()/1000000)-start, (end.UnixNano()/1000000)-startTime)
 	return upds
 }
 
 func SendBaseData(upds []crdt.UpdateObjectParams) {
+	fmt.Printf("[TPCH-DL]All protobufs created, waiting for TM at %s.\n", time.Now().Format("15:04:05.000"))
 	<-dp.IsTMReady //Wait until TM is ready
-	fmt.Println("[TM]Time when TM is ready: ", time.Now().Format("2006-01-02 15:04:05.000"))
+	fmt.Println("[TPCH-DL]TM ready at: ", time.Now().Format("15:04:05.000"))
 	//time.Sleep(1000 * time.Millisecond)
 	start := time.Now().UnixNano()
-	fmt.Println("[TPCH-DL]TM ready, starting to send data")
 	confirmChan := make(chan bool, len(upds))
 	for _, upd := range upds {
 		go updateHelper(upd, confirmChan)
@@ -179,8 +188,8 @@ func SendBaseData(upds []crdt.UpdateObjectParams) {
 	}
 	//ic = InternalClient{}.Initialize(dp.Tm)
 	//ic.DoUpdate(upds)
-	end := time.Now().UnixNano()
-	fmt.Printf("[TPCH-DL]Done, TM commited. Time taken: %dms\n", (end-start)/int64(time.Millisecond))
+	end := time.Now()
+	fmt.Printf("[TPCH-DL]Done, TM commited at %s. Time taken: %dms\n", end.Format("15:04:05.000"), (end.UnixNano()-start)/int64(time.Millisecond))
 	//debugRead(ic)
 }
 
@@ -221,9 +230,12 @@ func prepareMultiPartionedTables(tableI int, bucket string) {
 	//nRoutines := len(table)/7000000 + 1
 	//nRoutines := len(table)/1510000 + 1
 	nRoutines := getLineitemsNRoutines()
+	//fmt.Printf("[TPCH-DL]Using %d goroutines to prepare lineitem data\n", nRoutines)
+	//nRoutines := 1
 	if nRoutines == 1 {
 		//No extra goroutine
 		multiPartionedTableHelper(table, toRead, keys, header, name, bucket, regFunc)
+		return
 	}
 	factor := len(table) / nRoutines
 	startI, endI := 0, factor
@@ -241,6 +253,8 @@ func prepareMultiPartionedTables(tableI int, bucket string) {
 // For lineitems with two regions, each server only instanciates the version corresponding to its region.
 func multiPartionedTableHelper(table [][]string, toRead []int8, keys []int, header []string, name string, bucket string,
 	regFunc func(obj []string) []int8) { //, endChan chan *UpdateObjectParams) {
+
+	start := time.Now().UnixNano()
 	var embMapUpd []crdt.EmbMapUpdate
 	if dp.Sf >= 0.1 {
 		embMapUpd = make([]crdt.EmbMapUpdate, int(float64(len(table))*0.4))
@@ -258,6 +272,8 @@ func multiPartionedTableHelper(table [][]string, toRead []int8, keys []int, head
 			i++
 		}
 	}
+	end := time.Now().UnixNano()
+	fmt.Printf("[TPCH-DL]Time taken to prepare lineitem data: %dms\n", (end-start)/int64(time.Millisecond))
 	updChan <- crdt.UpdateObjectParams{KeyParams: crdt.MakeKeyParams(name, proto.CRDTType_RRMAP, bucket), UpdateArgs: crdt.EmbMapUpdateAllArray{Upds: embMapUpd[:i]}}
 }
 
@@ -305,12 +321,15 @@ func prepareTableEverywhere(tableI int, bucket string) {
 }
 
 func getLineitemsNRoutines() int {
-	return tpch.TableEntries[tpch.LINEITEM]/1020000 + 1
+	return 1 //Now that we use an array to represent lineitems, better do this with only 1 routine.
+	//return tpch.TableEntries[tpch.LINEITEM]/250500 + 1
+	//return tpch.TableEntries[tpch.LINEITEM] / 501000
+	//return tpch.TableEntries[tpch.LINEITEM]/1020000 + 1
 }
 
 // Inner most updates: the object/entry itself (upd to an RWEmbMap, whose entries are LWWRegisters)
 func GetInnerMapEntry(headers []string, primKeys []int, object []string, toRead []int8) (objKey string, upd crdt.EmbMapUpdateAll) {
-	entries := make(map[string]crdt.UpdateArguments)
+	entries := make(map[string]crdt.UpdateArguments, len(toRead))
 	for _, tableI := range toRead {
 		entries[headers[tableI]] = crdt.SetValue{NewValue: object[tableI]}
 	}
@@ -325,12 +344,28 @@ func GetInnerMapEntry(headers []string, primKeys []int, object []string, toRead 
 	return buf.String()[:buf.Len()-1], crdt.EmbMapUpdateAll{Upds: entries}
 }
 
-func GetInnerMapEntryArray(headers []string, primKeys []int, object []string, toRead []int8) (objKey string, upd crdt.EmbMapUpdateAllArray) {
-	entries := make([]crdt.EmbMapUpdate, len(toRead))
-	for i, tableI := range toRead {
-		entries[i] = crdt.EmbMapUpdate{Key: headers[tableI], Upd: crdt.SetValue{NewValue: object[tableI]}}
-	}
+/*
+	func GetInnerMapEntryArray(headers []string, primKeys []int, object []string, toRead []int8) (objKey string, upd crdt.EmbMapUpdateAllArray) {
+		entries := make([]crdt.EmbMapUpdate, len(toRead))
+		for i, tableI := range toRead {
+			entries[i] = crdt.EmbMapUpdate{Key: headers[tableI], Upd: crdt.SetValue{NewValue: object[tableI]}}
+		}
 
+		var buf strings.Builder
+		for _, keyIndex := range primKeys {
+			buf.WriteString(object[keyIndex])
+			//TODO: Remove, just for easier debug
+			buf.WriteRune('_')
+		}
+		//TODO: Also remove the slicing after removing the "_"
+		return buf.String()[:buf.Len()-1], crdt.EmbMapUpdateAllArray{Upds: entries}
+	}
+*/
+func GetInnerMapEntryArray(headers []string, primKeys []int, object []string, toRead []int8) (objKey string, upd crdt.MultiArraySetRegister) {
+	upd = make([][]byte, len(toRead))
+	for i, tableI := range toRead {
+		upd[i] = []byte(object[tableI])
+	}
 	var buf strings.Builder
 	for _, keyIndex := range primKeys {
 		buf.WriteString(object[keyIndex])
@@ -338,5 +373,5 @@ func GetInnerMapEntryArray(headers []string, primKeys []int, object []string, to
 		buf.WriteRune('_')
 	}
 	//TODO: Also remove the slicing after removing the "_"
-	return buf.String()[:buf.Len()-1], crdt.EmbMapUpdateAllArray{Upds: entries}
+	return buf.String()[:buf.Len()-1], upd
 }

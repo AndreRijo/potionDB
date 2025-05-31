@@ -5,6 +5,11 @@ import "antidote.proto";
 option go_package = "potionDB/crdt/proto";
 
 message ApbServerConn {}
+message ApbServerConnReplicaID {    //In theory could use the same message (ProtoRemoteID) from replicator.proto.
+    required int32 replicaID = 1;
+    repeated string myBuckets = 2;
+    required string myIP = 3;
+}
 
 message S2SWrapper {
     required int32 clientID = 1;
@@ -19,6 +24,7 @@ message S2SWrapper {
     optional ApbCommitTransaction commitTxn = 9;
     optional ApbAbortTransaction abortTxn = 10;
     optional ProtoBCPermissionsReq bcPermsReq = 11;
+    optional S2SSingleRead singleRead = 13;
 }
 
 message S2SWrapperReply {
@@ -29,6 +35,7 @@ message S2SWrapperReply {
     optional ApbReadObjectsResp readObjs = 4;
     optional ApbOperationResp upd = 5;
     optional ApbCommitResp commitTxn = 6;
+    optional S2SSingleReadResp singleRead = 7;
 }
 
 enum wrapperType {
@@ -42,6 +49,7 @@ enum wrapperType {
     COMMIT = 8;
     ABORT = 9;
     BC_PERMS_REQ = 10;
+    STATIC_SINGLE_READ = 11;
 }
 
 message ProtoBCPermissionsReq {
@@ -56,4 +64,15 @@ message ProtoBCPermissionsPartReq {
 message ProtoBCPermissionsPair {
     required ApbBoundObject keyParams = 1;;
     required int32 value = 2;
+}
+
+message S2SSingleRead {
+    required ApbBoundObject keyParams = 1;
+    optional READ_type readtype = 2;            //Must be set if partRead is also set.
+    optional ApbPartialReadArgs partRead = 3;
+}
+
+message S2SSingleReadResp {
+    optional bytes clk = 1;
+    required ApbReadObjectResp resp = 2;
 }

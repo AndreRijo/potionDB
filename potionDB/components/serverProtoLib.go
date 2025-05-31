@@ -16,6 +16,8 @@ func CreateS2SWrapperProto(clientID int32, msgID proto.WrapperType, msg pb.Messa
 		protobuf.StaticReadObjs = msg.(*proto.ApbStaticReadObjects)
 	case proto.WrapperType_STATIC_READ:
 		protobuf.StaticRead = msg.(*proto.ApbStaticRead)
+	case proto.WrapperType_STATIC_SINGLE_READ:
+		protobuf.SingleRead = msg.(*proto.S2SSingleRead)
 	case proto.WrapperType_STATIC_UPDATE:
 		protobuf.StaticUpd = msg.(*proto.ApbStaticUpdateObjects)
 	case proto.WrapperType_START_TXN:
@@ -43,6 +45,8 @@ func CreateS2SWrapperReplyProto(clientID int32, msgID proto.WrapperType, msg pb.
 	switch msgID {
 	case proto.WrapperType_STATIC_READ_OBJS:
 		protobuf.StaticReadObjs = msg.(*proto.ApbStaticReadObjectsResp)
+	case proto.WrapperType_STATIC_SINGLE_READ:
+		protobuf.SingleRead = msg.(*proto.S2SSingleReadResp)
 	case proto.WrapperType_START_TXN:
 		protobuf.StartTxn = msg.(*proto.ApbStartTransactionResp)
 	case proto.WrapperType_READ_OBJS:
@@ -91,6 +95,20 @@ func ProtoBCPermissionsReqToTM(protobuf *proto.ProtoBCPermissionsReq) TMBCPermsA
 		}
 	}
 	return TMBCPermsArgs{Perms: perms, ReqReplicaID: int16(protobuf.GetReqReplicaID())}
+}
+
+func CreateS2SSingleRead(readArgs crdt.ReadObjectParams) *proto.S2SSingleRead {
+	readType := readArgs.ReadArgs.GetREADType()
+	return &proto.S2SSingleRead{
+		KeyParams: createBoundObject(readArgs.Key, readArgs.CrdtType, readArgs.Bucket),
+		Readtype:  &readType, PartRead: readArgs.ReadArgs.(crdt.ProtoRead).ToPartialRead()}
+}
+
+func S2SSingleReadToAntidote(protobuf *proto.S2SSingleRead) (read crdt.ReadObjectParams) {
+	boundObj := protobuf.GetKeyParams()
+	keyP := crdt.MakeKeyParams(string(boundObj.GetKey()), boundObj.GetType(), string(boundObj.GetBucket()))
+	readArgs := *crdt.PartialReadOpToAntidoteRead(protobuf.GetPartRead(), keyP.CrdtType, protobuf.GetReadtype())
+	return crdt.ReadObjectParams{KeyParams: keyP, ReadArgs: readArgs}
 }
 
 /*

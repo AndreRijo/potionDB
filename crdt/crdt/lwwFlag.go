@@ -62,6 +62,8 @@ func (crdt *LwwFlagCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, repl
 	return crdt
 }
 
+func (crdt *LwwFlagCrdt) IsBigCRDT() bool { return false }
+
 func (crdt *LwwFlagCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
 	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
 		return crdt.GetValue()

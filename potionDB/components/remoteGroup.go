@@ -4,6 +4,7 @@ import (
 	fmt "fmt"
 	"os"
 
+	"potionDB/crdt/clocksi"
 	"potionDB/crdt/crdt"
 	"potionDB/potionDB/utilities"
 
@@ -63,7 +64,7 @@ var othersIPList []string
 
 //docker run -d --hostname RMQ1 --name rabbitmq1 -p 5672:5672 rabbitmq:latest
 
-func CreateRemoteGroupStruct(bucketsToListen []string, replicaID int16) (group *RemoteGroup, err error) {
+func CreateRemoteGroupStruct(bucketsToListen []string, replicaID int16) (group *RemoteGroup) {
 	//myInstanceIP := tools.SharedConfig.GetOrDefault("localRabbitMQAddress", "localhost:5672")
 	//othersIPList := strings.Split(tools.SharedConfig.GetConfig("remoteRabbitMQAddresses"), " ")
 	if len(othersIPList) == 1 && len(othersIPList[0]) < 2 {
@@ -74,56 +75,63 @@ func CreateRemoteGroupStruct(bucketsToListen []string, replicaID int16) (group *
 	group = &RemoteGroup{conns: make([]*RemoteConn, len(othersIPList)), nReplicas: int16(len(othersIPList)), workChan: make(chan RCWork, 100),
 		groupChan: make(chan ReplicatorMsg, defaultListenerSize*len(othersIPList)), replicaID: replicaID, knownIPs: make(map[string]int16)}
 
-	/*
-		for i, ip := range othersIPList {
-			fmt.Println("Connecting to", ip)
-			group.conns[i], err = CreateRemoteConnStruct(ip, bucketsToListen, replicaID)
-			if err != nil {
-				fmt.Println("Error while connecting to RabbitMQ:", err)
-				return nil, err
-			}
-			fmt.Println("Connected to", ip)
-		}
-		group.ourConn, err = CreateRemoteConnStruct(localRabbitMQIP, bucketsToListen, replicaID)
-		if err != nil {
-			return nil, err
-		}
-		group.conns[len(othersIPList)] = group.ourConn
-		group.prepareMsgListener()
-		return
-	*/
+	fmt.Printf("[RG]Self ip: %s. Remote ips: %v\n", localRabbitMQIP, othersIPList)
+	group.ourConn = CreateRemoteConnStruct(localRabbitMQIP, bucketsToListen, replicaID, -1, true, group.workChan)
+
+	for i, ip := range othersIPList {
+		group.conns[i] = CreateRemoteConnStruct(ip, bucketsToListen, replicaID, int16(i), false, group.workChan)
+	}
+
+	group.prepareMsgListener()
+	group.prepareWorkerRoutines()
+	//TODO: Update other files to be aware of the connection not being established yet (maybe nothing to do?
+	return
+}
+
+/*func CreateRemoteGroupStructOld(bucketsToListen []string, replicaID int16) (group *RemoteGroup, err error) {
+	//myInstanceIP := tools.SharedConfig.GetOrDefault("localRabbitMQAddress", "localhost:5672")
+	//othersIPList := strings.Split(tools.SharedConfig.GetConfig("remoteRabbitMQAddresses"), " ")
+	if len(othersIPList) == 1 && len(othersIPList[0]) < 2 {
+		othersIPList = []string{}
+	}
+	fmt.Println("[RG]Remote conns:", othersIPList, "(size:", len(othersIPList), ")")
+
+	group = &RemoteGroup{conns: make([]*RemoteConn, len(othersIPList)), nReplicas: int16(len(othersIPList)), workChan: make(chan RCWork, 100),
+		groupChan: make(chan ReplicatorMsg, defaultListenerSize*len(othersIPList)), replicaID: replicaID, knownIPs: make(map[string]int16)}
+
+	selfConnChan := make(chan GroupOrErr, 1)
+	fmt.Println(localRabbitMQIP)
+	copy := localRabbitMQIP
+	go connectToIp(copy, -1, bucketsToListen, replicaID, int16(len(othersIPList)), selfConnChan, true, group.workChan)
+
 	openConnsChan := make(chan GroupOrErr, 10)
 	for i, ip := range othersIPList {
 		fmt.Println(i, ip)
 		go connectToIp(ip, i, bucketsToListen, replicaID, int16(i), openConnsChan, false, group.workChan)
 		group.knownIPs[ip] = int16(i)
 	}
-	selfConnChan := make(chan GroupOrErr)
-	fmt.Println(localRabbitMQIP)
-	copy := localRabbitMQIP
-	go connectToIp(copy, -1, bucketsToListen, replicaID, int16(len(othersIPList)), selfConnChan, true, group.workChan)
 
 	//Wait for self first
 	reply := <-selfConnChan
 	if reply.error != nil {
-		fmt.Printf("Error while connecting to this replica's RabbitMQ at %s: %v", localRabbitMQIP, err)
+		fmt.Printf("[RG]Error while connecting to this replica's RabbitMQ at %s: %v\n", localRabbitMQIP, err)
 		panic("")
 	}
 	group.ourConn = reply.RemoteConn
 	//group.conns[len(othersIPList)] = reply.RemoteConn
-	fmt.Println("Connected to self RabbitMQ instance at", localRabbitMQIP)
+	fmt.Println("[RG]Connected to self RabbitMQ instance at", localRabbitMQIP)
 
 	//Wait for others
 	for i := 0; i < len(othersIPList); i++ {
 		reply := <-openConnsChan
 		if reply.error != nil {
-			fmt.Printf("Error while connecting to remote RabbitMQ at %s: %v", othersIPList[reply.index], err)
+			fmt.Printf("[RG]Error while connecting to remote RabbitMQ at %s: %v\n", othersIPList[reply.index], err)
 			return nil, err
 		}
 		group.conns[i] = reply.RemoteConn
-		fmt.Println("Connected to", othersIPList[reply.index])
+		fmt.Println("[RG]Connected to", othersIPList[reply.index])
 	}
-	fmt.Println("All RabbitMQ connections established. Number of conns (not counting self):", len(group.conns))
+	fmt.Println("[RG]All RabbitMQ connections established. Number of conns (not counting self):", len(group.conns))
 	group.prepareMsgListener()
 	group.prepareWorkerRoutines()
 	return
@@ -133,7 +141,7 @@ func connectToIp(ip string, index int, bucketsToListen []string, replicaID int16
 	reply := GroupOrErr{index: index}
 	reply.RemoteConn, reply.error = CreateRemoteConnStruct(ip, bucketsToListen, replicaID, connID, isSelfConn, workChan)
 	connChan <- reply
-}
+}*/
 
 // Adds a replica if it isn't already known - a joining replica might be already known e.g. when two new replicas start at the same time, aware of each other.
 func (group *RemoteGroup) AddReplica(ip string, bucketsToListen []string, joiningReplicaID int16) (connID int16) {
@@ -143,17 +151,19 @@ func (group *RemoteGroup) AddReplica(ip string, bucketsToListen []string, joinin
 		return id
 	}
 	fmt.Println("Start add replica, nReplicas:", group.nReplicas)
-	connChan := make(chan GroupOrErr)
+	//connChan := make(chan GroupOrErr)
 	slot := group.nReplicas
 	group.nReplicas += 1
 	group.conns = append(group.conns, nil) //Fill "slot" for this connection
 
-	go connectToIp(ip, int(slot), bucketsToListen, group.replicaID, slot, connChan, false, group.workChan)
-	reply := <-connChan
-	group.conns[slot] = reply.RemoteConn //Update this connection index
+	//go connectToIp(ip, int(slot), bucketsToListen, group.replicaID, slot, connChan, false, group.workChan)
+	//reply := <-connChan
+	//group.conns[slot] = reply.RemoteConn //Update this connection index
+	group.conns[slot] = CreateRemoteConnStructWithWait(ip, bucketsToListen, group.replicaID, slot, false, group.workChan)
 	group.knownIPs[ip] = slot
 	fmt.Println("Finish add replica, nReplicas:", group.nReplicas)
-	go group.listenToRemoteConn(reply.RemoteConn.listenerChan)
+	//go group.listenToRemoteConn(reply.RemoteConn.listenerChan)
+	go group.listenToRemoteConn(group.conns[slot].listenerChan)
 	return slot
 }
 
@@ -270,6 +280,8 @@ func (work MarshallWork) DoWork(replicaID int16) {
 			//remote.checkProtoError(err, protobuf, upds)
 			//fmt.Printf("[RC]Error creating ProtoReplicateTxn (error: %v). Proto: %v. Upds: %v. Timestamp: %s.\n", err, protobuf, upds,
 			//(clocksi.ClockSiTimestamp{}.FromBytes(protobuf.GetTimestamp())).ToSortedString())
+			fmt.Printf("[RC]Error creating ProtoReplicateTxn (error: %v). Timestamp: %s.\n", err,
+				(clocksi.ClockSiTimestamp{}.FromBytes(protobuf.GetTimestamp())).ToSortedString())
 			os.Exit(0)
 		}
 		results[i] = PairKeyBytes{Key: bucketTopicPrefix + bucket, Data: data}
@@ -285,7 +297,7 @@ func (work GroupMarshallWork) DoWork(replicaID int16) {
 	protobuf := createProtoReplicateGroupTxn(replicaID, work.Txns, work.BktTxns)
 	data, err := pb.Marshal(protobuf)
 	if err != nil {
-		fmt.Printf("[RC]Error marshalling ProtoReplicateGroupTxn proto. Protobuf: %+v\n", protobuf)
+		fmt.Printf("[RC]Error marshalling ProtoReplicateGroupTxn (error: %v) proto. Protobuf: %+v\n", err, protobuf)
 		os.Exit(0)
 	}
 	work.ReplyChan <- PairKeyBytes{Key: work.Bucket, Data: data}

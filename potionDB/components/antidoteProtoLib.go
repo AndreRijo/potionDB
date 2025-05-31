@@ -31,23 +31,25 @@ INDEX:
 
 const (
 	//Requests
-	ConnectReplica   = 10
-	ReadObjs         = 116
-	Read             = 90
-	StaticRead       = 91
-	UpdateObjs       = 118
-	StartTrans       = 119
-	AbortTrans       = 120
-	CommitTrans      = 121
-	StaticUpdateObjs = 122
-	StaticReadObjs   = 123
-	ResetServer      = 12
-	NewTrigger       = 14
-	GetTriggers      = 15
-	ServerConn       = 80
-	S2S              = 81
-	SQLString        = 18
-	SQLTyped         = 19
+	ConnectReplica      = 10
+	ReadObjs            = 116
+	Read                = 90
+	StaticRead          = 91
+	UpdateObjs          = 118
+	StartTrans          = 119
+	AbortTrans          = 120
+	CommitTrans         = 121
+	StaticUpdateObjs    = 122
+	StaticReadObjs      = 123
+	ResetServer         = 12
+	NewTrigger          = 14
+	GetTriggers         = 15
+	ServerConn          = 80
+	S2S                 = 81
+	ServerConnReplicaID = 82
+	SQLString           = 18
+	SQLTyped            = 19
+	MultiConnect        = 20
 	//Replies
 	ConnectReplicaReply = 11
 	OpReply             = 111
@@ -59,6 +61,7 @@ const (
 	NewTriggerReply     = 16
 	GetTriggersReply    = 17
 	S2SReply            = 181
+	MultiConnectReply   = 21
 	ErrorReply          = 0
 )
 
@@ -126,14 +129,24 @@ func GetProtoMarshal(protobf pb.Message) []byte {
 
 // Exposes the error on sending instead of crashing
 func SendProtoNoCheck(code byte, protobf pb.Message, writer io.Writer) error {
+	//tsStart := time.Now().UnixNano()
 	toSend, err := pb.Marshal(protobf)
+	/*diff := (time.Now().UnixNano() - tsStart) / int64(time.Duration(time.Microsecond))
+	if code == StaticReadObjsReply {
+		fmt.Printf("[Protolib]Protobuf marshal took %d microseconds.\n", diff)
+	}*/
 	tools.CheckErr("Marshal err", err)
 	protoSize := len(toSend)
 	buffer := make([]byte, protoSize+5)
 	binary.BigEndian.PutUint32(buffer[0:4], uint32(protoSize+1))
 	buffer[4] = code
 	copy(buffer[5:], toSend)
+	//tsStart = time.Now().UnixNano()
 	_, err = writer.Write(buffer)
+	/*diff = (time.Now().UnixNano() - tsStart) / int64(time.Duration(time.Microsecond))
+	if code == StaticReadObjsReply {
+		fmt.Printf("[Protolib]Sending protobuf took %d microseconds.\n", diff)
+	}*/
 	//pbSize := pb.Size(protobf)
 	//pb.MarshalAppend([]byte{}, protobf)
 	/*buffer := make([]byte, 5)
@@ -141,6 +154,24 @@ func SendProtoNoCheck(code byte, protobf pb.Message, writer io.Writer) error {
 	buffer[4] = code
 	_, err = writer.Write(buffer)
 	_, err = writer.Write(toSend)*/
+	return err
+}
+
+func SendProtoMultiClient(code byte, client uint16, protobf pb.Message, writer io.Writer) {
+	err := SendProtoMultiClientNoCheck(code, client, protobf, writer)
+	tools.CheckErr("Sending multi-client protobuf err:", err)
+}
+
+func SendProtoMultiClientNoCheck(code byte, client uint16, protobf pb.Message, writer io.Writer) (err error) {
+	toSend, err := pb.Marshal(protobf)
+	tools.CheckErr("Marshal err", err)
+	protoSize := len(toSend)
+	buffer := make([]byte, protoSize+7)
+	binary.BigEndian.PutUint32(buffer[0:4], uint32(protoSize+3))
+	buffer[4] = code
+	binary.BigEndian.PutUint16(buffer[5:7], client)
+	copy(buffer[7:], toSend)
+	_, err = writer.Write(buffer)
 	return err
 }
 
@@ -157,7 +188,14 @@ func ReceiveProto(in io.Reader) (msgType byte, protobuf pb.Message, err error) {
 	}
 	//NEW
 	//tools.CheckErr("Receiving proto err:", err)
+	//tsStart := time.Now().UnixNano()
 	protobuf = unmarshallProto(msgType, msgBuf)
+	/*tsEnd := time.Now().UnixNano()
+	diffTime := (tsEnd - tsStart) / int64(time.Duration(time.Microsecond))
+	//if diffTime > 100 {
+	if msgType == StaticReadObjsReply {
+		fmt.Printf("[Protolib]Protobuf unmarshall took %d microseconds.\n", diffTime)
+	}*/
 	return
 }
 
@@ -167,30 +205,6 @@ func ReceiveProtoNoProcess(in io.Reader) {
 }
 
 func readProtoFromNetwork(in io.Reader) (msgType byte, msgData []byte, err error) {
-	/*sizeBuf := make([]byte, 4)
-	n := 0
-	for nRead := 0; nRead < 4; {
-		n, err = in.Read(sizeBuf[nRead:])
-		if err != nil {
-			return
-		}
-		nRead += n
-	}
-
-	msgSize := (int)(binary.BigEndian.Uint32(sizeBuf))
-	msgBuf := make([]byte, msgSize)
-	for nRead := 0; nRead < msgSize; {
-		n, err = in.Read(msgBuf[nRead:])
-		if err != nil {
-			return
-		}
-		nRead += n
-	}
-
-	msgType = msgBuf[0]
-	msgData = msgBuf[1:]
-	return
-	*/
 	sizeBuf := make([]byte, 5)
 	n := 0
 	for nRead := 0; nRead < 5; {
@@ -204,6 +218,46 @@ func readProtoFromNetwork(in io.Reader) (msgType byte, msgData []byte, err error
 	msgType = sizeBuf[4]
 	msgBuf := make([]byte, msgSize-1)
 	for nRead := 0; nRead < msgSize-1; {
+		n, err = in.Read(msgBuf[nRead:])
+		if err != nil {
+			return
+		}
+		nRead += n
+	}
+	msgData = msgBuf
+	return
+}
+
+func ReceiveProtoMultiClient(in io.Reader) (msgType byte, client uint16, protobuf pb.Message, err error) {
+	var msgData []byte
+	msgType, client, msgData, err = readProtoFromNetworkMultiClient(in)
+
+	if err != nil {
+		if err != io.EOF {
+			fmt.Printf("[WARNING]Returning error on ReceiveProtoMultiClient. MsgType: %v, protobuf: %v, err: %s\n", msgType, protobuf, err)
+		}
+		return
+	}
+
+	protobuf = unmarshallProto(msgType, msgData)
+	return
+}
+
+func readProtoFromNetworkMultiClient(in io.Reader) (msgType byte, client uint16, msgData []byte, err error) {
+	sizeBuf := make([]byte, 7)
+	n := 0
+	for nRead := 0; nRead < 7; {
+		n, err = in.Read(sizeBuf[nRead:])
+		if err != nil {
+			return
+		}
+		nRead += n
+	}
+	msgSize := (int)(binary.BigEndian.Uint32(sizeBuf[:4]))
+	msgType = sizeBuf[4]
+	client = binary.BigEndian.Uint16(sizeBuf[5:7])
+	msgBuf := make([]byte, msgSize-3)
+	for nRead := 0; nRead < msgSize-3; {
 		n, err = in.Read(msgBuf[nRead:])
 		if err != nil {
 			return
@@ -336,6 +390,14 @@ func CreateServerConn() (protobuf *proto.ApbServerConn) {
 	return &proto.ApbServerConn{}
 }
 
+func CreateServerConnReplicaID(replicaID int16, buckets []string, serverIP string) *proto.ApbServerConnReplicaID {
+	return &proto.ApbServerConnReplicaID{ReplicaID: pb.Int32(int32(replicaID)), MyBuckets: buckets, MyIP: &serverIP}
+}
+
+func CreateMultiClientConn(nClients int) (protobuf *proto.ApbMultiClientConnect) {
+	return &proto.ApbMultiClientConnect{NClients: pb.Uint32(uint32(nClients))}
+}
+
 /*****REPLY/RESP PROTOS*****/
 
 func CreateStartTransactionResp(txnId TransactionId, ts clocksi.Timestamp) (protobuf *proto.ApbStartTransactionResp) {
@@ -414,6 +476,10 @@ func CreateGetTriggersReply(db *TriggerDB, ci CodingInfo) (protobuf *proto.ApbGe
 	return &proto.ApbGetTriggersReply{Mapping: mapSlice, GenericMapping: genSlice}
 }
 
+func CreateMultiClientConnReply() (protobuf *proto.ApbMultiClientConnectResp) {
+	return &proto.ApbMultiClientConnectResp{}
+}
+
 /***** PROTO -> ANTIDOTE *****/
 
 func DecodeTxnDescriptor(bytes []byte) (txnId TransactionId, ts clocksi.Timestamp) {
@@ -458,6 +524,14 @@ func ProtoReadToAntidoteObjects(fullReads []*proto.ApbBoundObject, partialReads 
 	}
 	return
 }
+
+/*func ProtoPartialReadToReadObjectParams(read *proto.ApbPartialRead) crdt.ReadObjectParams {
+	boundObj := read.GetObject()
+	return crdt.ReadObjectParams{
+		KeyParams: crdt.MakeKeyParams(string(boundObj.GetKey()), boundObj.GetType(), string(boundObj.GetBucket())),
+		ReadArgs:  *crdt.PartialReadOpToAntidoteRead(read.GetArgs(), boundObj.GetType(), read.GetReadtype()),
+	}
+}*/
 
 func ProtoUpdateOpToAntidoteUpdate(protoUp []*proto.ApbUpdateOp) (upParams []crdt.UpdateObjectParams) {
 	upParams = make([]crdt.UpdateObjectParams, len(protoUp))
@@ -532,6 +606,10 @@ func unmarshallProto(code byte, msgBuf []byte) (protobuf pb.Message) {
 		protobuf = &proto.ApbServerConn{}
 	case S2S:
 		protobuf = &proto.S2SWrapper{}
+	case MultiConnect:
+		protobuf = &proto.ApbMultiClientConnect{}
+	case ServerConnReplicaID:
+		protobuf = &proto.ApbServerConnReplicaID{}
 	case OpReply:
 		protobuf = &proto.ApbOperationResp{}
 	case StartTransReply:
@@ -550,6 +628,8 @@ func unmarshallProto(code byte, msgBuf []byte) (protobuf pb.Message) {
 		protobuf = &proto.ApbGetTriggersReply{}
 	case S2SReply:
 		protobuf = &proto.S2SWrapperReply{}
+	case MultiConnectReply:
+		protobuf = &proto.ApbMultiClientConnectResp{}
 	case ErrorReply:
 		protobuf = &proto.ApbErrorResp{}
 	}
@@ -571,12 +651,7 @@ func createBoundObjectsArray(readParams []crdt.ReadObjectParams) (protobufs []*p
 }
 
 func createBoundObject(key string, crdtType proto.CRDTType, bucket string) (protobuf *proto.ApbBoundObject) {
-	protobuf = &proto.ApbBoundObject{
-		Key:    []byte(key),
-		Type:   &crdtType,
-		Bucket: []byte(bucket),
-	}
-	return
+	return &proto.ApbBoundObject{Key: []byte(key), Type: &crdtType, Bucket: []byte(bucket)}
 }
 
 func createTxnDescriptorBytes(txnId TransactionId, ts clocksi.Timestamp) (bytes []byte) {

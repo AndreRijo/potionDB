@@ -118,7 +118,7 @@ func StateToString(state crdt.State) (stateString string) {
 	//Counter
 	case crdt.CounterState:
 		sb.WriteString("Value: ")
-		sb.WriteString(fmt.Sprint(typedState.Value))
+		sb.WriteString(fmt.Sprint(typedState))
 
 	//Register
 	case crdt.RegisterState:

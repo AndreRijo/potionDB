@@ -13,9 +13,12 @@ type CounterFloatCrdt struct {
 	value float64
 }
 
-type CounterFloatState struct {
-	Value float64
-}
+/*
+	type CounterFloatState struct {
+		Value float64
+	}
+*/
+type CounterFloatState float64
 
 type IncrementFloat struct {
 	Change float64
@@ -61,7 +64,25 @@ func (crdt *CounterFloatCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp,
 	return crdt
 }
 
+func (crdt *CounterFloatCrdt) IsBigCRDT() bool { return false }
+
 func (crdt *CounterFloatCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
+	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+		return CounterFloatState(crdt.value)
+	}
+	copyValue := crdt.value
+	for _, upd := range updsNotYetApplied {
+		switch typedUpd := (upd).(type) {
+		case IncrementFloat:
+			copyValue += typedUpd.Change
+		case DecrementFloat:
+			copyValue -= typedUpd.Change
+		}
+	}
+	return CounterFloatState(copyValue)
+}
+
+/*func (crdt *CounterFloatCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
 	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
 		return crdt.GetValue()
 	}
@@ -79,7 +100,7 @@ func (crdt *CounterFloatCrdt) Read(args ReadArguments, updsNotYetApplied []Updat
 
 func (crdt *CounterFloatCrdt) GetValue() (state State) {
 	return CounterFloatState{Value: crdt.value}
-}
+}*/
 
 func (crdt *CounterFloatCrdt) Update(args UpdateArguments) (downstreamArgs DownstreamArguments) {
 	return args.(DownstreamArguments)
@@ -159,12 +180,14 @@ func (crdtOp DecrementFloat) ToUpdateObject() (protobuf *proto.ApbUpdateOperatio
 }
 
 func (crdtState CounterFloatState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
-	crdtState.Value = protobuf.GetCounterfloat().GetValue()
+	//crdtState.Value = protobuf.GetCounterfloat().GetValue()
+	crdtState = CounterFloatState(protobuf.GetCounterfloat().GetValue())
 	return crdtState
 }
 
 func (crdtState CounterFloatState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
-	return &proto.ApbReadObjectResp{Counterfloat: &proto.ApbGetCounterFloatResp{Value: pb.Float64(crdtState.Value)}}
+	return &proto.ApbReadObjectResp{Counterfloat: &proto.ApbGetCounterFloatResp{Value: pb.Float64(float64(crdtState))}}
+	//return &proto.ApbReadObjectResp{Counterfloat: &proto.ApbGetCounterFloatResp{Value: pb.Float64(crdtState.Value)}}
 }
 
 func (downOp IncrementFloat) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
@@ -182,7 +205,7 @@ func (downOp IncrementFloat) ToReplicatorObj() (protobuf *proto.ProtoOpDownstrea
 }
 
 func (downOp DecrementFloat) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	return &proto.ProtoOpDownstream{CounterfloatOp: &proto.ProtoCounterFloatDownstream{IsInc: pb.Bool(false), Change: pb.Float64(downOp.Change)}}
+	return &proto.ProtoOpDownstream{CounterfloatOp: &proto.ProtoCounterFloatDownstream{IsInc: pb.Bool(false), Change: pb.Float64(-downOp.Change)}}
 }
 
 func (crdt *CounterFloatCrdt) ToProtoState() (protobuf *proto.ProtoState) {

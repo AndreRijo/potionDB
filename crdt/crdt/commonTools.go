@@ -11,6 +11,10 @@ var (
 
 type Unique uint64
 
+type Number interface {
+	int64 | float64 | uint64 | int32 | float32 | uint32 | int16 | uint16 | int8 | uint8 | int | uint
+}
+
 /*
 type USetElemPair struct {
 	Element
@@ -108,6 +112,12 @@ func InitializeCrdt(crdtType proto.CRDTType, replicaID int16) (newCrdt CRDT) {
 		newCrdt = (&DwFlagCrdt{}).Initialize(nil, replicaID)
 	case proto.CRDTType_FATCOUNTER:
 		newCrdt = (&BoundedCounterCrdt{}).Initialize(nil, replicaID)
+	case proto.CRDTType_PAIR_COUNTER:
+		newCrdt = (&PairCounterCrdt{}).Initialize(nil, replicaID)
+	case proto.CRDTType_ARRAY_COUNTER:
+		newCrdt = (&CounterArrayCrdt{}).Initialize(nil, replicaID)
+	case proto.CRDTType_MULTI_ARRAY:
+		newCrdt = (&MultiArrayCrdt{}).Initialize(nil, replicaID)
 	default:
 		newCrdt = nil
 	}
@@ -152,14 +162,14 @@ func UniqueSetToUInt64Array(uniqueSet UniqueSet) (uniques []uint64) {
 
 /***** MISCELLANEOUS *****/
 
-func min(f int, s int) int {
+func min[V Number](f V, s V) V {
 	if f < s {
 		return f
 	}
 	return s
 }
 
-func max(f int, s int) int {
+func max[V Number](f V, s V) V {
 	if f > s {
 		return f
 	}

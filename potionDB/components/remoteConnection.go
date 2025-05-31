@@ -41,6 +41,8 @@ type RemoteConn struct {
 	allBuckets       bool        //True if the replica's buckets has the wildcard '*' (i.e., replicates every bucket)
 	workChan         chan RCWork //Channel to send requests of marshalling.
 	//SendMsgLock      NillMutex   //sync.Mutex
+	sendHoldCh      chan HoldSendMsg //Channel to hold messages until the connection to RabbitMQ is established
+	connEstablished bool
 }
 
 /*type NillMutex struct{}
@@ -61,6 +63,11 @@ type HoldTxn struct {
 	txnID     int32
 	nReceived int
 	isGroup   bool
+}
+
+type HoldSendMsg struct {
+	publish amqp.Publishing
+	topic   string
 }
 
 /*
@@ -101,12 +108,159 @@ var (
 	basePrefix, baseVHost string
 )
 
+func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16, connID int16, isSelfConn bool, workChan chan RCWork) (remote *RemoteConn) {
+	remote = createRemoteConnStructHelper(ip, bucketsToListen, replicaID, connID, isSelfConn, workChan)
+	prefix := basePrefix + ":" + basePrefix + "@"
+	link := protocol + prefix + ip + "/" + baseVHost
+	go remote.connectToRabbitMQ(link, ip, isSelfConn, true)
+
+	return
+}
+
+func createRemoteConnStructHelper(ip string, bucketsToListen []string, replicaID int16, connID int16, isSelfConn bool, workChan chan RCWork) (remote *RemoteConn) {
+	allBuckets := false
+	//conn, err := amqp.Dial(protocol + prefix + ip)
+	bucketsMap := make(map[string]struct{})
+	for _, bkt := range bucketsToListen {
+		bucketsMap[bkt] = struct{}{}
+		if bkt == "*" {
+			allBuckets = true
+		}
+	}
+	return &RemoteConn{
+		listenerChan:     make(chan ReplicatorMsg, 10),
+		replicaID:        replicaID,
+		replicaString:    fmt.Sprint(replicaID),
+		HoldTxn:          HoldTxn{onHold: make([]ReplicatorMsg, len(bucketsToListen))},
+		nBucketsToListen: len(bucketsToListen),
+		buckets:          bucketsMap,
+		connID:           connID,
+		allBuckets:       allBuckets,
+		workChan:         workChan,
+		sendHoldCh:       make(chan HoldSendMsg, 100),
+		connEstablished:  false,
+	}
+}
+
+// Only returns after the connection is established
+func CreateRemoteConnStructWithWait(ip string, bucketsToListen []string, replicaID int16, connID int16, isSelfConn bool, workChan chan RCWork) (remote *RemoteConn) {
+	remote = createRemoteConnStructHelper(ip, bucketsToListen, replicaID, connID, isSelfConn, workChan)
+	prefix := basePrefix + ":" + basePrefix + "@"
+	link := protocol + prefix + ip + "/" + baseVHost
+	remote.connectToRabbitMQ(link, ip, isSelfConn, false)
+	return
+}
+
+func (remote *RemoteConn) connectToRabbitMQ(link, ip string, isSelfConn, checkHold bool) {
+	timeString := time.Now().Format("15:04:05.000")
+	fmt.Printf("[RC][%s]Connecting to %s\n", timeString, link)
+	conn, err := amqp.DialConfig(link, amqp.Config{Dial: scalateTimeout})
+	nAttempts, nSleepTime := 0, 50+time.Millisecond
+	for err != nil { //It actually managed to connect but RabbitMQ throw an error. Try again quickly. However, given this always happens to local, also add a small delay each time.
+		timeString = time.Now().Format("15:04:05.000")
+		nAttempts++
+		if nAttempts%10 == 0 {
+			fmt.Printf("[RC][%s]Failed to open connection to rabbitMQ at %s: %s. Attempts so far: %d. Retrying.\n", timeString, ip, err, nAttempts)
+		}
+		//utilities.FancyWarnPrint(utilities.REMOTE_PRINT, replicaID, "failed to open connection to rabbitMQ at", ip, ":", err, ". Retrying.")
+		//time.Sleep(4000 * time.Millisecond)
+		time.Sleep(nSleepTime)
+		nSleepTime += (50 * time.Millisecond)
+		conn, err = amqp.Dial(link)
+	}
+	timeString = time.Now().Format("15:04:05.000")
+	fmt.Printf("[RC][%s]Connected to %s\n", timeString, link)
+	remote.conn = conn
+	remote.finishInitialization(isSelfConn, ip)
+	if checkHold {
+		remote.handleHoldSendMsgs()
+	}
+}
+
+func (remote *RemoteConn) finishInitialization(isSelfConn bool, ip string) {
+	sendCh, err := remote.conn.Channel()
+	if err != nil {
+		fmt.Printf("[RC][FATAL]Failed to obtain channel from rabbitMQ: %s\n", err)
+		//utilities.FancyWarnPrint(utilities.REMOTE_PRINT, replicaID, "failed to obtain channel from rabbitMQ:", err)
+		panic(err)
+	}
+
+	//Call this to delete existing exchange/queues/binds/etc if configurations are changed
+	//deleteRabbitMQStructures(sendCh)
+
+	//We send msgs to the exchange
+	err = sendCh.ExchangeDeclare(exchangeName, exchangeType, false, false, false, false, nil)
+	if err != nil {
+		fmt.Printf("[RC][FATAL]Failed to declare exchange with rabbitMQ: %s\n", err)
+		//utilities.FancyWarnPrint(utilities.REMOTE_PRINT, replicaID, "failed to declare exchange with rabbitMQ:", err)
+		panic(err)
+	}
+	//This queue will store messages sent from other replicas
+	replQueue, err := sendCh.QueueDeclare("", false, true, false, false, nil)
+	if err != nil {
+		fmt.Printf("[RC][FATAL]Failed to declare queue with rabbitMQ: %s\n", err)
+		//utilities.FancyWarnPrint(utilities.REMOTE_PRINT, replicaID, "failed to declare queue with rabbitMQ:", err)
+		panic(err)
+	}
+	joinQueue, err := sendCh.QueueDeclare(joinQueueName, false, true, false, false, nil)
+	if err != nil {
+		fmt.Printf("[RC][FATAL]Failed to declare join queue with rabbitMQ: %s\n", err)
+		//utilities.FancyWarnPrint(utilities.REMOTE_PRINT, replicaID, "failed to declare join queue with rabbitMQ:", err)
+		panic(err)
+	}
+	//The previously declared queue will receive messages from any replica that publishes updates for objects in buckets in bucketsToListen
+	//bucket.* - matches anything with "bucket.(any word). * means one word, any"
+	//bucket.# - matches anything with "bucket.(any amount of words). # means 0 or more words, each separated by a dot."
+	for bucket := range remote.buckets {
+		sendCh.QueueBind(replQueue.Name, bucketTopicPrefix+bucket, exchangeName, false, nil)
+		//For groups
+		sendCh.QueueBind(replQueue.Name, groupTopicPrefix+bucket, exchangeName, false, nil)
+		//For split messages
+		sendCh.QueueBind(replQueue.Name, bigTopicPrefix+bucketTopicPrefix+bucket, exchangeName, false, nil)
+		//For split messages
+		sendCh.QueueBind(replQueue.Name, bigTopicPrefix+groupTopicPrefix+bucket, exchangeName, false, nil)
+		//sendCh.QueueBind(replQueue.Name, "*", exchangeName, false, nil)
+	}
+	//We also need to associate stable clocks to the queue.
+	//TODO: Some kind of filtering for this
+	sendCh.QueueBind(replQueue.Name, clockTopic, exchangeName, false, nil)
+	//Triggers as well
+	sendCh.QueueBind(replQueue.Name, triggerTopic, exchangeName, false, nil)
+	//Associate join requests to the join queue.
+	sendCh.QueueBind(joinQueue.Name, joinTopic, exchangeName, false, nil)
+
+	//This channel is used to read from the queue.
+	//If this is a connection to the self rabbitMQ instance, then we only listen to join-related msgs.
+	//Otherwise, we listen exclusively to replication msgs.
+	var recCh <-chan amqp.Delivery = nil
+	var queueToListen amqp.Queue
+	if !isSelfConn {
+		queueToListen = replQueue
+	} else {
+		queueToListen = joinQueue
+	}
+	//fmt.Printf("[RC%d]Queues names: %s, %s, %s\n", connID, replQueue.Name, joinQueue.Name, queueToListen.Name)
+	recCh, err = sendCh.Consume(queueToListen.Name, "", true, false, false, false, nil)
+	if err != nil {
+		fmt.Printf("[RC][FATAL]Failed to obtain consumer from rabbitMQ: %s\n", err)
+		//utilities.FancyWarnPrint(utilities.REMOTE_PRINT, replicaID, "failed to obtain consumer from rabbitMQ:", err)
+		panic(err)
+	}
+	if !isSelfConn {
+		fmt.Println("[RC]Listening to repl on connection to", ip, "with id", remote.connID)
+	} else {
+		fmt.Println("[RC]Listening to join on connection to", ip, "with id", remote.connID)
+	}
+	remote.sendCh, remote.recCh = sendCh, recCh
+	go remote.startReceiver()
+}
+
 // Topics (i.e., queue filters): partitionID.bucket
 // There's one queue per replica. Each replica's queue will receive messages from ALL other replicas, as long as the topics match the ones
 // that were binded to the replica's queue.
 // Ip includes both ip and port in format: ip:port
 // In the case of the connection to the local replica's RabbitMQ server, we don't consume the self messages (isSelfConn)
-func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16, connID int16, isSelfConn bool, workChan chan RCWork) (remote *RemoteConn, err error) {
+/*func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16, connID int16, isSelfConn bool, workChan chan RCWork) (remote *RemoteConn, err error) {
 	//conn, err := amqp.Dial(protocol + prefix + ip + port)
 	allBuckets := false
 	prefix := basePrefix + ":" + basePrefix + "@"
@@ -115,15 +269,24 @@ func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16
 	currH, currM, currS := time.Now().Clock()
 	fmt.Printf("[RC][%d:%d:%d]Connecting to %s\n", currH, currM, currS, link)
 	conn, err := amqp.DialConfig(link, amqp.Config{Dial: scalateTimeout})
-	if err != nil {
+	nAttempts, nSleepTime := 0, 50+time.Millisecond
+	for err != nil { //It actually managed to connect but RabbitMQ throw an error. Try again quickly. However, given this always happens to local, also add a small delay each time.
 		currH, currM, currS = time.Now().Clock()
-		fmt.Printf("[RC][%d:%d:%d]Failed to open connection to rabbitMQ at %s: %s. Retrying.\n", currH, currM, currS, ip, err)
-		utilities.FancyWarnPrint(utilities.REMOTE_PRINT, replicaID, "failed to open connection to rabbitMQ at", ip, ":", err, ". Retrying.")
-		time.Sleep(4000 * time.Millisecond)
-		return CreateRemoteConnStruct(ip, bucketsToListen, replicaID, connID, isSelfConn, workChan)
+		nAttempts++
+		if nAttempts%10 == 0 {
+			fmt.Printf("[RC][%d:%d:%d]Failed to open connection to rabbitMQ at %s: %s. Attempts so far: %d. Retrying.\n", currH, currM, currS, ip, err, nAttempts)
+		}
+		//utilities.FancyWarnPrint(utilities.REMOTE_PRINT, replicaID, "failed to open connection to rabbitMQ at", ip, ":", err, ". Retrying.")
+		//time.Sleep(4000 * time.Millisecond)
+		time.Sleep(nSleepTime)
+		nSleepTime += (50 * time.Millisecond)
+		conn, err = amqp.Dial(link)
 	}
+	currH, currM, currS = time.Now().Clock()
+	fmt.Printf("[RC][%d:%d:%d]Connected to %s\n", currH, currM, currS, link)
 	sendCh, err := conn.Channel()
 	if err != nil {
+		fmt.Printf("[RC][FATAL]Failed to obtain channel from rabbitMQ: %s\n", err)
 		utilities.FancyWarnPrint(utilities.REMOTE_PRINT, replicaID, "failed to obtain channel from rabbitMQ:", err)
 		return nil, err
 	}
@@ -135,17 +298,20 @@ func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16
 	//sendCh.ExchangeDelete(exchangeName, false, true)
 	err = sendCh.ExchangeDeclare(exchangeName, exchangeType, false, false, false, false, nil)
 	if err != nil {
+		fmt.Printf("[RC][FATAL]Failed to declare exchange with rabbitMQ: %s\n", err)
 		utilities.FancyWarnPrint(utilities.REMOTE_PRINT, replicaID, "failed to declare exchange with rabbitMQ:", err)
 		return nil, err
 	}
 	//This queue will store messages sent from other replicas
 	replQueue, err := sendCh.QueueDeclare("", false, true, false, false, nil)
 	if err != nil {
+		fmt.Printf("[RC][FATAL]Failed to declare queue with rabbitMQ: %s\n", err)
 		utilities.FancyWarnPrint(utilities.REMOTE_PRINT, replicaID, "failed to declare queue with rabbitMQ:", err)
 		return nil, err
 	}
 	joinQueue, err := sendCh.QueueDeclare(joinQueueName, false, true, false, false, nil)
 	if err != nil {
+		fmt.Printf("[RC][FATAL]Failed to declare join queue with rabbitMQ: %s\n", err)
 		utilities.FancyWarnPrint(utilities.REMOTE_PRINT, replicaID, "failed to declare join queue with rabbitMQ:", err)
 		return nil, err
 	}
@@ -183,9 +349,10 @@ func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16
 	} else {
 		queueToListen = joinQueue
 	}
-	fmt.Printf("[RC%d]Queues names: %s, %s, %s\n", connID, replQueue.Name, joinQueue.Name, queueToListen.Name)
+	//fmt.Printf("[RC%d]Queues names: %s, %s, %s\n", connID, replQueue.Name, joinQueue.Name, queueToListen.Name)
 	recCh, err = sendCh.Consume(queueToListen.Name, "", true, false, false, false, nil)
 	if err != nil {
+		fmt.Printf("[RC][FATAL]Failed to obtain consumer from rabbitMQ: %s\n", err)
 		utilities.FancyWarnPrint(utilities.REMOTE_PRINT, replicaID, "failed to obtain consumer from rabbitMQ:", err)
 		return nil, err
 	}
@@ -200,7 +367,8 @@ func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16
 		conn:   conn,
 		recCh:  recCh,
 		//listenerChan:     make(chan ReplicatorMsg, defaultListenerSize),
-		listenerChan:  make(chan ReplicatorMsg),
+		//listenerChan:  make(chan ReplicatorMsg),
+		listenerChan:  make(chan ReplicatorMsg, 10),
 		replicaID:     replicaID,
 		replicaString: fmt.Sprint(replicaID),
 		//holdOperations:   make(map[int16]*HoldOperations),
@@ -212,33 +380,52 @@ func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16
 		workChan:         workChan,
 	}
 	if !isSelfConn {
-		fmt.Println("Listening to repl on connection to", ip, "with id", remote.connID)
+		fmt.Println("[RC]Listening to repl on connection to", ip, "with id", remote.connID)
 	} else {
-		fmt.Println("Listening to join on connection to", ip, "with id", remote.connID)
+		fmt.Println("[RC]Listening to join on connection to", ip, "with id", remote.connID)
 	}
 	go remote.startReceiver()
 	return
-}
+}*/
 
 func scalateTimeout(network, addr string) (conn net.Conn, err error) {
-	//Also control the timeout locally due to the localhost case which returns immediatelly
-	fmt.Println("[RC][ScalateTimeout function]")
-	nextTimeout := 2 * time.Second
+	//Also control the timeout locally due to the localhost case which returns immediatell
+	nextTimeout := 100 * time.Millisecond
 	lastAttempt := time.Now().UnixNano()
+	timeSincePrint := int64(0)
+	nAttempts := 0
 	for {
 		conn, err = net.DialTimeout(network, addr, nextTimeout)
 		if err == nil {
 			break
 		} else {
+			if nAttempts == 0 { //Force a longer first sleep
+				time.Sleep(2500 * time.Millisecond)
+			}
+			nAttempts++
 			//Controlling timeout locally
 			thisAttempt := time.Now().UnixNano()
 			if thisAttempt-lastAttempt < int64(nextTimeout) {
 				time.Sleep(nextTimeout - time.Duration(thisAttempt-lastAttempt))
 			}
+			timeSincePrint += (thisAttempt - lastAttempt) / int64(time.Millisecond)
 			lastAttempt = thisAttempt
-			nextTimeout += (nextTimeout / 4)
-			fmt.Println("[RC][ScalateTimeout function]Failed to connect to", addr, ". Retrying to connect...")
+			if nextTimeout < 1000 {
+				nextTimeout += 50
+			} else if nextTimeout < 1500 {
+				nextTimeout += 100
+			} else {
+				nextTimeout += (nextTimeout / 4)
+			}
+			if timeSincePrint > 1500 {
+				fmt.Printf("[RC][ScalateTimeout function]Failed to connect to %s already %d times. Still retrying to connect...\n", addr, nAttempts)
+				timeSincePrint = 0
+			}
+			//fmt.Println("[RC][ScalateTimeout function]Failed to connect to", addr, ". Retrying to connect...")
 		}
+	}
+	if conn == nil {
+		fmt.Printf("[RC][ScalateTimeout function][SERIOUS ERROR]Failed to connect to %s GIVING UP ON THIS CONNECTION! THIS IS UNEXPECTED. Error: %s\n", addr, err)
 	}
 	return
 }
@@ -247,6 +434,28 @@ func scalateTimeout(network, addr string) (conn net.Conn, err error) {
 func deleteRabbitMQStructures(ch *amqp.Channel) {
 	//Also deletes queue binds
 	ch.ExchangeDelete(exchangeName, false, false)
+}
+
+func (remote *RemoteConn) handleHoldSendMsgs() {
+	//fmt.Printf("[RC]Handling hold send messages. ConnID: %d. Current hold msgs: %d.\n", remote.connID, len(remote.sendHoldCh))
+	for len(remote.sendHoldCh) > 0 {
+		msg := <-remote.sendHoldCh
+		remote.sendCh.Publish(exchangeName, msg.topic, false, false, msg.publish)
+	}
+	//fmt.Printf("[RC]Finished first part of handling hold send messages. ConnID: %d. Current hold msgs: %d.\n", remote.connID, len(remote.sendHoldCh))
+	remote.connEstablished = true //Notify of connection established
+	hadTimeout := false
+	for !hadTimeout { //For some time, waits for extra requests in case the sender msg sees an old value of connEstablished. Note that Replication only happens once every 2s.
+		//fmt.Printf("[RC]Waiting for further hold send messages, or for a timer to fire up.\n")
+		select {
+		case msg := <-remote.sendHoldCh:
+			//fmt.Printf("[RC]Received a hold send message. ConnID: %d. Current hold msgs: %d.\n", remote.connID, len(remote.sendHoldCh))
+			remote.sendCh.Publish(exchangeName, msg.topic, false, false, msg.publish)
+		case <-time.After(5 * time.Second):
+			//fmt.Printf("[RC]Timeout waiting for hold send messages. Finished handling hold send messages. ConnID: %d. Current hold msgs: %d.\n", remote.connID, len(remote.sendHoldCh))
+			hadTimeout = true
+		}
+	}
 }
 
 /*
@@ -462,29 +671,68 @@ func (remote *RemoteConn) sendMsg(key string, data []byte) {
 	//start := time.Now()
 	if len(data) <= MAX_MSG_SIZE {
 		//fmt.Printf("[RC%d][SendMsg]Starting to send txn as a single msg. Size of msg: %.2f (MB). Started at: %s.\n", remote.connID, float64(len(data))/float64(1024*1024), start.Format("2006-01-02 15:04:05.000"))
-		remote.sendCh.Publish(exchangeName, key, false, false, amqp.Publishing{CorrelationId: remote.replicaString, Body: data})
+		remote.publishHelper(key, amqp.Publishing{CorrelationId: remote.replicaString, Body: data})
+		//remote.sendCh.Publish(exchangeName, key, false, false, amqp.Publishing{CorrelationId: remote.replicaString, Body: data})
 		/*end := time.Now()
 		fmt.Printf("[RC][SendMsg]Finished sending txn as a single msg. Size of msg: %.3f (MB). Started at: %s. Finished at: %s. Time taken: %d (ms)\n", float64(len(data))/float64(1024*1024),
 			start.Format("2006-01-02 15:04:05.000"), end.Format("2006-01-02 15:04:05.000"), (end.UnixNano()-start.UnixNano())/1000000)*/
 	} else {
-		remote.sendCh.Publish(exchangeName, bigTopicPrefix+key, false, false, amqp.Publishing{CorrelationId: remote.replicaString, AppId: strconv.Itoa(len(data)), Body: data[0:MAX_MSG_SIZE]})
-		//j := 1
-		//totalSent := MAX_MSG_SIZE
+		remote.publishHelper(bigTopicPrefix+key, amqp.Publishing{CorrelationId: remote.replicaString, AppId: strconv.Itoa(len(data)), Body: data[0:MAX_MSG_SIZE]})
+		//remote.sendCh.Publish(exchangeName, bigTopicPrefix+key, false, false, amqp.Publishing{CorrelationId: remote.replicaString, AppId: strconv.Itoa(len(data)), Body: data[0:MAX_MSG_SIZE]})
+		j := 1
+		totalSent := MAX_MSG_SIZE
 		//fmt.Printf("[RC%d][SendMsg]Sent part %d of txn. Size of curr msg: %d (%.2f MB). Size sent so far: %d (%.2f MB). Total size: %d (%.2f MB)\n",
-		//remote.connID, j, totalSent, float64(totalSent)/float64(1024*1024), totalSent, float64(totalSent)/float64(1024*1024), len(data), float64(len(data))/float64(1024*1024))
+		//	remote.connID, j, totalSent, float64(totalSent)/float64(1024*1024), totalSent, float64(totalSent)/float64(1024*1024), len(data), float64(len(data))/float64(1024*1024))
 		leftData := data[MAX_MSG_SIZE:]
 		for len(leftData) > 0 {
 			toSend := leftData
 			if len(toSend) > MAX_MSG_SIZE {
 				toSend = leftData[:MAX_MSG_SIZE]
 			}
-			remote.sendCh.Publish(exchangeName, bigTopicPrefix+key, false, false, amqp.Publishing{CorrelationId: remote.replicaString, Body: leftData})
-			//totalSent += len(toSend)
-			//j++
+			remote.publishHelper(bigTopicPrefix+key, amqp.Publishing{CorrelationId: remote.replicaString, Body: toSend})
+			//remote.sendCh.Publish(exchangeName, bigTopicPrefix+key, false, false, amqp.Publishing{CorrelationId: remote.replicaString, Body: toSend})
+			totalSent += len(toSend)
+			j++
 			//fmt.Printf("[RC%d][SendMsg]Sent part %d of txn. Size of curr msg: %d (%.2f MB). Size sent so far: %d (%.2f MB). Total size: %d (%.2f MB)\n",
-			//remote.connID, j, len(toSend), float64(len(toSend))/float64(1024*1024), totalSent, float64(totalSent)/float64(1024*1024), len(data), float64(len(data))/float64(1024*1024))
+			//	remote.connID, j, len(toSend), float64(len(toSend))/float64(1024*1024), totalSent, float64(totalSent)/float64(1024*1024), len(data), float64(len(data))/float64(1024*1024))
 			leftData = leftData[utilities.MinInt(MAX_MSG_SIZE, len(leftData)):]
 		}
+	}
+}
+
+func (remote *RemoteConn) SendStableClk(ts int64) {
+	utilities.FancyInfoPrint(utilities.REMOTE_PRINT, remote.replicaID, "Sending stable clk:", ts)
+	protobuf := createProtoStableClock(remote.replicaID, ts)
+	data, err := pb.Marshal(protobuf)
+	//_, err := pb.Marshal(protobuf)
+	if err != nil {
+		utilities.FancyErrPrint(utilities.REMOTE_PRINT, remote.replicaID, "Failed to generate bytes of stableClk request to send. Error:", err)
+	}
+	remote.publishHelper(clockTopic, amqp.Publishing{CorrelationId: remote.replicaString, Body: data})
+	//remote.sendCh.Publish(exchangeName, clockTopic, false, false, amqp.Publishing{CorrelationId: remote.replicaString, Body: data})
+}
+
+func (remote *RemoteConn) SendTrigger(trigger AutoUpdate, isGeneric bool) {
+	//Create new gob encoder (TODO: Try making this a variable that is used ONLY for triggers)
+	//Also note that this TODO won't work with new replicas for sure.
+
+	ci := CodingInfo{}.EncInitialize()
+	protobuf := CreateNewTrigger(trigger, isGeneric, ci)
+	data, err := pb.Marshal(protobuf)
+	if err != nil {
+		utilities.FancyErrPrint(utilities.REMOTE_PRINT, remote.replicaID, "Failed to generate bytes of trigger request to send. Error:", err)
+	}
+	remote.publishHelper(triggerTopic, amqp.Publishing{CorrelationId: remote.replicaString, Body: data})
+	//remote.sendCh.Publish(exchangeName, triggerTopic, false, false, amqp.Publishing{Body: data})
+}
+
+func (remote *RemoteConn) publishHelper(topic string, publish amqp.Publishing) {
+	if remote.connEstablished {
+		//fmt.Printf("[RC]Sending msg directly (connID %d)\n", remote.connID)
+		remote.sendCh.Publish(exchangeName, topic, false, false, publish)
+	} else {
+		//fmt.Printf("[RC]Connection not yet established for id %d. Holding msg.\n", remote.connID)
+		remote.sendHoldCh <- HoldSendMsg{topic: topic, publish: publish}
 	}
 }
 
@@ -511,16 +759,6 @@ func (remote *RemoteConn) txnToBuckets(txn RemoteTxn) (bucketOps map[string]map[
 		}
 	}
 	return
-}
-
-func (remote *RemoteConn) checkProtoError(err error, msg pb.Message, upds map[int][]crdt.UpdateObjectParams) {
-	switch typedProto := msg.(type) {
-	case *proto.ProtoReplicateTxn:
-		fmt.Println("[RC]Error creating ProtoReplicateTxn.")
-		fmt.Printf("%+v\n", typedProto)
-		fmt.Println(upds)
-		fmt.Println("[RC]Timestamp:", (clocksi.ClockSiTimestamp{}.FromBytes(typedProto.GetTimestamp())).ToSortedString())
-	}
 }
 
 /*
@@ -567,36 +805,12 @@ func (remote *RemoteConn) SendPartTxn(request *NewReplicatorRequest) {
 }
 */
 
-func (remote *RemoteConn) SendStableClk(ts int64) {
-	utilities.FancyInfoPrint(utilities.REMOTE_PRINT, remote.replicaID, "Sending stable clk:", ts)
-	protobuf := createProtoStableClock(remote.replicaID, ts)
-	data, err := pb.Marshal(protobuf)
-	//_, err := pb.Marshal(protobuf)
-	if err != nil {
-		utilities.FancyErrPrint(utilities.REMOTE_PRINT, remote.replicaID, "Failed to generate bytes of stableClk request to send. Error:", err)
-	}
-	remote.sendCh.Publish(exchangeName, clockTopic, false, false, amqp.Publishing{CorrelationId: remote.replicaString, Body: data})
-}
-
-func (remote *RemoteConn) SendTrigger(trigger AutoUpdate, isGeneric bool) {
-	//Create new gob encoder (TODO: Try making this a variable that is used ONLY for triggers)
-	//Also note that this TODO won't work with new replicas for sure.
-
-	ci := CodingInfo{}.EncInitialize()
-	protobuf := CreateNewTrigger(trigger, isGeneric, ci)
-	data, err := pb.Marshal(protobuf)
-	if err != nil {
-		utilities.FancyErrPrint(utilities.REMOTE_PRINT, remote.replicaID, "Failed to generate bytes of trigger request to send. Error:", err)
-	}
-	remote.sendCh.Publish(exchangeName, triggerTopic, false, false, amqp.Publishing{Body: data})
-}
-
 // This should not be called externally.
 func (remote *RemoteConn) startReceiver() {
-	fmt.Println("[RC]Receiver started")
+	//fmt.Println("[RC]Receiver started")
 	nTxnReceived := 0
 	for data := range remote.recCh {
-		utilities.FancyInfoPrint(utilities.REMOTE_PRINT, remote.replicaID, "Received something!")
+		//utilities.FancyInfoPrint(utilities.REMOTE_PRINT, remote.replicaID, "Received something!")
 		//fmt.Printf("[RC%d]Receiving something (%s) at: %s\n", remote.connID, data.RoutingKey, time.Now().String())
 		switch data.RoutingKey {
 		case clockTopic:
@@ -607,6 +821,8 @@ func (remote *RemoteConn) startReceiver() {
 			remote.handleReceivedTrigger(data.Body)
 		default:
 			if strings.HasPrefix(data.RoutingKey, bigTopicPrefix) {
+				//fmt.Printf("[RC%d]Received split message with size %d (%.2f MB) out of %s\n",
+				//	remote.connID, len(data.Body), float64(len(data.Body))/float64(1024*1024), data.AppId)
 				remote.receiveSplitMsg(data)
 			} else if strings.HasPrefix(data.RoutingKey, groupTopicPrefix) {
 				//Group
@@ -627,8 +843,8 @@ func (remote *RemoteConn) receiveSplitMsg(data amqp.Delivery) {
 	fullSize, _ := strconv.Atoi(data.AppId)
 	//fmt.Printf("[RC%d]Expecting to receive a total size of split message of: %d (%.2f MB)\n", remote.connID, fullSize, float64(fullSize)/float64(1024*1024))
 	buf, currI := make([]byte, fullSize), len(data.Body)
-	//fmt.Printf("[RC%d]Received a size of %d (%.2f MB). Total received so far: %d (%.2f MB)", remote.connID,
-	//len(data.Body), float64(len(data.Body))/float64(1024*1024), len(data.Body), float64(len(data.Body))/float64(1024*1024))
+	//fmt.Printf("[RC%d]Received a size of %d (%.2f MB). Total received so far: %d (%.2f MB)\n", remote.connID,
+	//	len(data.Body), float64(len(data.Body))/float64(1024*1024), len(data.Body), float64(len(data.Body))/float64(1024*1024))
 	//startTime := time.Now().UnixNano() / 1000000
 	copy(buf, data.Body)
 	//endTime := time.Now().UnixNano() / 1000000
@@ -939,63 +1155,73 @@ func (remote *RemoteConn) GetNextRemoteRequest() (request ReplicatorMsg) {
 /***** JOINING LOGIC *****/
 
 func (remote *RemoteConn) SendRemoteID(idData []byte) {
-	remote.sendCh.Publish(exchangeName, joinTopic, false, false,
+	/*err := remote.sendCh.Publish(exchangeName, joinTopic, false, false,
 		amqp.Publishing{CorrelationId: remote.replicaString, ContentType: remoteIDContent, Body: idData})
+	if err != nil {
+		fmt.Printf("[RC%d]Error sending remoteID: %s\n", remote.connID, err)
+		panic(err)
+	}*/
+	remote.publishHelper(joinTopic, amqp.Publishing{CorrelationId: remote.replicaString, ContentType: remoteIDContent, Body: idData})
 }
 
 func (remote *RemoteConn) SendJoin(joinData []byte) {
-	fmt.Println("[RC]Sending join as", remote.replicaID, remote.connID)
-	remote.sendCh.Publish(exchangeName, joinTopic, false, false,
-		amqp.Publishing{CorrelationId: remote.replicaString, ContentType: joinContent, Body: joinData})
+	fmt.Println("[RC]Sending/queing join as", remote.replicaID, remote.connID)
+	//remote.sendCh.Publish(exchangeName, joinTopic, false, false,
+	//amqp.Publishing{CorrelationId: remote.replicaString, ContentType: joinContent, Body: joinData})
+	remote.publishHelper(joinTopic, amqp.Publishing{CorrelationId: remote.replicaString, ContentType: joinContent, Body: joinData})
 }
 
 func (remote *RemoteConn) SendReplyJoin(req ReplyJoin) {
 	protobuf := createProtoReplyJoin(req)
 	data := remote.encodeProtobuf(protobuf, "Failed to generate bytes of ReplyJoin msg.")
-	remote.sendCh.Publish(exchangeName, joinTopic, false, false,
-		amqp.Publishing{CorrelationId: remote.replicaString, ContentType: replyJoinContent, Body: data})
+	//remote.sendCh.Publish(exchangeName, joinTopic, false, false,
+	//amqp.Publishing{CorrelationId: remote.replicaString, ContentType: replyJoinContent, Body: data})
+	remote.publishHelper(joinTopic, amqp.Publishing{CorrelationId: remote.replicaString, ContentType: replyJoinContent, Body: data})
 }
 
 func (remote *RemoteConn) SendRequestBucket(req RequestBucket) {
 	protobuf := createProtoRequestBucket(req)
 	data := remote.encodeProtobuf(protobuf, "Failed to generate bytes of RequestBucket msg.")
-	remote.sendCh.Publish(exchangeName, joinTopic, false, false,
-		amqp.Publishing{CorrelationId: remote.replicaString, ContentType: requestBktContent, Body: data})
+	//remote.sendCh.Publish(exchangeName, joinTopic, false, false,
+	//amqp.Publishing{CorrelationId: remote.replicaString, ContentType: requestBktContent, Body: data})
+	remote.publishHelper(joinTopic, amqp.Publishing{CorrelationId: remote.replicaString, ContentType: requestBktContent, Body: data})
 }
 
 func (remote *RemoteConn) SendReplyBucket(req ReplyBucket) {
 	protobuf := createProtoReplyBucket(req)
 	data := remote.encodeProtobuf(protobuf, "Failed to generate bytes of ReplyBucket msg.")
-	remote.sendCh.Publish(exchangeName, joinTopic, false, false,
-		amqp.Publishing{CorrelationId: remote.replicaString, ContentType: replyBktContent, Body: data})
+	//remote.sendCh.Publish(exchangeName, joinTopic, false, false,
+	//amqp.Publishing{CorrelationId: remote.replicaString, ContentType: replyBktContent, Body: data})
+	remote.publishHelper(joinTopic, amqp.Publishing{CorrelationId: remote.replicaString, ContentType: replyBktContent, Body: data})
 }
 
 func (remote *RemoteConn) SendReplyEmpty() {
 	protobuf := createProtoReplyEmpty()
 	data := remote.encodeProtobuf(protobuf, "Failed to generate bytes of ReplyEmpty msg.")
-	remote.sendCh.Publish(exchangeName, joinTopic, false, false,
-		amqp.Publishing{CorrelationId: remote.replicaString, ContentType: replyEmptyContent, Body: data})
+	//remote.sendCh.Publish(exchangeName, joinTopic, false, false,
+	//amqp.Publishing{CorrelationId: remote.replicaString, ContentType: replyEmptyContent, Body: data})
+	remote.publishHelper(joinTopic, amqp.Publishing{CorrelationId: remote.replicaString, ContentType: replyEmptyContent, Body: data})
 }
 
 func (remote *RemoteConn) handleReceivedJoinTopic(msgType string, data []byte) {
 	switch msgType {
 	case remoteIDContent:
-		fmt.Println("Join msg is a remoteID")
+		//fmt.Println("Join msg is a remoteID")
 		remote.handleRemoteID(data)
 	case joinContent:
-		fmt.Println("Join msg is a join")
+		//fmt.Println("Join msg is a join")
 		remote.handleJoin(data)
 	case replyJoinContent:
-		fmt.Println("Join msg is a replyJoin")
+		//fmt.Println("Join msg is a replyJoin")
 		remote.handleReplyJoin(data)
 	case requestBktContent:
-		fmt.Println("Join msg is a requestBkt")
+		//fmt.Println("Join msg is a requestBkt")
 		remote.handleRequestBkt(data)
 	case replyBktContent:
-		fmt.Println("Join msg is a replyBkt")
+		//fmt.Println("Join msg is a replyBkt")
 		remote.handleReplyBkt(data)
 	case replyEmptyContent:
-		fmt.Println("Join msg is a replyEmpty")
+		//fmt.Println("Join msg is a replyEmpty")
 		remote.handleReplyEmpty(data)
 	default:
 		fmt.Printf("Unexpected join msg, ignored: %s\n", msgType)
@@ -1006,6 +1232,7 @@ func (remote *RemoteConn) handleRemoteID(data []byte) {
 	protobuf := &proto.ProtoRemoteID{}
 	remote.decodeProtobuf(protobuf, data, "Failed to decode bytes of received protoRemoteID. Error:")
 	senderID := int16(protobuf.GetReplicaID())
+	fmt.Println("[RC]Join msg is a remoteID. RemoteID from:", senderID, remote.connID, "at", time.Now().Format("15:04:05.000"))
 	remote.listenerChan <- &RemoteID{SenderID: senderID, Buckets: protobuf.GetMyBuckets(), IP: protobuf.GetMyIP()}
 }
 
@@ -1013,7 +1240,7 @@ func (remote *RemoteConn) handleJoin(data []byte) {
 	protobuf := &proto.ProtoJoin{}
 	remote.decodeProtobuf(protobuf, data, "Failed to decode bytes of received protoJoin. Error:")
 	otherBkts, senderID, ip := protoToJoin(protobuf)
-	fmt.Println("Join from:", senderID, remote.connID)
+	fmt.Println("[RC]Join msg is a join. Join from:", senderID, remote.connID)
 
 	commonBkts := make([]string, len(otherBkts))
 	nCommon := 0
@@ -1036,7 +1263,7 @@ func (remote *RemoteConn) handleReplyJoin(data []byte) {
 	protobuf := &proto.ProtoReplyJoin{}
 	remote.decodeProtobuf(protobuf, data, "Failed to decode bytes of received protoReplyJoin. Error:")
 	buckets, clks, senderID := protoToReplyJoin(protobuf)
-	fmt.Println("ReplyJoin from:", senderID, remote.connID, remote.sendCh)
+	fmt.Println("[RC]Join msg is a replyJoin. ReplyJoin from:", senderID, remote.connID, remote.sendCh)
 	remote.listenerChan <- &ReplyJoin{SenderID: senderID, ReplyID: remote.connID, Clks: clks, CommonBkts: buckets, ReqIP: protobuf.GetReplicaIP()}
 }
 
@@ -1044,7 +1271,7 @@ func (remote *RemoteConn) handleRequestBkt(data []byte) {
 	protobuf := &proto.ProtoRequestBucket{}
 	remote.decodeProtobuf(protobuf, data, "Failed to decode bytes of received protoRequestBucket. Error:")
 	buckets, senderID := protoToRequestBucket(protobuf)
-	fmt.Println("RequestBkt from:", senderID, remote.connID)
+	fmt.Println("[RC]Join msg is a requestBkt. RequestBkt from:", senderID, remote.connID)
 	remote.listenerChan <- &RequestBucket{SenderID: senderID, ReplyID: remote.connID, Buckets: buckets, ReqIP: protobuf.GetReplicaIP()}
 }
 
@@ -1052,7 +1279,7 @@ func (remote *RemoteConn) handleReplyBkt(data []byte) {
 	protobuf := &proto.ProtoReplyBucket{}
 	remote.decodeProtobuf(protobuf, data, "Failed to decode bytes of received protoReplyBucket. Error:")
 	states, clk, senderID := protoToReplyBucket(protobuf)
-	fmt.Println("ReplyBkt from:", senderID, remote.connID)
+	fmt.Println("[RC]Join msg is a replyBkt. ReplyBkt from:", senderID, remote.connID)
 	remote.listenerChan <- &ReplyBucket{SenderID: senderID, PartStates: states, Clk: clk}
 }
 
@@ -1073,4 +1300,14 @@ func (remote *RemoteConn) encodeProtobuf(protobuf pb.Message, errMsg string) (da
 		utilities.FancyErrPrint(utilities.REMOTE_PRINT, remote.replicaID, errMsg, err)
 	}
 	return
+}
+
+func (remote *RemoteConn) checkProtoError(err error, msg pb.Message, upds map[int][]crdt.UpdateObjectParams) {
+	switch typedProto := msg.(type) {
+	case *proto.ProtoReplicateTxn:
+		fmt.Println("[RC]Error creating ProtoReplicateTxn.")
+		fmt.Printf("%+v\n", typedProto)
+		fmt.Println(upds)
+		fmt.Println("[RC]Timestamp:", (clocksi.ClockSiTimestamp{}.FromBytes(typedProto.GetTimestamp())).ToSortedString())
+	}
 }

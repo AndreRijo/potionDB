@@ -55,8 +55,9 @@ func (args AvgFullState) GetREADType() proto.READType { return proto.READType_GE
 func (args AddMultipleValue) MustReplicate() bool { return true }
 
 func (args AvgGetFullArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_AVG }
-
 func (args AvgGetFullArguments) GetREADType() proto.READType { return proto.READType_GET_FULL_AVG }
+func (args AvgGetFullArguments) HasInnerReads() bool         { return false }
+func (args AvgGetFullArguments) HasVariables() bool          { return false }
 
 // Note: crdt can (and most often will be) nil
 func (crdt *AvgCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
@@ -72,6 +73,8 @@ func (crdt *AvgCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaI
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete)
 	return crdt
 }
+
+func (crdt *AvgCrdt) IsBigCRDT() bool { return false }
 
 func (crdt *AvgCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
 	switch args.(type) {

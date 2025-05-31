@@ -57,6 +57,8 @@ func (crdt *GMapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (n
 	return
 }
 
+func (crdt *GMapCrdt) IsBigCRDT() bool { return false }
+
 func (crdt *GMapCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
 	switch typedArg := args.(type) {
 	case StateReadArguments:

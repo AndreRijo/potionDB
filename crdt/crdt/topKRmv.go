@@ -238,10 +238,14 @@ func (args TopKValueState) GetREADType() proto.READType { return proto.READType_
 // Reads
 func (args GetTopNArguments) GetCRDTType() proto.CRDTType           { return proto.CRDTType_TOPK_RMV }
 func (args GetTopNArguments) GetREADType() proto.READType           { return proto.READType_GET_N }
+func (args GetTopNArguments) HasInnerReads() bool                   { return false }
+func (args GetTopNArguments) HasVariables() bool                    { return false }
 func (args GetTopKAboveValueArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPK_RMV }
 func (args GetTopKAboveValueArguments) GetREADType() proto.READType {
 	return proto.READType_GET_ABOVE_VALUE
 }
+func (args GetTopKAboveValueArguments) HasInnerReads() bool { return false }
+func (args GetTopKAboveValueArguments) HasVariables() bool  { return false }
 
 const (
 	cacheSortedSet = true //If topN query should cache the sorted set of elems until an update is applied
@@ -277,6 +281,8 @@ func (crdt *TopKRmvCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, repl
 	crdt.CRDTVM, crdt.replicaID = (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete), replicaID
 	return crdt
 }
+
+func (crdt *TopKRmvCrdt) IsBigCRDT() bool { return crdt.maxElems > 100 && len(crdt.elems) > 100 }
 
 func (crdt *TopKRmvCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
 	//TODO: Consider updsNotYetApplied in all of these
@@ -638,7 +644,7 @@ func (crdt *TopKRmvCrdt) applyAddAll(op *DownstreamTopKAddAll) (effect *Effect, 
 				downRemoves.Vc[nRemoves] = remsVc
 				nRemoves++
 				effectValue = NoEffect{}
-				fmt.Println("[TOPKRMV]Apply add is returning a new remove.")
+				//fmt.Println("[TOPKRMV]Apply add is returning a new remove.")
 			}
 			listEffect.effects[nEffects] = &effectValue
 			nEffects++
@@ -746,7 +752,7 @@ func (crdt *TopKRmvCrdt) applyAdd(op *DownstreamTopKAdd) (effect *Effect, otherD
 		//Must return this remove to propagate to other replicas
 		otherDownstreamArgs = DownstreamTopKRemove{Id: op.Id, Vc: remsVc}
 		effectValue = NoEffect{}
-		fmt.Println("[TOPKRMV]Apply add is returning a new remove.")
+		//fmt.Println("[TOPKRMV]Apply add is returning a new remove.")
 	}
 	return &effectValue, otherDownstreamArgs
 }

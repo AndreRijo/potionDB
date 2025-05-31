@@ -57,6 +57,8 @@ var (
 	testCRDT           crdt.CRDT
 	testState          crdt.State
 	marshalledTestData []byte
+
+	start time.Time
 )
 
 func getCRDT(keyP crdt.KeyParams) crdt.CRDT {
@@ -84,17 +86,25 @@ const (
 var trash []byte
 
 func main() {
+	start = time.Now()
+	fmt.Printf("[PS]Started loading PotionDB at %s\n", start.Format("15:04:05.000"))
 	//debug.SetGCPercent(-1)
+	cancelChan := make(chan os.Signal, 1)
+	signal.Notify(cancelChan, syscall.SIGTERM, syscall.SIGINT)
+	readyChan := make(chan bool, 1)
+	go checkSigtermUntilStartupFinishes(cancelChan, readyChan)
 
 	rand.Seed(time.Now().UTC().UnixNano())
 	configs := loadConfigs()
 	trash = make([]byte, configs.GetIntConfig("initialMem", 0))
 	floatSize := float64(len(trash))
-	fmt.Printf("Setting an initial empty array of size %.4f GB\n", floatSize/1000000000)
+	fmt.Printf("[PS]Setting an initial empty array of size %.4f GB\n", floatSize/1000000000)
 	startProfiling(configs)
 
-	portString := configs.GetOrDefault(PORT_KEY, "8887")
+	portString := configs.GetOrDefault(PORT_KEY, "8887 35548")
 	ports := strings.Split(portString, " ")
+	shared.PotionDBPort, _ = strconv.Atoi(ports[0])
+	ports = append(ports, strconv.Itoa(shared.PotionDBPort*4%65535)) //Special port for initial S2S.
 	//tmpId, _ := strconv.ParseInt(portString, 0, 64)
 	//tmpId2, _ := strconv.ParseInt(configs.GetConfig("potionDBID"), 10, 64)
 	//id := int16((tmpId + tmpId2) % math.MaxInt16)
@@ -104,13 +114,13 @@ func main() {
 
 	antidote.SetVMToUse()
 	tm := antidote.Initialize(id)
-	handleTC(configs)
+	go handleTC(configs)
+	time.Sleep(150 * time.Millisecond)
 
 	doDataload := configs.GetBoolConfig(DO_TPCH_DATALOAD, false)
 	fmt.Println(configs.GetConfig(DO_TPCH_DATALOAD))
 	dp := antidote.DataloadParameters{}
 	if doDataload {
-		fmt.Println("[PS]DoDataload")
 		sf, dataLoc, region := configs.GetFloatConfig("scale", 1.0), configs.GetConfig("dataLoc"), int8(configs.GetIntConfig("region", -1))
 		dp.Region, dp.Sf, dp.DataLoc, dp.Tm, dp.IsTMReady = region, sf, dataLoc, tm, make(chan bool, 1)
 		doIndexload := configs.GetBoolConfig("doIndexload", false)
@@ -118,59 +128,47 @@ func main() {
 			dp.IndexConfigs = tpch.IndexConfigs{
 				IsGlobal: configs.GetBoolConfig("isGlobal", true), IndexFullData: configs.GetBoolConfig("indexFullData", true),
 				UseTopKAll: configs.GetBoolConfig("useTopKAll", true), UseTopSum: configs.GetBoolConfig("useTopSum", true),
-				QueryNumbers: strings.Split(configs.GetOrDefault("queryNumbers", "3 5 11 14 15 18"), " "),
+				//QueryNumbers: strings.Split(configs.GetOrDefault("queryNumbers", "3 5 11 14 15 18"), " "),
+				QueryNumbers: strings.Split(configs.GetOrDefault("queryNumbers", "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22"), " "),
 			}
-			fmt.Println("[PS]QueryNumbers: ", dp.QueryNumbers)
+			fmt.Println("[PS]Doing dataload and indexload. QueryNumbers: ", dp.QueryNumbers)
 			if protobufTestMode > 0 { //Pretend to be region 0 so that indexes still load
 				dp.Region = 0
 			}
+		} else {
+			fmt.Println("[PS]Doing dataload but not doing indexload.")
 		}
 		go antidote.LoadData(dp)
 	} else {
-		fmt.Println("[PS]Not doing dataload")
+		fmt.Println("[PS]Not doing dataload nor indexload.")
 	}
 
-	fmt.Println("ReplicaID:", id)
-	connChan := make(chan net.Conn, 100)
+	fmt.Println("[PS]ReplicaID:", id)
+	connChan := make(chan net.Conn, 500)
 	listenerChans := make([]chan bool, len(ports))
 
+	time.Sleep(250 * time.Millisecond)
 	//Start listeners early but only start processing once TM is ready
-	//This is helpful to speed up the dataloading process and initial creating of S2S connections.
+	//This is helpful to speed up the dataloading process and initial creation of S2S connections.
 	for i, port := range ports {
-		listenerChans[i] = make(chan bool, 1)
-		go startListener(port, id, tm, connChan, listenerChans[i])
+		if i == len(ports)-1 {
+			listenerChans[i] = make(chan bool, 1) //Unused for now but here to avoid nil exception when PotionDB gets ready.
+			go startS2SListener(port, id, tm)
+		} else {
+			listenerChans[i] = make(chan bool, 1)
+			go startListener(port, id, tm, connChan, listenerChans[i])
+		}
 	}
 
 	//Wait for joining mechanism, if it's enabled
-	if configs.GetBoolConfig(DO_JOIN, true) {
-		fmt.Println("Joining existing servers, please stand by...")
-		tm.WaitUntilReady()
-		fmt.Println("Join complete, starting PotionDB.")
-	} else {
-		fmt.Println("Waiting for replicaIDs of existing replicas...")
-		tm.WaitUntilReady()
-		fmt.Println("All replicaIDs are now known, starting PotionDB.")
-	}
-	if doDataload {
-		dp.IsTMReady <- true
-	}
+	waitForTM(doDataload, configs.GetBoolConfig(DO_JOIN, true), tm, dp)
 
 	for i, port := range ports {
-		fmt.Println("PotionDB started at port", port, "with ReplicaID", id)
+		fmt.Println("[PS]PotionDB started at port", port, "with ReplicaID", id, "at", time.Now().Format("15:04:05.000"))
 		listenerChans[i] <- true
 	}
-	if shared.IsCRDTDisabled {
-		fmt.Println("[WARNING]CRDTs are disabled - all CRDTs will be replaced with EmptyCRDTs. " +
-			"This should only be used for debugging/specific performance analysis.")
-	}
-	if shared.IsLogDisabled {
-		fmt.Println("[WARNING]Logging is disabled - no records will be kept of the opeations done. " +
-			"This also means Replication will not work. This should only be used for debugging/specific performance analysis.")
-	}
-	if shared.IsReplDisabled {
-		fmt.Println("[WARNING]Replication is disabled - no updates will be sent or received to/from other replicas. " +
-			"This should only be used for debugging/specific performance analysis.")
-	}
+
+	checkDisabledComponents()
 
 	/*if len(ports) > 1 {
 		for _, port := range ports[1:] {
@@ -224,9 +222,9 @@ func main() {
 		testCRDT, testState, marshalledTestData = crdtTestMap[firstKeyHash], stateTestMap[firstKeyHash], marshallTestMap[firstKeyHash]
 		fmt.Println("[ProtoServer]Prepared CRDTs for testing in protoServer. Testing mode:", protobufTestMode)
 
-	} else {
+	} /*else {
 		fmt.Println("[ProtoServer]Not running protobuf benchmarking.")
-	}
+	}*/
 
 	/*go func() {
 		time.Sleep(18 * time.Second)
@@ -256,7 +254,23 @@ func main() {
 	}()*/
 
 	//Block so that the server does not close
-	select {}
+	//select {}
+	readyChan <- true //No longer need the other goroutine to look into cancelChan.
+	fmt.Printf("[PS]Listening for shutdown signal at %s...\n", time.Now().String())
+	sig := <-cancelChan
+	fmt.Printf("[PS]Caught signal %v at %s: sending shut down signal to TM.\n", sig, time.Now().String())
+	time.Sleep(500 * time.Millisecond)
+	start := time.Now().UnixNano()
+	tm.ShutDown()
+	end := time.Now().UnixNano()
+	diffMs := (end - start) / int64(time.Millisecond)
+	if diffMs < 500 {
+		fmt.Printf("[PS]TM sucessfully shut down in %d milliseconds. Waiting for half a second before shutting down PotionDB.\n", diffMs)
+		time.Sleep(time.Duration(500-diffMs) * time.Millisecond)
+	} else {
+		fmt.Printf("[PS]TM successfully shut down.\n")
+	}
+	fmt.Printf("[PS]Shutting down PotionDB at %s.\n", time.Now().String())
 }
 
 // Listens to new connections on ports other than the main one while PotionDB isn't ready.
@@ -284,12 +298,29 @@ func listenToConnections(server net.Listener, port string, id int16, tm *antidot
 	fmt.Println("PotionDB started at port", port, "with ReplicaID", id)
 }
 
+func startS2SListener(port string, id int16, tm *antidote.TransactionManager) {
+	server, err := net.Listen("tcp", "0.0.0.0:"+strings.TrimSpace(port))
+	utilities.CheckErr(utilities.PORT_ERROR, err)
+	//Stop listening to port on shutdown
+	defer server.Close()
+	fmt.Printf("[PS]Started S2S-only listener at port %s at %s.\n", port, time.Now().Format("15:04:05.000"))
+
+	for {
+		//fmt.Printf("[PS]Waiting for S2S connection on port %s...\n", port)
+		conn, err := server.Accept()
+		//fmt.Printf("[PS]Accepted S2S connection on port %s...\n", port)
+		utilities.CheckErr(utilities.NEW_CONN_ERROR, err)
+		go processS2SConnection(conn, tm, id)
+	}
+}
+
 func startListener(port string, id int16, tm *antidote.TransactionManager, connChan chan net.Conn, listenerChan chan bool) {
 	server, err := net.Listen("tcp", "0.0.0.0:"+strings.TrimSpace(port))
 	utilities.CheckErr(utilities.PORT_ERROR, err)
 	//Stop listening to port on shutdown
 	defer server.Close()
 	ready := false
+	fmt.Printf("[PS]Started listener at port %s at %s.\n", port, time.Now().Format("15:04:05.000"))
 
 	for !ready {
 		conn, err := server.Accept()
@@ -328,6 +359,32 @@ func startListener(port string, id int16, tm *antidote.TransactionManager) {
 }
 */
 
+func processS2SConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID int16) {
+	defer conn.Close()
+	tmChan := tm.CreateClientHandler()
+	var s2sChan chan antidote.TMS2SReply
+
+	for {
+		//fmt.Printf("[PS][S2SConnection]Waiting for proto,\n")
+		protoType, protobuf, err := antidote.ReceiveProto(conn)
+		//fmt.Printf("[PS][S2SConnection]Received proto %v\n", protoType)
+		if err != nil {
+			conn.Close()
+			return
+		}
+		switch protoType {
+		case antidote.ServerConnReplicaID:
+			//fmt.Println("[PS][S2SConnection]Received ServerConnReplicaID")
+			s2sChan = handleServerConnReplicaID(protobuf.(*proto.ApbServerConnReplicaID), tmChan, conn)
+			//fmt.Println("[PS][S2SConnection]Finished processing ServerConnReplicaID")
+		case antidote.S2S:
+			handleServerToServer(protobuf.(*proto.S2SWrapper), tmChan, s2sChan, conn, tm)
+		default:
+			fmt.Println("[WARNING][PS][S2SConnection]Received unknown proto, ignored... sort of")
+		}
+	}
+}
+
 /*
 Handles a connection initiated by a new client.
 Connection protocol (for both client and server):
@@ -338,6 +395,7 @@ conn - the TCP connection between the client and this server.
 */
 func processConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID int16) {
 	utilities.FancyDebugPrint(utilities.PROTO_PRINT, replicaID, "Accepted connection.")
+	defer conn.Close()
 	tmChan := tm.CreateClientHandler()
 	//TODO: Change this to a random ID generated inside the transaction. This ID should be different from transaction to transaction
 	//The current solution can give problems in the Materializer when a commited transaction is put on hold and another transaction from the same client arrives
@@ -352,6 +410,7 @@ func processConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID
 		for {
 			protoType, protobuf, err := antidote.ReceiveProto(conn)
 			if err != nil {
+				conn.Close()
 				return
 			}
 			switch protoType {
@@ -380,10 +439,8 @@ func processConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID
 	}
 
 	for {
-		//TODO: Handle when client breaks connection or sends invalid data
-		//Possible invalid data case (e.g.): sends code for "StaticUpdateObjs" but instead sends a protobuf of another type (e.g: StartTrans)
 		//Read protobuf
-		utilities.FancyDebugPrint(utilities.PROTO_PRINT, replicaID, "Waiting for client's request...")
+		//utilities.FancyDebugPrint(utilities.PROTO_PRINT, replicaID, "Waiting for client's request...")
 		protoType, protobuf, err := antidote.ReceiveProto(conn)
 		//This works in MacOS, but not on windows. For now we'll add any error here
 		//if err == io.EOF
@@ -394,15 +451,15 @@ func processConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID
 					utilities.FancyDebugPrint(utilities.PROTO_PRINT, replicaID, "Connection closed by client.")
 					fmt.Println("[ProtoServer]Connection closed by client, shutting down handler. Leaving connection open however at timestamp" + date)
 				*/
-				tmChan <- antidote.TransactionManagerRequest{Args: antidote.TMConnLostArgs{}}
 				conn.Close()
+				tmChan <- antidote.TransactionManagerRequest{Args: antidote.TMConnLostArgs{}}
 			} else {
-				date := time.Now().String()
-				fmt.Printf("[ProtoServer]Error on reading proto from client, putting connection to sleep. Type: %v, proto: %v, error: %s, time: %s\n", protoType, protobuf, err, date)
-				time.Sleep(3 * time.Second)
-				fmt.Println("[ProtoServer]Closing connection due to error at time", time.Now().String(), ".But for now, actually leaving connection open.")
-				tmChan <- antidote.TransactionManagerRequest{Args: antidote.TMConnLostArgs{}}
 				conn.Close()
+				date := time.Now().String()
+				fmt.Printf("[ProtoServer]Error on reading proto from client, closing connection.. Type: %v, proto: %v, error: %s, time: %s\n", protoType, protobuf, err, date)
+				//time.Sleep(3 * time.Second)
+				//fmt.Println("[ProtoServer]Closing connection due to error at time", time.Now().String(), ".But for now, actually leaving connection open.")
+				tmChan <- antidote.TransactionManagerRequest{Args: antidote.TMConnLostArgs{}}
 			}
 			return
 		}
@@ -443,14 +500,22 @@ func processConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID
 			//antidote.SendProtoMarshal(replyType, defaultTopKMarshal, conn)
 			//continue
 			//reply = defaultTopKProto
-			reply = handleStaticReadObjects(protobuf.(*proto.ApbStaticReadObjects), tmChan, clientId)
+			if protobufTestMode > 0 {
+				reply = handleProtoTestRead(protobuf, protoType)
+			} else {
+				reply = handleStaticReadObjects(protobuf.(*proto.ApbStaticReadObjects), tmChan, clientId)
+			}
 		case antidote.StaticRead:
 			utilities.FancyDebugPrint(utilities.PROTO_PRINT, replicaID, "Received proto of type ApbStaticRead")
 			replyType = antidote.StaticReadObjsReply
 			//antidote.SendProtoMarshal(replyType, defaultTopKMarshal, conn)
 			//continue
 			//reply = defaultTopKProto
-			reply = handleStaticRead(protobuf.(*proto.ApbStaticRead), tmChan, clientId)
+			if protobufTestMode > 0 {
+				reply = handleProtoTestRead(protobuf, protoType)
+			} else {
+				reply = handleStaticRead(protobuf.(*proto.ApbStaticRead), tmChan, clientId)
+			}
 		case antidote.NewTrigger:
 			utilities.FancyDebugPrint(utilities.PROTO_PRINT, replicaID, "Received proto of type ApbNewTrigger")
 			replyType = antidote.NewTriggerReply
@@ -469,11 +534,19 @@ func processConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID
 		case antidote.S2S:
 			handleServerToServer(protobuf.(*proto.S2SWrapper), tmChan, s2sChan, conn, tm)
 			continue
+		case antidote.ServerConnReplicaID:
+			s2sChan = handleServerConnReplicaID(protobuf.(*proto.ApbServerConnReplicaID), tmChan, conn)
+			continue
 		case antidote.SQLString:
 			handleSQLString(protobuf.(*proto.ApbStringSQL), tmChan, clientId)
 			continue //TODO
 		case antidote.SQLTyped:
 			continue //TODO
+		case antidote.MultiConnect:
+			nClients := int(*protobuf.(*proto.ApbMultiClientConnect).NClients)
+			channels, replyChan := tm.UpgradeHandlerToMultiClient(tmChan, nClients)
+			handleMultiClient(conn, channels, replyChan, nClients, clientId)
+			return //If we ever get here, it means the connection was closed and we should just return gracefully.
 		default:
 			utilities.FancyErrPrint(utilities.PROTO_PRINT, replicaID, "Received unknown proto, ignored... sort of")
 			fmt.Println("I don't know how to handle this proto", protoType)
@@ -482,7 +555,15 @@ func processConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID
 		if reply == nil {
 			fmt.Println("[ProtoServer]Warning - Nil reply!")
 		}
-		antidote.SendProto(replyType, reply, conn)
+		//tsStart := time.Now().UnixNano()
+		err = antidote.SendProtoNoCheck(replyType, reply, conn)
+		if err != nil {
+			conn.Close()
+			fmt.Printf("[ProtoServer]Error on sending proto to client: %s. Closing connection.\n", err)
+			return
+		}
+		//tsEnd := time.Now().UnixNano()
+		//fmt.Printf("[PS]Protobuf sending took %d microseconds.\n", (tsEnd-tsStart)/int64(time.Duration(time.Microsecond)))
 	}
 }
 
@@ -526,52 +607,479 @@ func prepareTopKProtobuf() {
 	defaultTopKMarshal, _ = pb.Marshal(defaultTopKProto)
 }*/
 
-// TODO: Error cases in which it should return ApbErrorResp
 func handleStaticReadObjects(proto *proto.ApbStaticReadObjects,
 	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbStaticReadObjectsResp) {
 
-	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransaction().GetTimestamp())
-
-	objs := antidote.ProtoObjectsToAntidoteObjects(proto.GetObjects())
-	replyChan := make(chan antidote.TMStaticReadReply)
-
-	if protobufTestMode > 0 {
-		respProto = handleProtoTestRead(objs, txnId, clientClock)
-		return
-	}
-
-	tmChan <- createTMRequest(antidote.TMStaticReadArgs{ReadParams: objs, ReplyChan: replyChan}, txnId, clientClock)
-
+	replyChan, txnId := sendTMStaticReadObjectsRequest(proto, tmChan, clientId)
 	reply := <-replyChan
 	close(replyChan)
+	return antidote.CreateStaticReadResp(reply.States, txnId, reply.Timestamp)
+}
 
-	respProto = antidote.CreateStaticReadResp(reply.States, txnId, reply.Timestamp)
-	return
+func sendTMStaticReadObjectsRequest(proto *proto.ApbStaticReadObjects,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (replyChan chan antidote.TMStaticReadReply, txnId antidote.TransactionId) {
+
+	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransaction().GetTimestamp())
+	objs := antidote.ProtoObjectsToAntidoteObjects(proto.GetObjects())
+	replyChan = make(chan antidote.TMStaticReadReply)
+	tmChan <- createTMRequest(antidote.TMStaticReadArgs{ReadParams: objs, ReplyChan: replyChan}, txnId, clientClock)
+	return replyChan, txnId
 }
 
 func handleStaticRead(proto *proto.ApbStaticRead,
 	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbStaticReadObjectsResp) {
 
-	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransaction().GetTimestamp())
-
-	objs := antidote.ProtoReadToAntidoteObjects(proto.GetFullreads(), proto.GetPartialreads())
-	replyChan := make(chan antidote.TMStaticReadReply)
-
-	if protobufTestMode > 0 {
-		respProto = handleProtoTestRead(objs, txnId, clientClock)
-		return
-	}
-
-	tmChan <- createTMRequest(antidote.TMStaticReadArgs{ReadParams: objs, ReplyChan: replyChan}, txnId, clientClock)
-
+	replyChan, txnId := sendTMStaticReadRequest(proto, tmChan, clientId)
 	reply := <-replyChan
 	close(replyChan)
+	return antidote.CreateStaticReadResp(reply.States, txnId, reply.Timestamp)
+}
 
-	respProto = antidote.CreateStaticReadResp(reply.States, txnId, reply.Timestamp)
+func sendTMStaticReadRequest(proto *proto.ApbStaticRead,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (replyChan chan antidote.TMStaticReadReply, txnId antidote.TransactionId) {
+
+	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransaction().GetTimestamp())
+	objs := antidote.ProtoReadToAntidoteObjects(proto.GetFullreads(), proto.GetPartialreads())
+	replyChan = make(chan antidote.TMStaticReadReply)
+	tmChan <- createTMRequest(antidote.TMStaticReadArgs{ReadParams: objs, ReplyChan: replyChan}, txnId, clientClock)
+	return replyChan, txnId
+}
+
+func handleStaticUpdateObjects(proto *proto.ApbStaticUpdateObjects,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbCommitResp) {
+
+	replyChan, _ := sendTMStaticUpdateObjects(proto, tmChan, clientId)
+	reply := <-replyChan
+	close(replyChan)
+	ignore(reply.Err)
+	return antidote.CreateCommitOkResp(reply.TransactionId, reply.Timestamp)
+}
+
+func sendTMStaticUpdateObjects(proto *proto.ApbStaticUpdateObjects,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (replyChan chan antidote.TMStaticUpdateReply, txnId antidote.TransactionId) {
+
+	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransaction().GetTimestamp())
+	updates := antidote.ProtoUpdateOpToAntidoteUpdate(proto.GetUpdates())
+	replyChan = make(chan antidote.TMStaticUpdateReply)
+	tmChan <- createTMRequest(antidote.TMStaticUpdateArgs{UpdateParams: updates, ReplyChan: replyChan}, txnId, clientClock)
+	return replyChan, txnId
+}
+
+func handleReadObjects(proto *proto.ApbReadObjects,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbReadObjectsResp) {
+
+	replyChan, _ := sendTMReadObjects(proto, tmChan, clientId)
+	reply := <-replyChan
+	close(replyChan)
+	return antidote.CreateReadObjectsResp(reply)
+}
+
+func sendTMReadObjects(proto *proto.ApbReadObjects,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (replyChan chan []crdt.State, txnId antidote.TransactionId) {
+
+	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransactionDescriptor())
+	objs := antidote.ProtoObjectsToAntidoteObjects(proto.GetBoundobjects())
+	replyChan = make(chan []crdt.State)
+	tmChan <- createTMRequest(antidote.TMReadArgs{ReadParams: objs, ReplyChan: replyChan}, txnId, clientClock)
+	return replyChan, txnId
+}
+
+func handleRead(proto *proto.ApbRead,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbReadObjectsResp) {
+
+	replyChan, _ := sendTMRead(proto, tmChan, clientId)
+	reply := <-replyChan
+	close(replyChan)
+	return antidote.CreateReadObjectsResp(reply)
+}
+
+func sendTMRead(proto *proto.ApbRead,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (replyChan chan []crdt.State, txnId antidote.TransactionId) {
+
+	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransactionDescriptor())
+	objs := antidote.ProtoReadToAntidoteObjects(proto.GetFullreads(), proto.GetPartialreads())
+	replyChan = make(chan []crdt.State)
+	tmChan <- createTMRequest(antidote.TMReadArgs{ReadParams: objs, ReplyChan: replyChan}, txnId, clientClock)
+	return replyChan, txnId
+}
+
+func handleUpdateObjects(proto *proto.ApbUpdateObjects,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbOperationResp) {
+
+	replyChan, _ := sendTMUpdateObjects(proto, tmChan, clientId)
+	reply := <-replyChan
+	close(replyChan)
+	ignore(reply.Err)
+	return antidote.CreateOperationResp()
+}
+
+func sendTMUpdateObjects(proto *proto.ApbUpdateObjects,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (replyChan chan antidote.TMUpdateReply, txnId antidote.TransactionId) {
+
+	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransactionDescriptor())
+	updates := antidote.ProtoUpdateOpToAntidoteUpdate(proto.GetUpdates())
+	replyChan = make(chan antidote.TMUpdateReply)
+	tmChan <- createTMRequest(antidote.TMUpdateArgs{UpdateParams: updates, ReplyChan: replyChan}, txnId, clientClock)
+	return replyChan, txnId
+}
+
+func handleStartTxn(proto *proto.ApbStartTransaction,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbStartTransactionResp) {
+
+	replyChan, _ := sendTMStartTxn(proto, tmChan, clientId)
+	reply := <-replyChan
+	close(replyChan)
+	return antidote.CreateStartTransactionResp(reply.TransactionId, reply.Timestamp)
+}
+
+func sendTMStartTxn(proto *proto.ApbStartTransaction,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (replyChan chan antidote.TMStartTxnReply, txnId antidote.TransactionId) {
+
+	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTimestamp())
+	replyChan = make(chan antidote.TMStartTxnReply)
+	tmChan <- createTMRequest(antidote.TMStartTxnArgs{ReplyChan: replyChan}, txnId, clientClock)
+	return replyChan, txnId
+	//Examples of txn descriptors in antidote:
+	//{tx_id,1550320956784892,<0.4144.0>}.
+	//{tx_id,1550321073482453,<0.4143.0>}. (obtained on the op after the previous timestamp)
+	//{tx_id,1550321245370469,<0.4146.0>}. (obtained after deleting the logs)
+	//It's basically a timestamp plus some kind of counter?
+}
+
+func handleAbortTxn(proto *proto.ApbAbortTransaction,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbCommitResp) {
+
+	txnId, clientClock := sendTMAbortTxn(proto, tmChan, clientId)
+	//Returns a clock and success set as true. I assume the clock is the same as the one returned in startTxn?
+	return antidote.CreateCommitOkResp(txnId, clientClock)
+}
+
+func sendTMAbortTxn(proto *proto.ApbAbortTransaction,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (txnId antidote.TransactionId, clientClock clocksi.Timestamp) {
+
+	txnId, clientClock = antidote.DecodeTxnDescriptor(proto.GetTransactionDescriptor())
+	tmChan <- createTMRequest(antidote.TMAbortArgs{}, txnId, clientClock)
+	return txnId, clientClock
+}
+
+func handleCommitTxn(proto *proto.ApbCommitTransaction,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbCommitResp) {
+
+	replyChan, txnId := sendTMCommitTxn(proto, tmChan, clientId)
+	reply := <-replyChan
+	return antidote.CreateCommitOkResp(txnId, reply.Timestamp)
+}
+
+func sendTMCommitTxn(proto *proto.ApbCommitTransaction,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (replyChan chan antidote.TMCommitReply, txnId antidote.TransactionId) {
+
+	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransactionDescriptor())
+	replyChan = make(chan antidote.TMCommitReply)
+	tmChan <- createTMRequest(antidote.TMCommitArgs{ReplyChan: replyChan}, txnId, clientClock)
+	return replyChan, txnId
+}
+
+func handleNewTrigger(proto *proto.ApbNewTrigger, tmChan chan antidote.TransactionManagerRequest,
+	clientId antidote.ClientId, ci antidote.CodingInfo) (respProto *proto.ApbNewTriggerReply) {
+
+	replyChan := make(chan bool)
+
+	tmChan <- createTMRequest(antidote.TMNewTriggerArgs{
+		ReplyChan: replyChan,
+		IsGeneric: proto.GetIsGeneric(),
+		Source:    antidote.ProtoTriggerInfoToAntidote(proto.GetSource(), ci),
+		Target:    antidote.ProtoTriggerInfoToAntidote(proto.GetTarget(), ci),
+	}, 0, nil)
+
+	<-replyChan
+
+	//TODO: Errors?
+	respProto = antidote.CreateNewTriggerReply()
 	return
 }
 
-func handleProtoTestRead(objs []crdt.ReadObjectParams, txnId antidote.TransactionId, clientClock clocksi.Timestamp) *proto.ApbStaticReadObjectsResp {
+func handleGetTriggers(proto *proto.ApbGetTriggers, tmChan chan antidote.TransactionManagerRequest,
+	clientId antidote.ClientId, ci antidote.CodingInfo) (respProto *proto.ApbGetTriggersReply) {
+
+	replyChan := make(chan *antidote.TriggerDB)
+	notifyChan := make(chan bool)
+
+	tmChan <- createTMRequest(antidote.TMGetTriggersArgs{ReplyChan: replyChan, WaitFor: notifyChan}, 0, nil)
+
+	triggerDB := <-replyChan
+
+	triggerDB.DebugPrint("[PS]")
+	//TODO: Errors?
+	respProto = antidote.CreateGetTriggersReply(triggerDB, ci)
+	notifyChan <- true
+	return
+}
+
+func handleResetServer(tm *antidote.TransactionManager) (respProto *proto.ApbResetServerResp) {
+	tm.ResetServer()
+	fmt.Println("Forcing GB...")
+	debug.FreeOSMemory()
+	fmt.Println("Server successfully reset.")
+	fmt.Println("Memory stats after reset:")
+	printMemStats(&runtime.MemStats{}, 0)
+
+	return &proto.ApbResetServerResp{}
+}
+
+func handleServerConnReplicaID(protobuf *proto.ApbServerConnReplicaID, tmChan chan antidote.TransactionManagerRequest, conn net.Conn) chan antidote.TMS2SReply {
+	fmt.Printf("[PS]Got ServerConnReplicaID from %d at %s\n", protobuf.GetReplicaID(), time.Now().Format("15:04:05:000"))
+	tmChan <- createTMRequest(antidote.TMReplicaID{ReplicaID: int16(protobuf.GetReplicaID()), IP: protobuf.GetMyIP(), Buckets: protobuf.GetMyBuckets()}, 0, nil)
+	return handleServerConn(tmChan, conn)
+}
+
+func handleServerConn(tmChan chan antidote.TransactionManagerRequest, conn net.Conn) chan antidote.TMS2SReply {
+	replyChan := make(chan antidote.TMS2SReply, 10)
+	tmChan <- createTMRequest(antidote.TMServerConn{ReplyChan: replyChan}, 0, nil)
+
+	go func() {
+		var err error
+		var msg pb.Message
+		//fmt.Println("[PS]S2S receiver - ready")
+		//Wait on replyChan forever, do a switch with received item, send back on connection
+		for wrapper := range replyChan {
+			//fmt.Println("[PS]S2S receiver - got reply (clientID, replyType)", wrapper.ClientID, wrapper.ReplyType)
+			switch reply := wrapper.Reply.(type) {
+			case antidote.TMStaticReadReply:
+				msg = antidote.CreateStaticReadResp(reply.States, wrapper.TxnID, reply.Timestamp)
+			case antidote.TMStartTxnReply:
+				msg = antidote.CreateStartTransactionResp(wrapper.TxnID, reply.Timestamp)
+			case []crdt.State:
+				msg = antidote.CreateReadObjectsResp(reply)
+			case antidote.TMUpdateReply:
+				msg = antidote.CreateOperationResp()
+			case antidote.TMStaticUpdateReply:
+				msg = antidote.CreateCommitOkResp(wrapper.TxnID, reply.Timestamp)
+			case antidote.TMCommitReply:
+				msg = antidote.CreateCommitOkResp(wrapper.TxnID, reply.Timestamp)
+			default:
+				fmt.Printf("[PS]S2S unknown proto type (%d, %T, %v+)\n", wrapper.ReplyType, reply, reply)
+			}
+			//fmt.Println("[PS]S2S sending reply")
+			err = antidote.SendProtoNoCheck(antidote.S2SReply, antidote.CreateS2SWrapperReplyProto(wrapper.ClientID, wrapper.ReplyType, msg), conn)
+			//fmt.Println("[PS]S2S sent reply")
+			if err != nil {
+				fmt.Println("[PS]Error on S2S send:", nil)
+				break
+			}
+		}
+	}()
+
+	return replyChan
+}
+
+func handleServerToServer(protobf *proto.S2SWrapper, tmChan chan antidote.TransactionManagerRequest, s2sChan chan antidote.TMS2SReply,
+	conn net.Conn, tm *antidote.TransactionManager) {
+	//"Just" send appropriate request
+	var req antidote.TMRequestArgs
+	var txnId antidote.TransactionId
+	var clientClock clocksi.Timestamp
+	var reply interface{}
+	var replyType proto.WrapperType
+	clientID := protobf.GetClientID()
+	//fmt.Println("[PS]S2S request type:", *protobf.MsgID)
+	switch *protobf.MsgID {
+	case proto.WrapperType_STATIC_READ_OBJS:
+		inProto, replyChan := protobf.StaticReadObjs, make(chan antidote.TMStaticReadReply, 1)
+		txnId, clientClock = antidote.DecodeTxnDescriptor(inProto.GetTransaction().GetTimestamp())
+		objs := antidote.ProtoObjectsToAntidoteObjects(inProto.GetObjects())
+		req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.TMStaticReadArgs{ReadParams: objs, ReplyChan: replyChan}}
+		tmChan <- createTMRequest(req, txnId, clientClock)
+		reply, replyType = <-replyChan, proto.WrapperType_STATIC_READ_OBJS
+
+	case proto.WrapperType_STATIC_READ:
+		inProto, replyChan := protobf.StaticRead, make(chan antidote.TMStaticReadReply, 1)
+		txnId, clientClock = antidote.DecodeTxnDescriptor(inProto.GetTransaction().GetTimestamp())
+		objs := antidote.ProtoReadToAntidoteObjects(inProto.GetFullreads(), inProto.GetPartialreads())
+		req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.TMStaticReadArgs{ReadParams: objs, ReplyChan: replyChan}}
+		tmChan <- createTMRequest(req, txnId, clientClock)
+		reply, replyType = <-replyChan, proto.WrapperType_STATIC_READ_OBJS
+
+	case proto.WrapperType_STATIC_SINGLE_READ:
+		inProto, replyChan := protobf.SingleRead, make(chan antidote.TMStaticReadReply, 1)
+		obj := antidote.S2SSingleReadToAntidote(inProto)
+		req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.TMSingleReadArgs{ReadParams: obj, ReplyChan: replyChan}}
+		tmChan <- createTMRequest(req, 578902378, nil) //Random txnID value
+		reply, replyType = <-replyChan, proto.WrapperType_STATIC_SINGLE_READ
+
+	case proto.WrapperType_STATIC_UPDATE:
+		inProto, replyChan := protobf.StaticUpd, make(chan antidote.TMStaticUpdateReply, 1)
+		txnId, clientClock = antidote.DecodeTxnDescriptor(inProto.GetTransaction().GetTimestamp())
+		updates := antidote.ProtoUpdateOpToAntidoteUpdate(inProto.GetUpdates())
+		req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.TMStaticUpdateArgs{UpdateParams: updates, ReplyChan: replyChan}}
+		tmChan <- createTMRequest(req, txnId, clientClock)
+		reply, replyType = <-replyChan, proto.WrapperType_COMMIT
+
+	case proto.WrapperType_START_TXN:
+		inProto, replyChan := protobf.StartTxn, make(chan antidote.TMStartTxnReply, 1)
+		txnId, clientClock = antidote.DecodeTxnDescriptor(inProto.GetTimestamp())
+		req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.TMStartTxnArgs{ReplyChan: replyChan}}
+		tmChan <- createTMRequest(req, txnId, clientClock)
+		reply, replyType = <-replyChan, proto.WrapperType_START_TXN
+
+	case proto.WrapperType_READ_OBJS:
+		inProto, replyChan := protobf.ReadObjs, make(chan []crdt.State, 1)
+		txnId, clientClock = antidote.DecodeTxnDescriptor(inProto.GetTransactionDescriptor())
+		objs := antidote.ProtoObjectsToAntidoteObjects(inProto.GetBoundobjects())
+		req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.TMReadArgs{ReadParams: objs, ReplyChan: replyChan}}
+		tmChan <- createTMRequest(req, txnId, clientClock)
+		reply, replyType = <-replyChan, proto.WrapperType_READ_OBJS
+
+	case proto.WrapperType_READ:
+		inProto, replyChan := protobf.Read, make(chan []crdt.State, 1)
+		txnId, clientClock = antidote.DecodeTxnDescriptor(inProto.GetTransactionDescriptor())
+		objs := antidote.ProtoReadToAntidoteObjects(inProto.GetFullreads(), inProto.GetPartialreads())
+		req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.TMReadArgs{ReadParams: objs, ReplyChan: replyChan}}
+		tmChan <- createTMRequest(req, txnId, clientClock)
+		reply, replyType = <-replyChan, proto.WrapperType_READ_OBJS
+
+	case proto.WrapperType_UPD:
+		inProto, replyChan := protobf.Upd, make(chan antidote.TMUpdateReply, 1)
+		txnId, clientClock = antidote.DecodeTxnDescriptor(inProto.GetTransactionDescriptor())
+		updates := antidote.ProtoUpdateOpToAntidoteUpdate(inProto.GetUpdates())
+		req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.TMUpdateArgs{UpdateParams: updates, ReplyChan: replyChan}}
+		tmChan <- createTMRequest(req, txnId, clientClock)
+		reply, replyType = <-replyChan, proto.WrapperType_UPD
+
+	case proto.WrapperType_COMMIT:
+		inProto, replyChan := protobf.CommitTxn, make(chan antidote.TMCommitReply, 1)
+		txnId, clientClock = antidote.DecodeTxnDescriptor(inProto.GetTransactionDescriptor())
+		req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.TMCommitArgs{ReplyChan: replyChan}}
+		tmChan <- createTMRequest(req, txnId, clientClock)
+		reply, replyType = <-replyChan, proto.WrapperType_COMMIT
+
+	case proto.WrapperType_ABORT:
+		inProto := protobf.AbortTxn
+		txnId, clientClock = antidote.DecodeTxnDescriptor(inProto.GetTransactionDescriptor())
+		req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.TMAbortArgs{}}
+		tmChan <- createTMRequest(req, txnId, clientClock)
+		reply, replyType = antidote.TMCommitReply{Timestamp: clientClock}, proto.WrapperType_COMMIT
+		//antidote.SendProto(antidote.CommitTransReply, antidote.CreateCommitOkResp(txnId, clientClock), conn)
+
+	case proto.WrapperType_BC_PERMS_REQ:
+		inProto := protobf.BcPermsReq
+		req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.ProtoBCPermissionsReqToTM(inProto)}
+		tmChan <- createTMRequest(req, 578902378, nil) //Random txID value
+		return                                         //No reply
+
+	default:
+		fmt.Println("[PROTOSERVER]Error - Unknown type of S2S message:", protobf.MsgID)
+		return
+	}
+	s2sChan <- antidote.TMS2SReply{ClientID: clientID, TxnID: 2, ReplyType: replyType, Reply: reply}
+}
+
+func handleMultiClient(conn net.Conn, tmChans []chan antidote.TransactionManagerRequest, replyChan chan antidote.TMMultiClientReply, nClients int, clientId antidote.ClientId) {
+	go handleMultiClientReplies(conn, replyChan)
+	clientIds := make([]antidote.ClientId, nClients)
+	clientIds[0] = clientId
+	for i := 1; i < nClients; i++ {
+		clientIds[i] = antidote.ClientId(rand.Uint64())
+	}
+
+	var protobuf pb.Message
+	var protoType byte
+	var client uint16
+	var err error
+
+	fmt.Printf("[ProtoServer]Handling multi-client connection with %d clients\n", nClients)
+	for {
+		protoType, client, protobuf, err = antidote.ReceiveProtoMultiClient(conn)
+		//fmt.Printf("[ProtoServer][MultiClient]Received proto of type %d from client %d\n", protoType, client)
+		if err != nil {
+			if err == io.EOF {
+				conn.Close()
+				for _, tmChan := range tmChans {
+					tmChan <- antidote.TransactionManagerRequest{Args: antidote.TMConnLostArgs{}}
+				}
+				fmt.Printf("[ProtoServer]Client closed connection. Closing multi-client connection.\n")
+			} else {
+				conn.Close()
+				date := time.Now().String()
+				fmt.Printf("[ProtoServer]Error on reading proto from client, closing multi-client connection. Type: %v, proto: %v, error: %s, time: %s\n", protoType, protobuf, err, date)
+				for _, tmChan := range tmChans {
+					tmChan <- antidote.TransactionManagerRequest{Args: antidote.TMConnLostArgs{}}
+				}
+			}
+			return
+		}
+		utilities.CheckErr(utilities.NETWORK_READ_ERROR, err)
+
+		switch protoType {
+		case antidote.ReadObjs:
+			sendTMReadObjects(protobuf.(*proto.ApbReadObjects), tmChans[client], clientIds[client])
+		case antidote.Read:
+			sendTMRead(protobuf.(*proto.ApbRead), tmChans[client], clientIds[client])
+		case antidote.UpdateObjs:
+			sendTMUpdateObjects(protobuf.(*proto.ApbUpdateObjects), tmChans[client], clientIds[client])
+		case antidote.StartTrans:
+			sendTMStartTxn(protobuf.(*proto.ApbStartTransaction), tmChans[client], clientIds[client])
+		case antidote.AbortTrans:
+			sendTMAbortTxn(protobuf.(*proto.ApbAbortTransaction), tmChans[client], clientIds[client])
+		case antidote.CommitTrans:
+			sendTMCommitTxn(protobuf.(*proto.ApbCommitTransaction), tmChans[client], clientIds[client])
+		case antidote.StaticUpdateObjs:
+			sendTMStaticUpdateObjects(protobuf.(*proto.ApbStaticUpdateObjects), tmChans[client], clientIds[client])
+		case antidote.StaticReadObjs:
+			sendTMStaticReadObjectsRequest(protobuf.(*proto.ApbStaticReadObjects), tmChans[client], clientIds[client])
+		case antidote.StaticRead:
+			sendTMStaticReadRequest(protobuf.(*proto.ApbStaticRead), tmChans[client], clientIds[client])
+		}
+	}
+}
+
+// Extra goroutine that will listen to replyChan and send the replies to the clients of this multi-client connection.
+func handleMultiClientReplies(conn net.Conn, replyChan chan antidote.TMMultiClientReply) {
+	var respProto pb.Message
+	var replyType byte
+	var err error
+	for {
+		reply := <-replyChan
+		//fmt.Printf("[ProtoServer][MultiClient]Got reply from TM: %v\n", reply)
+		switch typedReply := reply.Reply.(type) {
+		case antidote.TMStaticReadReply: //Replies to both static read and static read objects are the same
+			respProto, replyType = antidote.CreateStaticReadResp(typedReply.States, reply.TxnId, typedReply.Timestamp), antidote.StaticReadObjsReply
+		case antidote.TMStaticUpdateReply:
+			respProto, replyType = antidote.CreateCommitOkResp(reply.TxnId, typedReply.Timestamp), antidote.CommitTransReply
+		case []crdt.State: //Reply to both read and read objects are the same
+			respProto, replyType = antidote.CreateReadObjectsResp(typedReply), antidote.ReadObjsReply
+		case antidote.TMUpdateReply:
+			respProto, replyType = antidote.CreateOperationResp(), antidote.OpReply
+		case antidote.TMStartTxnReply:
+			respProto, replyType = antidote.CreateStartTransactionResp(reply.TxnId, typedReply.Timestamp), antidote.StartTransReply
+		case antidote.TMCommitReply:
+			respProto, replyType = antidote.CreateCommitOkResp(reply.TxnId, typedReply.Timestamp), antidote.CommitTransReply
+
+		}
+		err = antidote.SendProtoMultiClientNoCheck(replyType, uint16(reply.ClientID), respProto, conn)
+		if err != nil {
+			conn.Close()
+			fmt.Println("[ProtoServer]Error on sending proto to multi client:", err)
+			return
+		}
+	}
+
+}
+
+func handleProtoTestRead(protobuf pb.Message, protoType byte) *proto.ApbStaticReadObjectsResp {
+	var txnId antidote.TransactionId
+	var clientClock clocksi.Timestamp
+	var objs []crdt.ReadObjectParams
+
+	if protoType == antidote.StaticReadObjs {
+		typedProto := protobuf.(*proto.ApbStaticReadObjects)
+		txnId, clientClock = antidote.DecodeTxnDescriptor(typedProto.GetTransaction().GetTimestamp())
+		objs = antidote.ProtoObjectsToAntidoteObjects(typedProto.GetObjects())
+	} else { //Static read
+		typedProto := protobuf.(*proto.ApbStaticRead)
+		txnId, clientClock = antidote.DecodeTxnDescriptor(typedProto.GetTransaction().GetTimestamp())
+		objs = antidote.ProtoReadToAntidoteObjects(typedProto.GetFullreads(), typedProto.GetPartialreads())
+	}
+
 	states := make([]crdt.State, len(objs))
 	if protobufTestMode == PROTO_TEST_CRDTMAP {
 		for i := 0; i < len(objs); i++ {
@@ -632,317 +1140,76 @@ func handleProtoTestRead(objs []crdt.ReadObjectParams, txnId antidote.Transactio
 	return antidote.CreateStaticReadResp(states, txnId, clientClock)*/
 }
 
-func handleStaticUpdateObjects(proto *proto.ApbStaticUpdateObjects,
-	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbCommitResp) {
-
-	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransaction().GetTimestamp())
-
-	updates := antidote.ProtoUpdateOpToAntidoteUpdate(proto.GetUpdates())
-
-	replyChan := make(chan antidote.TMStaticUpdateReply)
-
-	tmChan <- createTMRequest(antidote.TMStaticUpdateArgs{UpdateParams: updates, ReplyChan: replyChan}, txnId, clientClock)
-
-	reply := <-replyChan
-	close(replyChan)
-	//TODO: Actually not ignore error
-	ignore(reply.Err)
-
-	respProto = antidote.CreateCommitOkResp(reply.TransactionId, reply.Timestamp)
-	//fmt.Println(respProto.GetSuccess(), respProto.GetCommitTime(), respProto.GetErrorcode())
-	return
-}
-
-func handleReadObjects(proto *proto.ApbReadObjects,
-	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbReadObjectsResp) {
-
-	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransactionDescriptor())
-
-	objs := antidote.ProtoObjectsToAntidoteObjects(proto.GetBoundobjects())
-	replyChan := make(chan []crdt.State)
-
-	tmChan <- createTMRequest(antidote.TMReadArgs{ReadParams: objs, ReplyChan: replyChan}, txnId, clientClock)
-
-	reply := <-replyChan
-	close(replyChan)
-
-	respProto = antidote.CreateReadObjectsResp(reply)
-	return
-}
-
-func handleRead(proto *proto.ApbRead,
-	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbReadObjectsResp) {
-
-	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransactionDescriptor())
-
-	objs := antidote.ProtoReadToAntidoteObjects(proto.GetFullreads(), proto.GetPartialreads())
-	replyChan := make(chan []crdt.State)
-
-	tmChan <- createTMRequest(antidote.TMReadArgs{ReadParams: objs, ReplyChan: replyChan}, txnId, clientClock)
-
-	reply := <-replyChan
-	close(replyChan)
-
-	respProto = antidote.CreateReadObjectsResp(reply)
-	return
-}
-
-func handleUpdateObjects(proto *proto.ApbUpdateObjects,
-	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbOperationResp) {
-
-	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransactionDescriptor())
-
-	updates := antidote.ProtoUpdateOpToAntidoteUpdate(proto.GetUpdates())
-
-	replyChan := make(chan antidote.TMUpdateReply)
-
-	tmChan <- createTMRequest(antidote.TMUpdateArgs{UpdateParams: updates, ReplyChan: replyChan}, txnId, clientClock)
-
-	reply := <-replyChan
-	close(replyChan)
-	//TODO: Actually not ignore error
-	ignore(reply.Err)
-
-	respProto = antidote.CreateOperationResp()
-	return
-	//return type 111, success: true. I guess this always returns success unless there is a type error.
-}
-
-func handleStartTxn(proto *proto.ApbStartTransaction,
-	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbStartTransactionResp) {
-
-	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTimestamp())
-	replyChan := make(chan antidote.TMStartTxnReply)
-
-	tmChan <- createTMRequest(antidote.TMStartTxnArgs{ReplyChan: replyChan}, txnId, clientClock)
-
-	reply := <-replyChan
-	close(replyChan)
-
-	//Examples of txn descriptors in antidote:
-	//{tx_id,1550320956784892,<0.4144.0>}.
-	//{tx_id,1550321073482453,<0.4143.0>}. (obtained on the op after the previous timestamp)
-	//{tx_id,1550321245370469,<0.4146.0>}. (obtained after deleting the logs)
-	//It's basically a timestamp plus some kind of counter?
-
-	respProto = antidote.CreateStartTransactionResp(reply.TransactionId, reply.Timestamp)
-	return
-}
-
-func handleAbortTxn(proto *proto.ApbAbortTransaction,
-	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbCommitResp) {
-
-	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransactionDescriptor())
-
-	tmChan <- createTMRequest(antidote.TMAbortArgs{}, txnId, clientClock)
-
-	respProto = antidote.CreateCommitOkResp(txnId, clientClock)
-	//Returns a clock and success set as true. I assume the clock is the same as the one returned in startTxn?
-	return
-}
-
-func handleCommitTxn(proto *proto.ApbCommitTransaction,
-	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbCommitResp) {
-
-	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransactionDescriptor())
-	replyChan := make(chan antidote.TMCommitReply)
-
-	tmChan <- createTMRequest(antidote.TMCommitArgs{ReplyChan: replyChan}, txnId, clientClock)
-
-	reply := <-replyChan
-
-	//TODO: Errors?
-	respProto = antidote.CreateCommitOkResp(txnId, reply.Timestamp)
-	return
-}
-
-func handleNewTrigger(proto *proto.ApbNewTrigger, tmChan chan antidote.TransactionManagerRequest,
-	clientId antidote.ClientId, ci antidote.CodingInfo) (respProto *proto.ApbNewTriggerReply) {
-
-	replyChan := make(chan bool)
-
-	tmChan <- createTMRequest(antidote.TMNewTriggerArgs{
-		ReplyChan: replyChan,
-		IsGeneric: proto.GetIsGeneric(),
-		Source:    antidote.ProtoTriggerInfoToAntidote(proto.GetSource(), ci),
-		Target:    antidote.ProtoTriggerInfoToAntidote(proto.GetTarget(), ci),
-	}, 0, nil)
-
-	<-replyChan
-
-	//TODO: Errors?
-	respProto = antidote.CreateNewTriggerReply()
-	return
-}
-
-func handleGetTriggers(proto *proto.ApbGetTriggers, tmChan chan antidote.TransactionManagerRequest,
-	clientId antidote.ClientId, ci antidote.CodingInfo) (respProto *proto.ApbGetTriggersReply) {
-
-	replyChan := make(chan *antidote.TriggerDB)
-	notifyChan := make(chan bool)
-
-	tmChan <- createTMRequest(antidote.TMGetTriggersArgs{ReplyChan: replyChan, WaitFor: notifyChan}, 0, nil)
-
-	triggerDB := <-replyChan
-
-	triggerDB.DebugPrint("[PS]")
-	//TODO: Errors?
-	respProto = antidote.CreateGetTriggersReply(triggerDB, ci)
-	notifyChan <- true
-	return
-}
-
-func handleResetServer(tm *antidote.TransactionManager) (respProto *proto.ApbResetServerResp) {
-	tm.ResetServer()
-	fmt.Println("Forcing GB...")
-	debug.FreeOSMemory()
-	fmt.Println("Server successfully reset.")
-	fmt.Println("Memory stats after reset:")
-	printMemStats(&runtime.MemStats{}, 0)
-
-	return &proto.ApbResetServerResp{}
-}
-
-func handleServerConn(tmChan chan antidote.TransactionManagerRequest, conn net.Conn) chan antidote.TMS2SReply {
-	replyChan := make(chan antidote.TMS2SReply, 10)
-	tmChan <- createTMRequest(antidote.TMServerConn{ReplyChan: replyChan}, 0, nil)
-
-	go func() {
-		var err error
-		var msg pb.Message
-		//fmt.Println("[PS]S2S receiver - ready")
-		//Wait on replyChan forever, do a switch with received item, send back on connection
-		for wrapper := range replyChan {
-			//fmt.Println("[PS]S2S receiver - got reply (clientID, replyType)", wrapper.ClientID, wrapper.ReplyType)
-			switch reply := wrapper.Reply.(type) {
-			case antidote.TMStaticReadReply:
-				msg = antidote.CreateStaticReadResp(reply.States, wrapper.TxnID, reply.Timestamp)
-			case antidote.TMStartTxnReply:
-				msg = antidote.CreateStartTransactionResp(wrapper.TxnID, reply.Timestamp)
-			case []crdt.State:
-				msg = antidote.CreateReadObjectsResp(reply)
-			case antidote.TMUpdateReply:
-				msg = antidote.CreateOperationResp()
-			case antidote.TMStaticUpdateReply:
-				msg = antidote.CreateCommitOkResp(wrapper.TxnID, reply.Timestamp)
-			case antidote.TMCommitReply:
-				msg = antidote.CreateCommitOkResp(wrapper.TxnID, reply.Timestamp)
-			default:
-				fmt.Printf("[PS]S2S unknown proto type (%d, %T, %v+)\n", wrapper.ReplyType, reply, reply)
-			}
-			//fmt.Println("[PS]S2S sending reply")
-			err = antidote.SendProtoNoCheck(antidote.S2SReply, antidote.CreateS2SWrapperReplyProto(wrapper.ClientID, wrapper.ReplyType, msg), conn)
-			//fmt.Println("[PS]S2S sent reply")
-			if err != nil {
-				fmt.Println("[PS]Error on S2S send:", nil)
-				break
-			}
-		}
-	}()
-
-	return replyChan
-}
-
-func handleServerToServer(protobf *proto.S2SWrapper, tmChan chan antidote.TransactionManagerRequest, s2sChan chan antidote.TMS2SReply,
-	conn net.Conn, tm *antidote.TransactionManager) {
-	//"Just" send appropriate request
-	var req antidote.TMRequestArgs
-	var txnId antidote.TransactionId
-	var clientClock clocksi.Timestamp
-	var reply interface{}
-	var replyType proto.WrapperType
-	clientID := protobf.GetClientID()
-	//fmt.Println("[PS]S2S request type:", *protobf.MsgID)
-	switch *protobf.MsgID {
-	case proto.WrapperType_STATIC_READ_OBJS:
-		inProto, replyChan := protobf.StaticReadObjs, make(chan antidote.TMStaticReadReply)
-		txnId, clientClock = antidote.DecodeTxnDescriptor(inProto.GetTransaction().GetTimestamp())
-		objs := antidote.ProtoObjectsToAntidoteObjects(inProto.GetObjects())
-		req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.TMStaticReadArgs{ReadParams: objs, ReplyChan: replyChan}}
-		tmChan <- createTMRequest(req, txnId, clientClock)
-		reply, replyType = <-replyChan, proto.WrapperType_STATIC_READ_OBJS
-
-	case proto.WrapperType_STATIC_READ:
-		inProto, replyChan := protobf.StaticRead, make(chan antidote.TMStaticReadReply)
-		txnId, clientClock = antidote.DecodeTxnDescriptor(inProto.GetTransaction().GetTimestamp())
-		objs := antidote.ProtoReadToAntidoteObjects(inProto.GetFullreads(), inProto.GetPartialreads())
-		req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.TMStaticReadArgs{ReadParams: objs, ReplyChan: replyChan}}
-		tmChan <- createTMRequest(req, txnId, clientClock)
-		reply, replyType = <-replyChan, proto.WrapperType_STATIC_READ_OBJS
-
-	case proto.WrapperType_STATIC_UPDATE:
-		inProto, replyChan := protobf.StaticUpd, make(chan antidote.TMStaticUpdateReply)
-		txnId, clientClock = antidote.DecodeTxnDescriptor(inProto.GetTransaction().GetTimestamp())
-		updates := antidote.ProtoUpdateOpToAntidoteUpdate(inProto.GetUpdates())
-		req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.TMStaticUpdateArgs{UpdateParams: updates, ReplyChan: replyChan}}
-		tmChan <- createTMRequest(req, txnId, clientClock)
-		reply, replyType = <-replyChan, proto.WrapperType_COMMIT
-
-	case proto.WrapperType_START_TXN:
-		inProto, replyChan := protobf.StartTxn, make(chan antidote.TMStartTxnReply)
-		txnId, clientClock = antidote.DecodeTxnDescriptor(inProto.GetTimestamp())
-		req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.TMStartTxnArgs{ReplyChan: replyChan}}
-		tmChan <- createTMRequest(req, txnId, clientClock)
-		reply, replyType = <-replyChan, proto.WrapperType_START_TXN
-
-	case proto.WrapperType_READ_OBJS:
-		inProto, replyChan := protobf.ReadObjs, make(chan []crdt.State)
-		txnId, clientClock = antidote.DecodeTxnDescriptor(inProto.GetTransactionDescriptor())
-		objs := antidote.ProtoObjectsToAntidoteObjects(inProto.GetBoundobjects())
-		req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.TMReadArgs{ReadParams: objs, ReplyChan: replyChan}}
-		tmChan <- createTMRequest(req, txnId, clientClock)
-		reply, replyType = <-replyChan, proto.WrapperType_READ_OBJS
-
-	case proto.WrapperType_READ:
-		inProto, replyChan := protobf.Read, make(chan []crdt.State)
-		txnId, clientClock = antidote.DecodeTxnDescriptor(inProto.GetTransactionDescriptor())
-		objs := antidote.ProtoReadToAntidoteObjects(inProto.GetFullreads(), inProto.GetPartialreads())
-		req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.TMReadArgs{ReadParams: objs, ReplyChan: replyChan}}
-		tmChan <- createTMRequest(req, txnId, clientClock)
-		reply, replyType = <-replyChan, proto.WrapperType_READ_OBJS
-
-	case proto.WrapperType_UPD:
-		inProto, replyChan := protobf.Upd, make(chan antidote.TMUpdateReply)
-		txnId, clientClock = antidote.DecodeTxnDescriptor(inProto.GetTransactionDescriptor())
-		updates := antidote.ProtoUpdateOpToAntidoteUpdate(inProto.GetUpdates())
-		req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.TMUpdateArgs{UpdateParams: updates, ReplyChan: replyChan}}
-		tmChan <- createTMRequest(req, txnId, clientClock)
-		reply, replyType = <-replyChan, proto.WrapperType_UPD
-
-	case proto.WrapperType_COMMIT:
-		inProto, replyChan := protobf.CommitTxn, make(chan antidote.TMCommitReply)
-		txnId, clientClock = antidote.DecodeTxnDescriptor(inProto.GetTransactionDescriptor())
-		req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.TMCommitArgs{ReplyChan: replyChan}}
-		tmChan <- createTMRequest(req, txnId, clientClock)
-		reply, replyType = <-replyChan, proto.WrapperType_COMMIT
-
-	case proto.WrapperType_ABORT:
-		inProto := protobf.AbortTxn
-		txnId, clientClock = antidote.DecodeTxnDescriptor(inProto.GetTransactionDescriptor())
-		req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.TMAbortArgs{}}
-		tmChan <- createTMRequest(req, txnId, clientClock)
-		reply, replyType = antidote.TMCommitReply{Timestamp: clientClock}, proto.WrapperType_COMMIT
-		//antidote.SendProto(antidote.CommitTransReply, antidote.CreateCommitOkResp(txnId, clientClock), conn)
-
-	case proto.WrapperType_BC_PERMS_REQ:
-		inProto := protobf.BcPermsReq
-		req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.ProtoBCPermissionsReqToTM(inProto)}
-		tmChan <- createTMRequest(req, 578902378, nil) //Random txID value
-		return                                         //No reply
-
-	default:
-		fmt.Println("[PROTOSERVER]Error - Unknown type of S2S message:", protobf.MsgID)
-		return
-	}
-	s2sChan <- antidote.TMS2SReply{ClientID: clientID, TxnID: 2, ReplyType: replyType, Reply: reply}
-}
-
 func createTMRequest(args antidote.TMRequestArgs, txnId antidote.TransactionId,
 	clientClock clocksi.Timestamp) (request antidote.TransactionManagerRequest) {
 	return antidote.TransactionManagerRequest{
 		Args:          args,
 		TransactionId: txnId,
 		Timestamp:     clientClock,
+	}
+}
+
+func waitForTM(doDataload, doJoin bool, tm *antidote.TransactionManager, dp antidote.DataloadParameters) {
+	var currTime time.Time
+	if doJoin {
+		fmt.Println("[PS][JOIN]Joining existing servers, please stand by...")
+		reply := tm.WaitUntilReady()
+		if reply == antidote.TM_READY {
+			if doDataload {
+				dp.IsTMReady <- true
+			}
+			currTime = time.Now()
+			fmt.Printf("[PS][JOIN]TM ready, replicaIDs known. Waiting for RabbitMQ. Current time: %s. Time since start: %dms.\n",
+				currTime.Format("15:04:05.000"), (currTime.UnixNano()-start.UnixNano())/int64(time.Millisecond))
+			reply = tm.WaitUntilReady()
+			currTime = time.Now()
+			fmt.Printf("[PS][JOIN]RabbitMQ ready, starting PotionDB at %s. Time since start: %dms.\n",
+				currTime.Format("15:04:05.000"), (currTime.UnixNano()-start.UnixNano())/int64(time.Millisecond))
+		} else {
+			if doDataload {
+				dp.IsTMReady <- true
+			}
+			currTime = time.Now()
+			fmt.Printf("[PS][JOIN]TM and RabbitMQ ready, replicaIDs known. Starting PotionDB at %s. Time since start: %dms.\n",
+				time.Now().Format("15:04:05.000"), (currTime.UnixNano()-start.UnixNano())/int64(time.Millisecond))
+		}
+	} else {
+		fmt.Println("[PS][NOJOIN]Not doing join (known set of servers). Waiting for replicaIDs of existing replicas...")
+		reply := tm.WaitUntilReady()
+		if reply == antidote.TM_READY {
+			if doDataload {
+				dp.IsTMReady <- true
+			}
+			currTime = time.Now()
+			fmt.Printf("[PS][NOJOIN]TM ready, replicaIDs known. Waiting for RabbitMQ. Current time: %s. Time since start: %dms.\n",
+				currTime.Format("15:04:05.000"), (currTime.UnixNano()-start.UnixNano())/int64(time.Millisecond))
+			reply = tm.WaitUntilReady()
+			currTime = time.Now()
+			fmt.Printf("[PS][NOJOIN]RabbitMQ ready, starting PotionDB at %s. Time since start: %dms.\n",
+				time.Now().Format("15:04:05.000"), (currTime.UnixNano()-start.UnixNano())/int64(time.Millisecond))
+		} else {
+			if doDataload {
+				dp.IsTMReady <- true
+			}
+			currTime = time.Now()
+			fmt.Printf("[PS][NOJOIN]TM and RabbitMQ ready, replicaIDs known. Starting PotionDB at %s. Time since start: %dms.\n",
+				time.Now().Format("15:04:05.000"), (currTime.UnixNano()-start.UnixNano())/int64(time.Millisecond))
+		}
+	}
+}
+
+func checkDisabledComponents() {
+	if shared.IsCRDTDisabled {
+		fmt.Println("[PS][WARNING]CRDTs are disabled - all CRDTs will be replaced with EmptyCRDTs. " +
+			"This should only be used for debugging/specific performance analysis.")
+	}
+	if shared.IsLogDisabled {
+		fmt.Println("[PS][WARNING]Logging is disabled - no records will be kept of the operations done. " +
+			"This also means Replication will not work. This should only be used for debugging/specific performance analysis.")
+	}
+	if shared.IsReplDisabled {
+		fmt.Println("[PS][WARNING]Replication is disabled - no updates will be sent or received to/from other replicas. " +
+			"This should only be used for debugging/specific performance analysis.")
 	}
 }
 
@@ -1017,8 +1284,10 @@ func loadConfigs() (configs *tools.ConfigLoader) {
 	useTopKAll := flag.String("useTopKAll", "none", "if topKAddAll (resp topKRemoveAll) should be used when building views.")
 	useTopSum := flag.String("useTopSum", "none", "for Q15 of TPC-H, if TopSum should be used instead of TopK.")
 	indexFullData := flag.String("indexFullData", "none", "if optional data should be loaded in the views.")
-	queryNumbers := flag.String("queryNumbers", "none", "list of TPC-H queries to create views for. By default only views for queries Q3, Q5, Q11, Q14, Q15 and Q18 are loaded.")
+	//queryNumbers := flag.String("queryNumbers", "none", "list of TPC-H queries to create views for. By default only views for queries Q3, Q5, Q11, Q14, Q15 and Q18 are loaded.")
+	queryNumbers := flag.String("queryNumbers", "none", "list of TPC-H queries to create views for. By default views for all TPC-H queries are loaded.")
 	protoTestMode := flag.String("protoTestMode", "none", "if true, queries return a default answer in order to evaluate protobuf's performance.")
+	fastSingleRead := flag.String("fastSingleRead", "none", "if true, static reads for a single CRDT skip clock verification, thus avoiding a lock.")
 
 	flag.Parse()
 	configs = &tools.ConfigLoader{}
@@ -1095,7 +1364,7 @@ func loadConfigs() (configs *tools.ConfigLoader) {
 		ips := *tcIp
 		if ips[0] == '[' {
 			ips = strings.Replace(ips[1:len(ips)-1], ",", " ", -1)
-			fmt.Println(ips)
+			//fmt.Println(ips)
 		}
 		configs.ReplaceConfig("tcIPs", ips)
 	}
@@ -1106,7 +1375,7 @@ func loadConfigs() (configs *tools.ConfigLoader) {
 		configs.ReplaceConfig("poolMax", *poolMax)
 	}
 	if isFlagValid(*topKSize, "none") {
-		fmt.Println("[PS]TopKSize received from arguments:", *topKSize)
+		//fmt.Println("[PS]TopKSize received from arguments:", *topKSize)
 		configs.ReplaceConfig("topKSize", *topKSize)
 	}
 	if isFlagValid(*doDataload, "none") {
@@ -1146,10 +1415,14 @@ func loadConfigs() (configs *tools.ConfigLoader) {
 	if isFlagValid(*protoTestMode, "none") {
 		configs.ReplaceConfig("protoTestMode", *protoTestMode)
 	}
-	fmt.Println(*doDataload)
-	fmt.Println(*sf)
-	fmt.Println(*dataLoc)
-	fmt.Println(*region)
+	if isFlagValid(*fastSingleRead, "none") {
+		configs.ReplaceConfig("fastSingleRead", *fastSingleRead)
+	}
+	fmt.Printf("[PS]DoDataload: %s; SF: %s; DataLoc: %s; Region: %s.\n", *doDataload, *sf, *dataLoc, *region)
+	//fmt.Println(*doDataload)
+	//fmt.Println(*sf)
+	//fmt.Println(*dataLoc)
+	//fmt.Println(*region)
 	shared.IsReplDisabled = configs.GetBoolConfig("disableReplicator", false)
 	shared.IsLogDisabled = configs.GetBoolConfig("disableLog", false)
 	shared.IsReadWaitingDisabled = configs.GetBoolConfig("disableReadWaiting", false)
@@ -1277,3 +1550,174 @@ func printMemStats(memStats *runtime.MemStats, maxAlloc uint64) {
 func getHash(keyParams crdt.KeyParams) uint64 {
 	return hashFunc.StringSum64(keyParams.Bucket + keyParams.CrdtType.String() + keyParams.Key)
 }
+
+func checkSigtermUntilStartupFinishes(cancelChan chan os.Signal, readyChan chan bool) {
+	select {
+	case <-cancelChan:
+		fmt.Println("[PS]Received SIGTERM before startup finished. Shutting down forcefully.")
+		os.Exit(1)
+	case <-readyChan: //Nothing, just finish goroutine.
+
+	}
+}
+
+/*func handleStaticReadObjects(proto *proto.ApbStaticReadObjects,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbStaticReadObjectsResp) {
+
+	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransaction().GetTimestamp())
+
+	objs := antidote.ProtoObjectsToAntidoteObjects(proto.GetObjects())
+	replyChan := make(chan antidote.TMStaticReadReply)
+
+	tmChan <- createTMRequest(antidote.TMStaticReadArgs{ReadParams: objs, ReplyChan: replyChan}, txnId, clientClock)
+
+	reply := <-replyChan
+	close(replyChan)
+
+	respProto = antidote.CreateStaticReadResp(reply.States, txnId, reply.Timestamp)
+	return
+}*/
+
+/*func handleStaticRead(proto *proto.ApbStaticRead,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbStaticReadObjectsResp) {
+
+	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransaction().GetTimestamp())
+
+	objs := antidote.ProtoReadToAntidoteObjects(proto.GetFullreads(), proto.GetPartialreads())
+	replyChan := make(chan antidote.TMStaticReadReply)
+
+	tmChan <- createTMRequest(antidote.TMStaticReadArgs{ReadParams: objs, ReplyChan: replyChan}, txnId, clientClock)
+
+	reply := <-replyChan
+	close(replyChan)
+
+	//tsStart := time.Now().UnixNano()
+	respProto = antidote.CreateStaticReadResp(reply.States, txnId, reply.Timestamp)
+	//tsEnd := time.Now().UnixNano()
+	//fmt.Printf("[PS]Protobuf generation took %d microseconds.\n", (tsEnd-tsStart)/int64(time.Duration(time.Microsecond)))
+	return
+}*/
+
+/*func handleStaticUpdateObjects(proto *proto.ApbStaticUpdateObjects,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbCommitResp) {
+
+	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransaction().GetTimestamp())
+
+	updates := antidote.ProtoUpdateOpToAntidoteUpdate(proto.GetUpdates())
+
+	replyChan := make(chan antidote.TMStaticUpdateReply)
+
+	tmChan <- createTMRequest(antidote.TMStaticUpdateArgs{UpdateParams: updates, ReplyChan: replyChan}, txnId, clientClock)
+
+	reply := <-replyChan
+	close(replyChan)
+	//TODO: Actually not ignore error
+	ignore(reply.Err)
+
+	respProto = antidote.CreateCommitOkResp(reply.TransactionId, reply.Timestamp)
+	//fmt.Println(respProto.GetSuccess(), respProto.GetCommitTime(), respProto.GetErrorcode())
+	return
+}*/
+
+/*func handleReadObjects(proto *proto.ApbReadObjects,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbReadObjectsResp) {
+
+	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransactionDescriptor())
+
+	objs := antidote.ProtoObjectsToAntidoteObjects(proto.GetBoundobjects())
+	replyChan := make(chan []crdt.State)
+
+	tmChan <- createTMRequest(antidote.TMReadArgs{ReadParams: objs, ReplyChan: replyChan}, txnId, clientClock)
+
+	reply := <-replyChan
+	close(replyChan)
+
+	respProto = antidote.CreateReadObjectsResp(reply)
+	return
+}*/
+
+/*func handleRead(proto *proto.ApbRead,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbReadObjectsResp) {
+
+	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransactionDescriptor())
+
+	objs := antidote.ProtoReadToAntidoteObjects(proto.GetFullreads(), proto.GetPartialreads())
+	replyChan := make(chan []crdt.State)
+
+	tmChan <- createTMRequest(antidote.TMReadArgs{ReadParams: objs, ReplyChan: replyChan}, txnId, clientClock)
+
+	reply := <-replyChan
+	close(replyChan)
+
+	respProto = antidote.CreateReadObjectsResp(reply)
+	return
+}*/
+
+/*func handleUpdateObjects(proto *proto.ApbUpdateObjects,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbOperationResp) {
+
+	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransactionDescriptor())
+
+	updates := antidote.ProtoUpdateOpToAntidoteUpdate(proto.GetUpdates())
+
+	replyChan := make(chan antidote.TMUpdateReply)
+
+	tmChan <- createTMRequest(antidote.TMUpdateArgs{UpdateParams: updates, ReplyChan: replyChan}, txnId, clientClock)
+
+	reply := <-replyChan
+	close(replyChan)
+	//TODO: Actually not ignore error
+	ignore(reply.Err)
+
+	respProto = antidote.CreateOperationResp()
+	return
+	//return type 111, success: true. I guess this always returns success unless there is a type error.
+}*/
+
+/*func handleStartTxn(proto *proto.ApbStartTransaction,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbStartTransactionResp) {
+
+	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTimestamp())
+	replyChan := make(chan antidote.TMStartTxnReply)
+
+	tmChan <- createTMRequest(antidote.TMStartTxnArgs{ReplyChan: replyChan}, txnId, clientClock)
+
+	reply := <-replyChan
+	close(replyChan)
+
+	//Examples of txn descriptors in antidote:
+	//{tx_id,1550320956784892,<0.4144.0>}.
+	//{tx_id,1550321073482453,<0.4143.0>}. (obtained on the op after the previous timestamp)
+	//{tx_id,1550321245370469,<0.4146.0>}. (obtained after deleting the logs)
+	//It's basically a timestamp plus some kind of counter?
+
+	respProto = antidote.CreateStartTransactionResp(reply.TransactionId, reply.Timestamp)
+	return
+}*/
+
+/*func handleAbortTxn(proto *proto.ApbAbortTransaction,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbCommitResp) {
+
+	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransactionDescriptor())
+
+	tmChan <- createTMRequest(antidote.TMAbortArgs{}, txnId, clientClock)
+
+	respProto = antidote.CreateCommitOkResp(txnId, clientClock)
+	//Returns a clock and success set as true. I assume the clock is the same as the one returned in startTxn?
+	return
+}*/
+
+/*func handleCommitTxn(proto *proto.ApbCommitTransaction,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbCommitResp) {
+
+	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransactionDescriptor())
+	replyChan := make(chan antidote.TMCommitReply)
+
+	tmChan <- createTMRequest(antidote.TMCommitArgs{ReplyChan: replyChan}, txnId, clientClock)
+
+	reply := <-replyChan
+
+	//TODO: Errors?
+	respProto = antidote.CreateCommitOkResp(txnId, reply.Timestamp)
+	return
+}*/

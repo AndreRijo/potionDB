@@ -4,7 +4,6 @@ package crdt
 
 import (
 	"container/heap"
-	"fmt"
 	"math"
 
 	"potionDB/crdt/clocksi"
@@ -188,6 +187,8 @@ func (crdt *TopKHeapCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, rep
 	return crdt
 }
 
+func (crdt *TopKHeapCrdt) IsBigCRDT() bool { return crdt.maxElems > 100 && len(crdt.elems) > 100 }
+
 func (crdt *TopKHeapCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
 	//TODO: Consider updsNotYetApplied in all of these
 	/*
@@ -331,7 +332,7 @@ func (crdt *TopKHeapCrdt) applyAdd(op *DownstreamTopKAdd) (effect *Effect, other
 		//Must return this remove to propagate to other replicas
 		otherDownstreamArgs = DownstreamTopKRemove{Id: op.Id, Vc: remsVc}
 		effectValue = NoEffect{}
-		fmt.Println("[TOPKRMV]Apply add is returning a new remove.")
+		//fmt.Println("[TOPKRMV]Apply add is returning a new remove.")
 	}
 	return &effectValue, otherDownstreamArgs
 }

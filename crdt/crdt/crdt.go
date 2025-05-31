@@ -23,6 +23,12 @@ type CRDT interface {
 	GetCRDTType() proto.CRDTType
 
 	GetCRDT() CRDT //For debugging/testing purposes. It returns the CRDT itself. This is an UNSAFE operation.
+
+	//Indicates if the CRDT could take a long time to process a Read or an Update that accesses all fields.
+	//This should be O(1) based on some criteria of the existing data in the CRDT, e.g., set/map/array size.
+	//Simple CRDTs (average, flags, counters, registers, etc.) should always return false.
+	//Recommendation: maps and sets, return true if size >= 100; arrays/slices, if size >= 500.
+	IsBigCRDT() bool
 }
 
 // The idea is to include here the methods/data common to every CRDT. For now, there's... nothing
@@ -50,7 +56,23 @@ type DownstreamArguments interface {
 type ReadArguments interface {
 	GetCRDTType() proto.CRDTType
 	GetREADType() proto.READType
+	HasInnerReads() bool
+	HasVariables() bool
 }
+
+// Extends ReadArguments. Exposes a method to update all inner reads that have variables.
+type ReadArgumentsWithInner interface {
+	ReadArguments
+	CheckInnerForVariables(pointer interface{})
+}
+
+// A read argument that receives a value from a previous read
+// Not needed so far.
+/*type ReadArgumentsWithArgs interface {
+	GetCRDTType() proto.CRDTType
+	GetREADType() proto.READType
+	HasArgs() bool
+}*/
 
 type KeyParams struct {
 	Key      string
@@ -68,13 +90,106 @@ type ReadObjectParams struct {
 	ReadArgs ReadArguments
 }
 
+type PairKeyState struct {
+	Key string
+	State
+}
+
+/*
+TODO: NOT FULLY IMPLEMENTED!!! AS OF NOW, THE IMPLEMENTATION OF THIS IS NOT COMPLETE.
+Namely, TM does not support this yet.
+Some related code (search: FloatArgCompareArguments and IntArgCompareArguments) in RWEmbMapCRDT has also been commented for performance.
+
+Special read. Implements ReadArguments and ProtoRead interfaces.
+First, PreReads are applied, aggregating the results according to AggregateType.
+The result of the aggregation is stored in Result.
+Then, PostReads are applied, which can read directly from Result.
+Note: during the creation of the object, one must iterate PostReads to "connect" Result to them (including possible inner reads)
+Pre: PreReads and PostReads must themselves not include inside any ReadProcessingObjectParams.
+*/
+type ReadProcessingObjectParams struct {
+	PreReads []ReadObjectParams
+	AggregateType
+	Result    *float64
+	PostReads []ReadObjectParams
+}
+
+// Wrapper for the results of ReadProcessingObjectParams. Helps dealing with the case of there being multiple PostReads.
+// TODO: Protobuf.
+type ProcessState struct {
+	States []State
+}
+
+func (args ReadProcessingObjectParams) GetCRDTType() proto.CRDTType { return -1 }
+func (args ReadProcessingObjectParams) GetREADType() proto.READType { return proto.READType_PROCESS }
+func (args ReadProcessingObjectParams) HasInnerReads() bool         { return false }
+func (args ReadProcessingObjectParams) HasVariables() bool          { return false }
+
+func (args ReadProcessingObjectParams) ToPartialRead() (protobuf *proto.ApbPartialReadArgs) {
+	preReads, postReads := make([]*proto.ApbPartialRead, len(args.PreReads)), make([]*proto.ApbPartialRead, len(args.PostReads))
+	for i, preRead := range args.PreReads {
+		preReads[i] = ReadObjectParamsToPartialRead(preRead)
+	}
+	for i, postRead := range args.PostReads {
+		postReads[i] = ReadObjectParamsToPartialRead(postRead)
+	}
+	aggrType := proto.AGGRType(args.AggregateType)
+	return &proto.ApbPartialReadArgs{Process: &proto.ApbProcessRead{Prereads: preReads, Postreads: postReads, Aggregationtype: &aggrType}}
+}
+
+func (args ReadProcessingObjectParams) FromPartialRead(protobuf *proto.ApbPartialReadArgs) (readArgs ReadArguments) {
+	processProto := protobuf.GetProcess()
+	preReadProto, postReadProto := processProto.GetPrereads(), processProto.GetPostreads()
+	procParams := ReadProcessingObjectParams{PreReads: make([]ReadObjectParams, len(preReadProto)), PostReads: make([]ReadObjectParams, len(postReadProto))}
+	procParams.AggregateType = AggregateType(processProto.GetAggregationtype())
+
+	var boundObj *proto.ApbBoundObject
+	for i, preRead := range preReadProto {
+		boundObj = preRead.GetObject()
+		procParams.PreReads[i] = ReadObjectParams{
+			KeyParams: MakeKeyParams(string(boundObj.GetKey()), boundObj.GetType(), string(boundObj.GetBucket())),
+			ReadArgs:  *PartialReadOpToAntidoteRead(preRead.GetArgs(), boundObj.GetType(), preRead.GetReadtype()),
+		}
+	}
+	var currPostRead ReadObjectParams
+	for i, postRead := range postReadProto {
+		boundObj = postRead.GetObject()
+		currPostRead = ReadObjectParams{
+			KeyParams: MakeKeyParams(string(boundObj.GetKey()), boundObj.GetType(), string(boundObj.GetBucket())),
+			ReadArgs:  *PartialReadOpToAntidoteRead(postRead.GetArgs(), boundObj.GetType(), postRead.GetReadtype()),
+		}
+		if currPostRead.ReadArgs.HasInnerReads() || currPostRead.ReadArgs.HasVariables() {
+			currPostRead.ReadArgs.(ReadArgumentsWithInner).CheckInnerForVariables(procParams.Result)
+		}
+		procParams.PostReads[i] = currPostRead
+	}
+	return procParams
+}
+
+/*
+message ApbPartialRead {
+	required ApbBoundObject object = 1;
+	required READ_type readtype = 2;
+	required ApbPartialReadArgs args = 3;
+}
+
+message ApbPartialReadArgs {
+	optional ApbSetPartialRead set = 1;
+	optional ApbMapPartialRead map = 2;
+    optional ApbTopkPartialRead topk = 3;
+    optional ApbAvgPartialRead avg = 4;
+    optional ApbProcessRead process = 5;
+}
+*/
+
 // Represents a read of the whole state
 type StateReadArguments struct {
 }
 
 func (args StateReadArguments) GetCRDTType() proto.CRDTType { return -1 }
-
 func (args StateReadArguments) GetREADType() proto.READType { return proto.READType_FULL }
+func (args StateReadArguments) HasInnerReads() bool         { return false }
+func (args StateReadArguments) HasVariables() bool          { return false }
 
 type NoOp struct{}
 
@@ -87,25 +202,19 @@ For updsNotYetApplied (i.e., reads), this op is ignored.
 type ResetOp struct{}
 
 func (op NoOp) GetCRDTType() proto.CRDTType { return -1 }
-
-func (op NoOp) MustReplicate() bool { return false }
+func (op NoOp) MustReplicate() bool         { return false }
 
 func (op ResetOp) GetCRDTType() proto.CRDTType { return -1 }
-
-func (op ResetOp) MustReplicate() bool { return true }
-
+func (op ResetOp) MustReplicate() bool         { return true }
 func (op ResetOp) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
 	return &proto.ApbUpdateOperation{Resetop: &proto.ApbCrdtReset{}}
 }
-
 func (resetOp ResetOp) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
 	return resetOp
 }
-
 func (op ResetOp) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
 	return op
 }
-
 func (op ResetOp) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
 	return &proto.ProtoOpDownstream{ResetOp: &proto.ProtoResetDownstream{}}
 }
@@ -141,6 +250,27 @@ func (crdt genericCRDT) copy() (copyCrdt genericCRDT) {
 func SetTopKSize(size int) {
 	defaultTopKSize, defaultTopSSize = size, size
 	//PrepareTopKReply()
+}
+
+// Copy of createBoundObject from potionDB/components/antidoteProtoLib.go
+func createBoundObject(key string, crdtType proto.CRDTType, bucket string) (protobuf *proto.ApbBoundObject) {
+	return &proto.ApbBoundObject{Key: []byte(key), Type: &crdtType, Bucket: []byte(bucket)}
+}
+
+// Similar to createPartialRead from antidoteProtoLib.go
+func ReadObjectParamsToPartialRead(readParams ReadObjectParams) (protobuf *proto.ApbPartialRead) {
+	readType := readParams.ReadArgs.GetREADType()
+	protobuf = &proto.ApbPartialRead{Object: createBoundObject(readParams.Key, readParams.CrdtType, readParams.Bucket), Readtype: &readType}
+	if readType == proto.READType_FULL {
+		protobuf.Args = &proto.ApbPartialReadArgs{}
+	} else {
+		protobuf.Args = readParams.ReadArgs.(ProtoRead).ToPartialRead()
+	}
+	return
+}
+
+func ignore(arg interface{}) {
+
 }
 
 /*

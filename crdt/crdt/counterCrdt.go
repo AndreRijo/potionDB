@@ -14,9 +14,12 @@ type CounterCrdt struct {
 	value int32
 }
 
-type CounterState struct {
-	Value int32
-}
+/*
+	type CounterState struct {
+		Value int32
+	}
+*/
+type CounterState int32
 
 type Increment struct {
 	Change int32
@@ -62,6 +65,25 @@ func (crdt *CounterCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, repl
 	return crdt
 }
 
+func (crdt *CounterCrdt) IsBigCRDT() bool { return false }
+
+func (crdt *CounterCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
+	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+		return CounterState(crdt.value)
+	}
+	copyValue := crdt.value
+	for _, upd := range updsNotYetApplied {
+		switch typedUpd := (upd).(type) {
+		case Increment:
+			copyValue += typedUpd.Change
+		case Decrement:
+			copyValue -= typedUpd.Change
+		}
+	}
+	return CounterState(copyValue)
+}
+
+/*
 func (crdt *CounterCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
 	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
 		return crdt.GetValue()
@@ -81,6 +103,7 @@ func (crdt *CounterCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArgu
 func (crdt *CounterCrdt) GetValue() (state State) {
 	return CounterState{Value: crdt.value}
 }
+*/
 
 func (crdt *CounterCrdt) Update(args UpdateArguments) (downstreamArgs DownstreamArguments) {
 	return args.(DownstreamArguments)
@@ -160,12 +183,14 @@ func (crdtOp Decrement) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
 }
 
 func (crdtState CounterState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
-	crdtState.Value = protobuf.GetCounter().GetValue()
+	//crdtState.Value = protobuf.GetCounter().GetValue()
+	crdtState = CounterState(protobuf.GetCounter().GetValue())
 	return crdtState
 }
 
 func (crdtState CounterState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
-	return &proto.ApbReadObjectResp{Counter: &proto.ApbGetCounterResp{Value: pb.Int32(crdtState.Value)}}
+	return &proto.ApbReadObjectResp{Counter: &proto.ApbGetCounterResp{Value: pb.Int32(int32(crdtState))}}
+	//return &proto.ApbReadObjectResp{Counter: &proto.ApbGetCounterResp{Value: pb.Int32(crdtState.Value)}}
 }
 
 func (downOp Increment) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {

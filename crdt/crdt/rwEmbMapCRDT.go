@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"fmt"
+	"math"
 	"strings"
 
 	"potionDB/crdt/clocksi"
@@ -37,6 +38,9 @@ type RWEmbMapCrdt struct {
 	//Extra metadata for rebuilding old CRDT versions via inversibleCRDT.
 	//Should not be copied or transmitted to other replicas
 	keysToRebuild map[string]struct{} //Stores the keys of the CRDTs that were changed while going back in time
+	//Variables that help with reading embedded CRDTs that are big.
+	replChan     chan PairKeyState
+	routineCount int
 }
 
 type markedTimestamp struct {
@@ -101,10 +105,17 @@ type EmbMapExceptArguments struct {
 	ArgForAll  ReadArguments //Optional, can be full read
 }
 
+type EmbMapSingleExceptArguments struct {
+	ExceptKey string
+	ArgForAll ReadArguments //Optional, can be full read
+}
+
 type CompType byte
+type AggregateType byte
 
 const (
-	EQ, NEQ, LEQ, L, H, HEQ = CompType(1), CompType(0), CompType(2), CompType(3), CompType(4), CompType(5)
+	EQ, NEQ, LEQ, L, H, HEQ    = CompType(1), CompType(0), CompType(2), CompType(3), CompType(4), CompType(5)
+	M_SUM, M_AVG, M_MAX, M_MIN = AggregateType(0), AggregateType(1), AggregateType(2), AggregateType(3)
 )
 
 type CompareArguments interface {
@@ -116,8 +127,19 @@ type IntCompareArguments struct {
 	CompType
 }
 
+type IntArgCompareArguments struct {
+	Value *float64 //For now, for the sake of simplicity, a float64 is used.
+	CompType
+}
+
 type FloatCompareArguments struct {
 	Value float64
+	CompType
+}
+
+// Receives the value from a previous read (i.e., used with ReadProcessingObjectParams)
+type FloatArgCompareArguments struct {
+	Value *float64
 	CompType
 }
 
@@ -154,6 +176,19 @@ type EmbMapConditionalReadAllArguments struct {
 type EmbMapConditionalReadExceptArguments struct {
 	ExceptKeys    map[string]struct{}
 	CondArgForAll CompareArguments
+}
+
+type EmbMapConditionalReadExceptSingleArguments struct {
+	ExceptKey     string
+	CondArgForAll CompareArguments
+}
+
+type EmbMapAggregateArguments struct {
+	AggregateType
+	Keys       []string         //Optional. If not present, every existing key is considered.
+	CompForAll CompareArguments //Optional. If not present, ArgForAll is used.
+	ArgForAll  ReadArguments    //Optional, can be full read
+	AggrKey    string           //Optional. In case CompForAll or ArgForAll returns a map state, this key is used to know which field to aggregate.
 }
 
 //Operations
@@ -217,23 +252,25 @@ type RWEmbMapRemoveAllEffect struct {
 	PreviousClk  int64 //Previous value of rmvClock[replicaID]
 }
 
-func (compArgs *GetNoCompareArguments) GetCompType() CompType { return EQ }
-func (compArgs *IntCompareArguments) GetCompType() CompType   { return compArgs.CompType }
-func (compArgs *FloatCompareArguments) GetCompType() CompType { return compArgs.CompType }
-func (compArgs *MapCompareArguments) GetCompType() CompType   { return EQ }
-func (compArgs *StringCompareArguments) GetCompType() CompType {
+func (compArgs GetNoCompareArguments) GetCompType() CompType    { return EQ }
+func (compArgs IntCompareArguments) GetCompType() CompType      { return compArgs.CompType }
+func (compArgs IntArgCompareArguments) GetCompType() CompType   { return compArgs.CompType }
+func (compArgs FloatCompareArguments) GetCompType() CompType    { return compArgs.CompType }
+func (compArgs FloatArgCompareArguments) GetCompType() CompType { return compArgs.CompType }
+func (compArgs MapCompareArguments) GetCompType() CompType      { return EQ }
+func (compArgs StringCompareArguments) GetCompType() CompType {
 	if compArgs.IsEqualComp {
 		return EQ
 	}
 	return NEQ
 }
-func (compArgs *BytesCompareArguments) GetCompType() CompType {
+func (compArgs BytesCompareArguments) GetCompType() CompType {
 	if compArgs.IsEqualComp {
 		return EQ
 	}
 	return NEQ
 }
-func (compArgs *BoolCompareArguments) GetCompType() CompType {
+func (compArgs BoolCompareArguments) GetCompType() CompType {
 	if compArgs.IsEqualComp {
 		return EQ
 	}
@@ -270,33 +307,134 @@ func (args EmbMapGetValuesState) GetCRDTType() proto.CRDTType { return proto.CRD
 func (args EmbMapGetValuesState) GetREADType() proto.READType { return proto.READType_GET_VALUES }
 
 // Queries
-func (args EmbMapGetValueArguments) GetCRDTType() proto.CRDTType     { return proto.CRDTType_RRMAP }
-func (args EmbMapGetValueArguments) GetREADType() proto.READType     { return proto.READType_GET_VALUE }
-func (args EmbMapPartialArguments) GetCRDTType() proto.CRDTType      { return proto.CRDTType_RRMAP }
-func (args EmbMapPartialArguments) GetREADType() proto.READType      { return proto.READType_GET_VALUES }
+func (args EmbMapGetValueArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_RRMAP }
+func (args EmbMapGetValueArguments) GetREADType() proto.READType { return proto.READType_GET_VALUE }
+func (args EmbMapGetValueArguments) HasInnerReads() bool         { return true }
+func (args EmbMapGetValueArguments) HasVariables() bool          { return false }
+func (args EmbMapGetValueArguments) CheckInnerForVariables(pointer interface{}) {
+	CheckInnerForVariablesSingle(args.Args, pointer)
+}
+
+func (args EmbMapPartialArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_RRMAP }
+func (args EmbMapPartialArguments) GetREADType() proto.READType { return proto.READType_GET_VALUES }
+func (args EmbMapPartialArguments) HasInnerReads() bool         { return true }
+func (args EmbMapPartialArguments) HasVariables() bool          { return false }
+func (args EmbMapPartialArguments) CheckInnerForVariables(pointer interface{}) {
+	CheckInnerForVariablesMap(args.Args, pointer)
+}
+
 func (args EmbMapPartialOnAllArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_RRMAP }
 func (args EmbMapPartialOnAllArguments) GetREADType() proto.READType {
 	return proto.READType_GET_ALL_VALUES
 }
+func (args EmbMapPartialOnAllArguments) HasInnerReads() bool { return true }
+func (args EmbMapPartialOnAllArguments) HasVariables() bool  { return false }
+func (args EmbMapPartialOnAllArguments) CheckInnerForVariables(pointer interface{}) {
+	CheckInnerForVariablesSingle(args.ArgForAll, pointer)
+}
+
 func (args EmbMapConditionalReadArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_RRMAP }
 func (args EmbMapConditionalReadArguments) GetREADType() proto.READType {
 	return proto.READType_GET_COND
 }
+func (args EmbMapConditionalReadArguments) HasInnerReads() bool { return true }
+func (args EmbMapConditionalReadArguments) HasVariables() bool  { return false }
+func (args EmbMapConditionalReadArguments) CheckInnerForVariables(pointer interface{}) {
+	CheckInnerForVariablesMapComparable(args.CondArgs, pointer)
+}
+
 func (args EmbMapConditionalReadAllArguments) GetCRDTType() proto.CRDTType {
 	return proto.CRDTType_RRMAP
 }
 func (args EmbMapConditionalReadAllArguments) GetREADType() proto.READType {
 	return proto.READType_GET_ALL_COND
 }
+func (args EmbMapConditionalReadAllArguments) HasInnerReads() bool { return true }
+func (args EmbMapConditionalReadAllArguments) HasVariables() bool  { return false }
+func (args EmbMapConditionalReadAllArguments) CheckInnerForVariables(pointer interface{}) {
+	CheckInnerForVariablesSingleComparable(args.CompareArguments, pointer)
+}
+
 func (args EmbMapConditionalReadExceptArguments) GetCRDTType() proto.CRDTType {
 	return proto.CRDTType_RRMAP
 }
 func (args EmbMapConditionalReadExceptArguments) GetREADType() proto.READType {
 	return proto.READType_GET_EXCEPT_COND
 }
+func (args EmbMapConditionalReadExceptArguments) HasInnerReads() bool { return true }
+func (args EmbMapConditionalReadExceptArguments) HasVariables() bool  { return false }
+func (args EmbMapConditionalReadExceptArguments) CheckInnerForVariables(pointer interface{}) {
+	CheckInnerForVariablesSingleComparable(args.CondArgForAll, pointer)
+}
+
+func (args EmbMapConditionalReadExceptSingleArguments) GetCRDTType() proto.CRDTType {
+	return proto.CRDTType_RRMAP
+}
+func (args EmbMapConditionalReadExceptSingleArguments) GetREADType() proto.READType {
+	return proto.READType_GET_EXCEPT_SINGLE_COND
+}
+func (args EmbMapConditionalReadExceptSingleArguments) HasInnerReads() bool { return true }
+func (args EmbMapConditionalReadExceptSingleArguments) HasVariables() bool  { return false }
+func (args EmbMapConditionalReadExceptSingleArguments) CheckInnerForVariables(pointer interface{}) {
+	CheckInnerForVariablesSingleComparable(args.CondArgForAll, pointer)
+}
 
 func (args EmbMapExceptArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_RRMAP }
 func (args EmbMapExceptArguments) GetREADType() proto.READType { return proto.READType_GET_EXCEPT }
+func (args EmbMapExceptArguments) HasInnerReads() bool         { return true }
+func (args EmbMapExceptArguments) HasVariables() bool          { return false }
+func (args EmbMapExceptArguments) CheckInnerForVariables(pointer interface{}) {
+	CheckInnerForVariablesSingle(args.ArgForAll, pointer)
+}
+
+func (args EmbMapSingleExceptArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_RRMAP }
+func (args EmbMapSingleExceptArguments) GetREADType() proto.READType {
+	return proto.READType_GET_EXCEPT_SINGLE
+}
+func (args EmbMapSingleExceptArguments) HasInnerReads() bool { return true }
+func (args EmbMapSingleExceptArguments) HasVariables() bool  { return false }
+func (args EmbMapSingleExceptArguments) CheckInnerForVariables(pointer interface{}) {
+	CheckInnerForVariablesSingle(args.ArgForAll, pointer)
+}
+
+func (args EmbMapAggregateArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_RRMAP }
+func (args EmbMapAggregateArguments) GetREADType() proto.READType {
+	return proto.READType_GET_AGGREGATE
+}
+func (args EmbMapAggregateArguments) HasInnerReads() bool { return true }
+func (args EmbMapAggregateArguments) HasVariables() bool  { return false }
+func (args EmbMapAggregateArguments) CheckInnerForVariables(pointer interface{}) {
+	CheckInnerForVariablesSingle(args.ArgForAll, pointer)
+}
+
+func CheckInnerForVariablesMap(args map[string]ReadArguments, pointer interface{}) {
+	for _, args := range args {
+		if args.HasVariables() {
+			args.(ReadArgumentsWithInner).CheckInnerForVariables(pointer)
+		}
+	}
+}
+
+func CheckInnerForVariablesSingle(args ReadArguments, pointer interface{}) {
+	if args.HasVariables() {
+		args.(ReadArgumentsWithInner).CheckInnerForVariables(pointer)
+	}
+}
+
+func CheckInnerForVariablesSingleComparable(args CompareArguments, pointer interface{}) {
+	switch typedArgs := args.(type) {
+	case IntArgCompareArguments:
+		typedArgs.Value = pointer.(*float64)
+	case FloatArgCompareArguments:
+		typedArgs.Value = pointer.(*float64)
+	}
+}
+
+func CheckInnerForVariablesMapComparable(args map[string]CompareArguments, pointer interface{}) {
+	for _, args := range args {
+		CheckInnerForVariablesSingleComparable(args, pointer)
+	}
+}
 
 // Note: crdt can (and most often will be) nil
 func (crdt *RWEmbMapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
@@ -318,6 +456,8 @@ func (crdt *RWEmbMapCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, rep
 	return crdt
 }
 
+func (crdt *RWEmbMapCrdt) IsBigCRDT() bool { return len(crdt.entries) >= 50 }
+
 func (crdt *RWEmbMapCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
 	//fmt.Printf("[RWEmb][Read]Read args: %+v (%T)\n", args, args)
 	switch typedArg := args.(type) {
@@ -330,10 +470,13 @@ func (crdt *RWEmbMapCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArg
 	case HasKeyArguments:
 		return crdt.hasKey(updsNotYetApplied, typedArg.Key)
 	case GetValuesArguments:
+		//fmt.Printf("[RWEmb][Read]GetValuesArguments: %+v\n", typedArg)
 		return crdt.getValues(updsNotYetApplied, typedArg.Keys)
 	case EmbMapPartialArguments:
+		//fmt.Printf("[RWEmb][Read]EmbMapPartialArguments: %+v\n", typedArg)
 		return crdt.getPartialState(updsNotYetApplied, typedArg.Args)
 	case EmbMapPartialOnAllArguments:
+		//fmt.Printf("[RWEmb][Read]EmbMapPartialOnAllArguments: %+v\n", typedArg)
 		return crdt.getAllPartialState(updsNotYetApplied, typedArg.ArgForAll)
 	case EmbMapConditionalReadArguments:
 		return crdt.getCondState(updsNotYetApplied, typedArg.CondArgs)
@@ -343,18 +486,75 @@ func (crdt *RWEmbMapCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArg
 		return crdt.getAllExcept(updsNotYetApplied, typedArg.ExceptKeys, typedArg.ArgForAll)
 	case EmbMapConditionalReadExceptArguments:
 		return crdt.getExceptCondState(updsNotYetApplied, typedArg.ExceptKeys, typedArg.CondArgForAll)
+	case EmbMapSingleExceptArguments:
+		return crdt.getExceptSingleState(updsNotYetApplied, typedArg.ExceptKey, typedArg.ArgForAll)
+	case EmbMapConditionalReadExceptSingleArguments:
+		return crdt.getExceptCondSingleState(updsNotYetApplied, typedArg.ExceptKey, typedArg.CondArgForAll)
+	case EmbMapAggregateArguments:
+		return /*EmbMapGetValueState{State: */ crdt.getAggregateState(updsNotYetApplied, typedArg.AggregateType, typedArg.Keys, typedArg.CompForAll, typedArg.ArgForAll, typedArg.AggrKey) //}
 	default:
 		fmt.Printf("[RWEmb]Unknown read type: %T\n", args)
 	}
 	return nil
 }
 
-func (crdt *RWEmbMapCrdt) getState(updsNotYetApplied []UpdateArguments) (state EmbMapEntryState) {
-	states := make(map[string]State)
-	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
-		for key, embCrdt := range crdt.entries {
-			states[key] = embCrdt.Read(StateReadArguments{}, updsNotYetApplied)
+func (crdt *RWEmbMapCrdt) initReadHelpers() {
+	if crdt.replChan == nil {
+		crdt.replChan = make(chan PairKeyState, 10)
+	}
+	crdt.routineCount = 0
+}
+
+func (crdt *RWEmbMapCrdt) bigCrdtReadHelper(embCrdt CRDT, key string, args ReadArguments, updsNotYetApplied []UpdateArguments) {
+	//fmt.Printf("[RWEmb][BigCrdtReadHelper]Calling goRoutine to help with read of key %s as its size is %d.\n", key, len(embCrdt.(*RWEmbMapCrdt).entries))
+	crdt.routineCount++
+	go func() { crdt.replChan <- PairKeyState{Key: key, State: embCrdt.Read(args, updsNotYetApplied)} }()
+}
+
+func (crdt *RWEmbMapCrdt) bigCrdtCondReadHelper(embCrdt CRDT, key string, condArgs CompareArguments, updsNotYetApplied []UpdateArguments) {
+	//fmt.Printf("[RWEmb][BigCrdtCondReadHelper]Calling goRoutine to help with read of key %s as its size is %d.\n", key, len(embCrdt.(*RWEmbMapCrdt).entries))
+	crdt.routineCount++
+	go func() {
+		crdt.replChan <- PairKeyState{Key: key, State: crdt.getStateIfCondition(embCrdt, updsNotYetApplied, condArgs)}
+	}()
+	//Note: State will be nil if the condition fails. The receveRoutineReads deals with that case
+}
+
+func (crdt *RWEmbMapCrdt) receiveRoutineReads(states map[string]State) {
+	for i := 0; i < crdt.routineCount; i++ {
+		pair := <-crdt.replChan
+		if pair.State != nil { //Can happen when doing conditional reads
+			states[pair.Key] = pair.State
 		}
+	}
+	//fmt.Printf("[RWEmb][receiveRoutineReads]End of reads with goRoutines.\n")
+}
+
+func (crdt *RWEmbMapCrdt) receiveRoutineReadsAndAggregate(currResult float64, currCount int,
+	aggregateType AggregateType, aggrKey string) (newCurrResult float64, newCurrCount int) {
+	for i := 0; i < crdt.routineCount; i++ {
+		pair := <-crdt.replChan
+		if pair.State != nil {
+			crdt.aggregateProcessState(pair.State, aggregateType, &currResult, &currCount, aggrKey)
+		}
+	}
+	//fmt.Printf("[RWEmb][receiveRoutineReadsAndAggregate]End of aggregation with goRoutines. Result: %f, count: %d\n", currResult, currCount)
+	return currResult, currCount
+}
+
+func (crdt *RWEmbMapCrdt) getState(updsNotYetApplied []UpdateArguments) (state EmbMapEntryState) {
+	states, fullRead := make(map[string]State, len(crdt.entries)), StateReadArguments{}
+	var inCRDTState State
+	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+		crdt.initReadHelpers()
+		for key, embCrdt := range crdt.entries {
+			if embCrdt.IsBigCRDT() {
+				crdt.bigCrdtReadHelper(embCrdt, key, fullRead, updsNotYetApplied)
+			} else if inCRDTState = embCrdt.Read(fullRead, updsNotYetApplied); inCRDTState != nil {
+				states[key] = inCRDTState
+			}
+		}
+		crdt.receiveRoutineReads(states)
 		return EmbMapEntryState{States: states}
 	}
 
@@ -448,11 +648,23 @@ func (crdt *RWEmbMapCrdt) prepareApplyByCRDTMap(updsNotYetApplied []UpdateArgume
 
 func (crdt *RWEmbMapCrdt) getAllPartialState(updsNotYetApplied []UpdateArguments, arg ReadArguments) (state EmbMapGetValuesState) {
 	states := make(map[string]State)
+	var inCRDTState State
 	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+		//startTs := time.Now().UnixNano()
+		crdt.initReadHelpers()
+		//fmt.Printf("[RWEmb][GetAllPartial]Number of CRDT entries: %d\n", len(crdt.entries))
 		for key, embCrdt := range crdt.entries {
-			states[key] = embCrdt.Read(arg, updsNotYetApplied)
+			if embCrdt.IsBigCRDT() {
+				crdt.bigCrdtReadHelper(embCrdt, key, arg, updsNotYetApplied)
+			} else if inCRDTState = embCrdt.Read(arg, updsNotYetApplied); inCRDTState != nil {
+				states[key] = inCRDTState
+			}
 			//fmt.Printf("[RWEmb][GetAllPartial]Key: %v. Value: %+v\n", key, states[key])
 		}
+		crdt.receiveRoutineReads(states)
+		//diffTs := (time.Now().UnixNano() - startTs) / int64(time.Duration(time.Microsecond))
+		//fmt.Printf("[RWEmb][GetAllPartial]Time to read all partial states (%d): %d us. Read %d CRDTs, returning %d states\n",
+		//	len(crdt.entries), diffTs, len(crdt.entries), len(states))
 		return EmbMapGetValuesState{States: states}
 	}
 
@@ -491,14 +703,20 @@ func (crdt *RWEmbMapCrdt) getExceptCondState(updsNotYetApplied []UpdateArguments
 	states := make(map[string]State)
 	var currState State
 	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+		crdt.initReadHelpers()
 		for key, embCrdt := range crdt.entries {
 			if _, has := exceptKeys[key]; !has {
-				currState = crdt.getStateIfCondition(embCrdt, updsNotYetApplied, condArgs)
-				if currState != nil {
-					states[key] = currState
+				if embCrdt.IsBigCRDT() {
+					crdt.bigCrdtCondReadHelper(embCrdt, key, condArgs, updsNotYetApplied)
+				} else {
+					currState = crdt.getStateIfCondition(embCrdt, updsNotYetApplied, condArgs)
+					if currState != nil {
+						states[key] = currState
+					}
 				}
 			}
 		}
+		crdt.receiveRoutineReads(states)
 		return EmbMapEntryState{States: states}
 	}
 
@@ -544,18 +762,449 @@ func (crdt *RWEmbMapCrdt) getExceptCondState(updsNotYetApplied []UpdateArguments
 	return EmbMapEntryState{States: states}
 }
 
+func (crdt *RWEmbMapCrdt) getExceptCondSingleState(updsNotYetApplied []UpdateArguments, exceptKey string, condArgs CompareArguments) (state EmbMapEntryState) {
+	//Similar to getExceptCondState but for a single except key
+	states := make(map[string]State)
+	var currState State
+	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+		crdt.initReadHelpers()
+		for key, embCrdt := range crdt.entries {
+			if key != exceptKey {
+				if embCrdt.IsBigCRDT() {
+					crdt.bigCrdtCondReadHelper(embCrdt, key, condArgs, updsNotYetApplied)
+				} else {
+					currState = crdt.getStateIfCondition(embCrdt, updsNotYetApplied, condArgs)
+					if currState != nil {
+						states[key] = currState
+					}
+				}
+			}
+		}
+		crdt.receiveRoutineReads(states)
+		return EmbMapEntryState{States: states}
+	}
+
+	applyByCRDT := crdt.prepareApplyByCRDTMap(updsNotYetApplied)
+
+	//Now, apply
+	for key, upds := range applyByCRDT {
+		if key == exceptKey {
+			continue //Skip
+		}
+		if (upds[0] == NoOp{}) {
+			if len(upds) > 1 {
+				//Start from scratch
+				currState = crdt.getStateIfCondition(InitializeCrdt((upds[1]).GetCRDTType(),
+					crdt.replicaID), upds[1:], condArgs)
+				if currState != nil {
+					states[key] = currState
+				}
+			} else {
+				//Removed CRDT, thus doesn't belong to state
+				continue
+			}
+		} else {
+			embCrdt, _ := crdt.getOrCreateEmbCrdt(key, (upds[0]))
+			currState = crdt.getStateIfCondition(embCrdt, upds, condArgs)
+			if currState != nil {
+				states[key] = currState
+			}
+		}
+	}
+
+	//Also need to include CRDTs that aren't referred in applyByCRDT
+	for key, embCrdt := range crdt.entries {
+		if key != exceptKey {
+			if _, has := applyByCRDT[key]; !has {
+				currState = crdt.getStateIfCondition(embCrdt, []UpdateArguments{}, condArgs)
+				if currState != nil {
+					states[key] = currState
+				}
+			}
+		}
+	}
+	return EmbMapEntryState{States: states}
+}
+
+// Note: For now, float64 is always used for aggregation.
+func (crdt *RWEmbMapCrdt) getAggregateState(updsNotYetApplied []UpdateArguments, aggregateType AggregateType,
+	keys []string, compForAll CompareArguments, argForAll ReadArguments, aggrKey string) (state State) {
+	if keys != nil {
+		if compForAll == nil {
+			//fmt.Printf("[RWEmbMap]getAggregateStateByReadArgsByKeys\n")
+			return crdt.getAggregateStateByReadArgsByKeys(updsNotYetApplied, aggregateType, keys, argForAll, aggrKey)
+		} else {
+			//fmt.Printf("[RWEmbMap]getAggregateStateByCompArgsByKeys\n")
+			return crdt.getAggregateStateByCompArgsByKeys(updsNotYetApplied, aggregateType, keys, compForAll, aggrKey)
+		}
+	} //else: keys == nil
+	if compForAll == nil {
+		//fmt.Printf("[RWEmbMap]getAggregateStateByReadArgs\n")
+		return crdt.getAggregateStateByReadArgs(updsNotYetApplied, aggregateType, argForAll, aggrKey)
+	}
+	//fmt.Printf("[RWEmbMap]getAggregateStateByCompArgs\n")
+	return crdt.getAggregateStateByCompArgs(updsNotYetApplied, aggregateType, compForAll, aggrKey)
+}
+
+func (crdt *RWEmbMapCrdt) aggregateProcessState(currState State, aggregateType AggregateType, currResult *float64, currCount *int, aggrKey string) {
+	valueCounter := 0.0
+	valueCount := 1
+	switch typedState := currState.(type) {
+	case CounterState:
+		valueCounter = float64(typedState)
+		//fmt.Printf("[RWEmbMapCrdt][aggregateProcessState]Reading CounterState: %v\n", valueCounter)
+	case CounterFloatState:
+		valueCounter = float64(typedState)
+		//fmt.Printf("[RWEmbMapCrdt][aggregateProcessState]Reading CounterFloatState: %v\n", valueCounter)
+	case AvgFullState:
+		valueCounter = float64(typedState.Sum)
+		valueCount = int(typedState.NAdds)
+		//fmt.Printf("[RWEmbMapCrdt][aggregateProcessState]Reading AvgFullState: %v, %v\n", valueCounter, valueCount)
+	case AvgState:
+		valueCounter = typedState.Value
+		//fmt.Printf("[RWEmbMapCrdt][aggregateProcessState]Reading AvgState: %v, %v\n", valueCounter, valueCount)
+	case EmbMapGetValueState:
+		valueCounter, valueCount = crdt.aggregateProcessStateHelper(typedState.State, aggregateType)
+	case EmbMapEntryState: //Filter with aggrKey.
+		state := typedState.States[aggrKey]
+		if state != nil {
+			valueCounter, valueCount = crdt.aggregateProcessStateHelper(state, aggregateType)
+		} else {
+			fmt.Printf("[RWEmbMapCrdt][aggregateProcessState]Key %v not found in EmbMapEntryState\n", aggrKey)
+		}
+	case EmbMapGetValuesState: //Same as above.
+		state := typedState.States[aggrKey]
+		if state != nil {
+			valueCounter, valueCount = crdt.aggregateProcessStateHelper(state, aggregateType)
+		} else {
+			fmt.Printf("[RWEmbMapCrdt][aggregateProcessState]Key %v not found in EmbMapGetValuesState\n", aggrKey)
+		}
+	default:
+		fmt.Printf("[RWEmbMapCRDT][aggregateProcessState]Unsupported state type: %T\n", currState)
+	}
+	switch aggregateType {
+	case M_SUM:
+		*currResult += valueCounter
+		//fmt.Printf("[RWEmbMapCRDT][aggregateProcessState]Sum. Incremented currResult by %f. Total: %f.\n", valueCounter, *currResult)
+	case M_AVG:
+		*currResult += valueCounter
+		*currCount += valueCount
+		/*if *currCount%100 == 0 {
+			fmt.Printf("[RWEmbMapCRDT][aggregateProcessState]Average. Incremented currResult and currCount by %f, %d. Total: %f, %d. (Only reporting every 100 count)\n",
+				valueCounter, valueCount, *currResult, *currCount)
+		}*/
+	case M_MAX:
+		if valueCounter > *currResult {
+			*currResult = valueCounter
+		}
+	case M_MIN:
+		if valueCounter < *currResult {
+			*currResult = valueCounter
+		}
+	default:
+		fmt.Printf("[RWEmbMapCRDT][aggregateProcessState]Unsupported aggregate type: %v\n", aggregateType)
+	}
+}
+
+// To avoid code repetition, this helper tries to find the state inside a map
+func (crdt *RWEmbMapCrdt) aggregateProcessStateHelper(currState State, aggregateType AggregateType) (valueCounter float64, valueCount int) {
+	switch typedState := currState.(type) {
+	case CounterState:
+		return float64(typedState), 1
+	case CounterFloatState:
+		return float64(typedState), 1
+	case AvgFullState:
+		return float64(typedState.Sum), int(typedState.NAdds)
+	case AvgState:
+		return typedState.Value, 1
+	default:
+		fmt.Printf("[RWEmbMapCRDT][aggregateProcessStateHelper]Unsupported state type: %T. Maybe a map state inside a map state?\n", currState)
+	}
+	return
+}
+
+func (crdt *RWEmbMapCrdt) prepareAggregateRead(aggregateType AggregateType) (result float64, count int) {
+	if aggregateType == M_MIN {
+		result = math.MaxFloat64
+	} else if aggregateType == M_MAX {
+		result = -math.MaxFloat64
+	}
+	return
+}
+
+func (crdt *RWEmbMapCrdt) getAggregateStateByReadArgsByKeys(updsNotYetApplied []UpdateArguments,
+	aggregateType AggregateType, keys []string, argForAll ReadArguments, aggrKey string) (state State) {
+	var currState State
+	currResult, currCount := crdt.prepareAggregateRead(aggregateType)
+
+	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+		crdt.initReadHelpers()
+		for _, key := range keys {
+			if embCrdt, has := crdt.entries[key]; has {
+				if embCrdt.IsBigCRDT() {
+					crdt.bigCrdtReadHelper(embCrdt, key, argForAll, updsNotYetApplied)
+				} else {
+					currState = embCrdt.Read(argForAll, updsNotYetApplied)
+					if currState != nil {
+						crdt.aggregateProcessState(currState, aggregateType, &currResult, &currCount, aggrKey)
+					}
+				}
+			}
+		}
+		crdt.receiveRoutineReadsAndAggregate(currResult, currCount, aggregateType, aggrKey)
+	} else {
+		applyByCRDT := crdt.prepareApplyByCRDTMap(updsNotYetApplied)
+
+		for _, key := range keys {
+			if upds, has := applyByCRDT[key]; has {
+				if (upds[0] == NoOp{}) {
+					if len(upds) > 1 {
+						//Start from scratch
+						currState = InitializeCrdt((upds[1]).GetCRDTType(), crdt.replicaID).Read(argForAll, upds[1:])
+						if currState != nil {
+							crdt.aggregateProcessState(currState, aggregateType, &currResult, &currCount, aggrKey)
+						}
+					} else {
+						//Removed CRDT, thus doesn't belong to state
+						continue
+					}
+				} else {
+					embCrdt, _ := crdt.getOrCreateEmbCrdt(key, (upds[0]))
+					currState = embCrdt.Read(argForAll, upds)
+					if currState != nil {
+						crdt.aggregateProcessState(currState, aggregateType, &currResult, &currCount, aggrKey)
+					}
+				}
+			} else if embCrdt, has := crdt.entries[key]; has {
+				currState = embCrdt.Read(argForAll, upds)
+				if currState != nil {
+					crdt.aggregateProcessState(currState, aggregateType, &currResult, &currCount, aggrKey)
+				}
+			}
+		}
+	}
+
+	//fmt.Printf("[RWEmbMap][getAggregateStateByReadArgsByKeys]Returning either CounterFloatState or AvgFullState. CurrResult: %f, CurrCount: %d\n", currResult, currCount)
+	if aggregateType == M_AVG {
+		return AvgFullState{Sum: int64(currResult), NAdds: int64(currCount)}
+	}
+	return CounterFloatState(currResult)
+}
+
+func (crdt *RWEmbMapCrdt) getAggregateStateByReadArgs(updsNotYetApplied []UpdateArguments,
+	aggregateType AggregateType, argForAll ReadArguments, aggrKey string) (state State) {
+	var currState State
+	currResult, currCount := crdt.prepareAggregateRead(aggregateType)
+
+	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+		crdt.initReadHelpers()
+		for _, embCrdt := range crdt.entries {
+			if embCrdt.IsBigCRDT() {
+				crdt.bigCrdtReadHelper(embCrdt, "", argForAll, updsNotYetApplied)
+			} else {
+				currState = embCrdt.Read(argForAll, updsNotYetApplied)
+				if currState != nil {
+					crdt.aggregateProcessState(currState, aggregateType, &currResult, &currCount, aggrKey)
+				}
+			}
+		}
+		crdt.receiveRoutineReadsAndAggregate(currResult, currCount, aggregateType, aggrKey)
+	} else {
+		applyByCRDT := crdt.prepareApplyByCRDTMap(updsNotYetApplied)
+		for key, upds := range applyByCRDT {
+			if (upds[0] == NoOp{}) {
+				if len(upds) > 1 {
+					//Start from scratch
+					currState = InitializeCrdt((upds[1]).GetCRDTType(), crdt.replicaID).Read(argForAll, upds[1:])
+					if currState != nil {
+						crdt.aggregateProcessState(currState, aggregateType, &currResult, &currCount, aggrKey)
+					}
+				} else {
+					//Removed CRDT, thus doesn't belong to state
+					continue
+				}
+			} else {
+				embCrdt, _ := crdt.getOrCreateEmbCrdt(key, (upds[0]))
+				currState = embCrdt.Read(argForAll, upds)
+				if currState != nil {
+					crdt.aggregateProcessState(currState, aggregateType, &currResult, &currCount, aggrKey)
+				}
+			}
+		}
+
+		//Also need to include CRDTs that aren't referred in applyByCRDT
+		for key, embCrdt := range crdt.entries {
+			if _, has := applyByCRDT[key]; !has {
+				currState = embCrdt.Read(argForAll, []UpdateArguments{})
+				if currState != nil {
+					crdt.aggregateProcessState(currState, aggregateType, &currResult, &currCount, aggrKey)
+				}
+			}
+		}
+	}
+
+	//fmt.Printf("[RWEmbMap][getAggregateStateByReadArgs]Returning either CounterFloatState or AvgFullState. CurrResult: %f, CurrCount: %d\n", currResult, currCount)
+	if aggregateType == M_AVG {
+		return AvgFullState{Sum: int64(currResult), NAdds: int64(currCount)}
+	}
+	return CounterFloatState(currResult)
+}
+
+func (crdt *RWEmbMapCrdt) getAggregateStateByCompArgsByKeys(updsNotYetApplied []UpdateArguments,
+	aggregateType AggregateType, keys []string, compForAll CompareArguments, aggrKey string) (state State) {
+	var currState State
+	currResult, currCount := crdt.prepareAggregateRead(aggregateType)
+
+	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+		crdt.initReadHelpers()
+		for _, key := range keys {
+			if embCrdt, has := crdt.entries[key]; has {
+				if embCrdt.IsBigCRDT() {
+					crdt.bigCrdtCondReadHelper(embCrdt, key, compForAll, updsNotYetApplied)
+				} else {
+					currState = crdt.getStateIfCondition(embCrdt, updsNotYetApplied, compForAll)
+					if currState != nil {
+						crdt.aggregateProcessState(currState, aggregateType, &currResult, &currCount, aggrKey)
+					}
+				}
+			}
+		}
+		crdt.receiveRoutineReadsAndAggregate(currResult, currCount, aggregateType, aggrKey)
+	} else {
+		applyByCRDT := crdt.prepareApplyByCRDTMap(updsNotYetApplied)
+
+		for _, key := range keys {
+			if upds, has := applyByCRDT[key]; has {
+				if (upds[0] == NoOp{}) {
+					if len(upds) > 1 {
+						//Start from scratch
+						currState = crdt.getStateIfCondition(InitializeCrdt((upds[1]).GetCRDTType(),
+							crdt.replicaID), upds[1:], compForAll)
+						if currState != nil {
+							crdt.aggregateProcessState(currState, aggregateType, &currResult, &currCount, aggrKey)
+						}
+					} else {
+						//Removed CRDT, thus doesn't belong to state
+						continue
+					}
+				} else {
+					embCrdt, _ := crdt.getOrCreateEmbCrdt(key, (upds[0]))
+					currState = crdt.getStateIfCondition(embCrdt, updsNotYetApplied, compForAll)
+					if currState != nil {
+						crdt.aggregateProcessState(currState, aggregateType, &currResult, &currCount, aggrKey)
+					}
+				}
+			} else if embCrdt, has := crdt.entries[key]; has {
+				currState = crdt.getStateIfCondition(embCrdt, []UpdateArguments{}, compForAll)
+				if currState != nil {
+					crdt.aggregateProcessState(currState, aggregateType, &currResult, &currCount, aggrKey)
+				}
+			}
+		}
+	}
+
+	//fmt.Printf("[RWEmbMap][getAggregateStateByCompArgsByKeys]Returning either CounterFloatState or AvgFullState. CurrResult: %f, CurrCount: %d\n", currResult, currCount)
+	if aggregateType == M_AVG {
+		return AvgFullState{Sum: int64(currResult), NAdds: int64(currCount)}
+	}
+	return CounterFloatState(currResult)
+}
+
+func (crdt *RWEmbMapCrdt) getAggregateStateByCompArgs(updsNotYetApplied []UpdateArguments,
+	aggregateType AggregateType, compForAll CompareArguments, aggrKey string) (state State) {
+	//return AvgFullState{Sum: 500000, NAdds: 120}
+	var currState State
+	currResult, currCount := crdt.prepareAggregateRead(aggregateType)
+	//dummyState := EmbMapEntryState{States: map[string]State{"C": CounterState(0), "A": CounterFloatState(10000.20)}}
+
+	//nEmpty, nSucc := 0, 0
+	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+		crdt.initReadHelpers()
+		//fmt.Printf("[RWEmbMap][GetAggregateStateByCompArgs]Processing inside CRDTs, with no upds pending.\n")
+		for _, embCrdt := range crdt.entries {
+			if embCrdt.IsBigCRDT() {
+				crdt.bigCrdtCondReadHelper(embCrdt, "", compForAll, updsNotYetApplied)
+			} else {
+				currState = crdt.getStateIfCondition(embCrdt, updsNotYetApplied, compForAll)
+				if currState != nil {
+					crdt.aggregateProcessState(currState, aggregateType, &currResult, &currCount, aggrKey)
+					//nSucc++
+				} /*else {
+					fmt.Printf("[RWEmbMap][GetAggregateStateByCompArgs]WARNING! No state for inside CRDT.\n")
+					nEmpty++
+				}*/
+				/*currState = embCrdt.Read(StateReadArguments{}, updsNotYetApplied)
+				crdt.aggregateProcessState(currState, aggregateType, &currResult, &currCount, aggrKey)*/
+				//currState = crdt.getStateIfCondition(embCrdt, updsNotYetApplied, compForAll)
+				//currState = embCrdt.Read(fullRead, updsNotYetApplied)
+				//ignore(currState)
+				//ignore(embCrdt)
+				//crdt.aggregateProcessState(dummyState, aggregateType, &currResult, &currCount, aggrKey)
+			}
+		}
+
+		//return AvgFullState{Sum: 500000, NAdds: 120}
+		//fmt.Printf("[RWEmbMap][GetAggregateStateByCompArgs]Processed %d CRDTs. %d cond match, %d empty.\n", len(crdt.entries), nSucc, nEmpty)
+	} else {
+		applyByCRDT := crdt.prepareApplyByCRDTMap(updsNotYetApplied)
+		for key, upds := range applyByCRDT {
+			if (upds[0] == NoOp{}) {
+				if len(upds) > 1 {
+					//Start from scratch
+					currState = crdt.getStateIfCondition(InitializeCrdt((upds[1]).GetCRDTType(),
+						crdt.replicaID), upds[1:], compForAll)
+					if currState != nil {
+						crdt.aggregateProcessState(currState, aggregateType, &currResult, &currCount, aggrKey)
+					}
+				} else {
+					//Removed CRDT, thus doesn't belong to state
+					continue
+				}
+			} else {
+				embCrdt, _ := crdt.getOrCreateEmbCrdt(key, (upds[0]))
+				currState = crdt.getStateIfCondition(embCrdt, updsNotYetApplied, compForAll)
+				if currState != nil {
+					crdt.aggregateProcessState(currState, aggregateType, &currResult, &currCount, aggrKey)
+				}
+			}
+		}
+
+		//Also need to include CRDTs that aren't referred in applyByCRDT
+		for key, embCrdt := range crdt.entries {
+			if _, has := applyByCRDT[key]; !has {
+				currState = crdt.getStateIfCondition(embCrdt, []UpdateArguments{}, compForAll)
+				if currState != nil {
+					crdt.aggregateProcessState(currState, aggregateType, &currResult, &currCount, aggrKey)
+				}
+			}
+		}
+	}
+
+	//fmt.Printf("[RWEmbMap][getAggregateStateByCompArgs]Returning either CounterFloatState or AvgFullState. CurrResult: %f, CurrCount: %d\n", currResult, currCount)
+	if aggregateType == M_AVG {
+		return AvgFullState{Sum: int64(currResult), NAdds: int64(currCount)}
+	}
+	return CounterFloatState(currResult)
+}
+
 func (crdt *RWEmbMapCrdt) getAllCondState(updsNotYetApplied []UpdateArguments, condArgs CompareArguments) (state EmbMapEntryState) {
 	//Similar to getCondState but without filtering keys
 	//fmt.Printf("[RWEmbMap][GetAllCondState]CompareArguments: %+v\n", condArgs)
 	states := make(map[string]State)
 	var currState State
 	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+		crdt.initReadHelpers()
 		for key, embCrdt := range crdt.entries {
-			currState = crdt.getStateIfCondition(embCrdt, updsNotYetApplied, condArgs)
-			if currState != nil {
-				states[key] = currState
+			if embCrdt.IsBigCRDT() {
+				crdt.bigCrdtCondReadHelper(embCrdt, key, condArgs, updsNotYetApplied)
+			} else {
+				currState = crdt.getStateIfCondition(embCrdt, updsNotYetApplied, condArgs)
+				if currState != nil {
+					states[key] = currState
+				}
 			}
 		}
+		crdt.receiveRoutineReads(states)
 		return EmbMapEntryState{States: states}
 	}
 
@@ -601,14 +1250,20 @@ func (crdt *RWEmbMapCrdt) getCondState(updsNotYetApplied []UpdateArguments, cond
 	states := make(map[string]State)
 	var currState State
 	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+		crdt.initReadHelpers()
 		for key, args := range condArgs {
 			if embCrdt, has := crdt.entries[key]; has {
-				currState = crdt.getStateIfCondition(embCrdt, updsNotYetApplied, args)
-				if currState != nil {
-					states[key] = currState
+				if embCrdt.IsBigCRDT() {
+					crdt.bigCrdtCondReadHelper(embCrdt, key, args, updsNotYetApplied)
+				} else {
+					currState = crdt.getStateIfCondition(embCrdt, updsNotYetApplied, args)
+					if currState != nil {
+						states[key] = currState
+					}
 				}
 			}
 		}
+		crdt.receiveRoutineReads(states)
 		return EmbMapEntryState{States: states}
 	}
 
@@ -647,32 +1302,32 @@ func (crdt *RWEmbMapCrdt) getCondState(updsNotYetApplied []UpdateArguments, cond
 }
 
 func (crdt *RWEmbMapCrdt) getStateIfCondition(inCrdt CRDT, upds []UpdateArguments, compArgs CompareArguments) (state State) {
-	if _, ok := compArgs.(*GetNoCompareArguments); ok {
+	if _, ok := compArgs.(GetNoCompareArguments); ok {
 		return inCrdt.Read(StateReadArguments{}, upds)
 	}
 	//If the type of CRDT doesn't match, do not return the state
 	crdtType := inCrdt.GetCRDTType()
 	//fmt.Printf("[RWEmbMap][GetStateIfCondition]Got compArgs %+v (type %T) and CRDTType is %v\n", compArgs, compArgs, crdtType)
 	switch compArgs.(type) {
-	case *IntCompareArguments:
+	case IntCompareArguments /*, IntArgCompareArguments*/ :
 		if !(crdtType == proto.CRDTType_COUNTER || crdtType == proto.CRDTType_MAXMIN) {
 			//fmt.Println("[RWEmbMap][GetStateIfCondition]Is IntCompareArguments but can't apply as CRDTType is", crdtType)
 			return
 		}
-	case *FloatCompareArguments:
+	case FloatCompareArguments /*, FloatArgCompareArguments*/ :
 		if !(crdtType == proto.CRDTType_AVG || crdtType == proto.CRDTType_COUNTER_FLOAT) {
 			return
 		}
-	case *MapCompareArguments:
+	case MapCompareArguments:
 		if crdtType != proto.CRDTType_RRMAP {
 			//fmt.Println("[RWEmbMap][GetStateIfCondition]Is MapCompareArguments but can't apply as CRDTType is", crdtType)
 			return
 		}
-	case *StringCompareArguments, *BytesCompareArguments: //Register
+	case StringCompareArguments, BytesCompareArguments: //Register
 		if crdtType != proto.CRDTType_LWWREG {
 			return
 		}
-	case *BoolCompareArguments: //Flag
+	case BoolCompareArguments: //Flag
 		if !(crdtType == proto.CRDTType_FLAG_LWW || crdtType == proto.CRDTType_FLAG_EW || crdtType == proto.CRDTType_FLAG_DW) {
 			return
 		}
@@ -683,78 +1338,17 @@ func (crdt *RWEmbMapCrdt) getStateIfCondition(inCrdt CRDT, upds []UpdateArgument
 		tmpState = inCrdt.Read(StateReadArguments{}, upds)
 	}
 	switch typedArgs := compArgs.(type) {
-	case *IntCompareArguments: //Must be a counter or maxmin
-		var crdtValue int64
-		if crdtType == proto.CRDTType_COUNTER {
-			crdtValue = int64(tmpState.(CounterState).Value)
-		} else {
-			crdtValue = tmpState.(MaxMinState).Value
-		}
-		switch typedArgs.CompType {
-		case EQ:
-			//fmt.Printf("[RWEmbMap][GetStateIfCondition]Equal comparison in IntCompare. CrdtValue: %d. CompareToValue: %d. %d = %d\n",
-			//crdtValue, typedArgs.Value, crdtValue, typedArgs.Value)
-			if crdtValue == typedArgs.Value {
-				return tmpState
-			}
-		case NEQ:
-			if crdtValue != typedArgs.Value {
-				return tmpState
-			}
-		case LEQ:
-			if crdtValue <= typedArgs.Value {
-				return tmpState
-			}
-		case L:
-			if crdtValue < typedArgs.Value {
-				return tmpState
-			}
-		case H:
-			//fmt.Printf("[RWEmbMap][GetStateIfCondition]Higher comparison in IntCompare. CrdtValue: %d. CompareToValue: %d. %d > %d\n",
-			//crdtValue, typedArgs.Value, crdtValue, typedArgs.Value)
-			if crdtValue > typedArgs.Value {
-				//fmt.Printf("[RWEmbMap][GetStateIfCondition]Returning state as %d > %d\nState: %+v\n", crdtValue, typedArgs.Value, tmpState)
-				return tmpState
-			}
-		case HEQ:
-			if crdtValue >= typedArgs.Value {
-				return tmpState
-			}
-		}
-	case *FloatCompareArguments: //Average
-		var crdtValue float64
-		if crdtType == proto.CRDTType_COUNTER_FLOAT {
-			crdtValue = tmpState.(CounterFloatState).Value
-		} else {
-			crdtValue = tmpState.(AvgState).Value
-		}
-		switch typedArgs.CompType {
-		case EQ:
-			if crdtValue == typedArgs.Value {
-				return tmpState
-			}
-		case NEQ:
-			if crdtValue != typedArgs.Value {
-				return tmpState
-			}
-		case LEQ:
-			if crdtValue <= typedArgs.Value {
-				return tmpState
-			}
-		case L:
-			if crdtValue < typedArgs.Value {
-				return tmpState
-			}
-		case H:
-			if crdtValue > typedArgs.Value {
-				return tmpState
-			}
-		case HEQ:
-			if crdtValue >= typedArgs.Value {
-				return tmpState
-			}
-		}
-	case *MapCompareArguments: //Assumed to be embedded map
+	case IntCompareArguments: //Must be a counter or maxmin
+		return crdt.intCompareHelper(tmpState, crdtType, typedArgs.CompType, typedArgs.Value)
+	/*case *IntArgCompareArguments: //Must be a counter or maxmin
+	return crdt.intCompareHelper(tmpState, crdtType, typedArgs.CompType, int64(*typedArgs.Value))*/
+
+	case FloatCompareArguments: //Average or float counter
+		return crdt.floatCompareHelper(tmpState, crdtType, typedArgs.CompType, typedArgs.Value)
+	/*case *FloatArgCompareArguments: //Average or float counter
+	return crdt.floatCompareHelper(tmpState, crdtType, typedArgs.CompType, *typedArgs.Value)*/
+
+	case MapCompareArguments: //Assumed to be embedded map
 		//fullState := inCrdt.Read(StateReadArguments{}, upds)
 		//fmt.Printf("[RWEmbMap][GetStateIfCondition]Is MapCompareArguments (%+v) and CRDTType is %v. Can apply. Full state is: %+v\n", compArgs, crdtType, fullState)
 		innerMapState := inCrdt.Read(EmbMapConditionalReadArguments{CondArgs: typedArgs.MapArgs}, upds).(EmbMapEntryState)
@@ -765,12 +1359,12 @@ func (crdt *RWEmbMapCrdt) getStateIfCondition(inCrdt CRDT, upds []UpdateArgument
 			//fmt.Printf("[RWEmbMap][GetStateIfCondition]Not returning state after MapCompareArguments!\n Number of states: %d. Number of arguments: %d. State read: %+v\n",
 			//len(innerMapState.States), len(typedArgs.MapArgs), innerMapState)
 		}
-	case *StringCompareArguments: //Register
+	case StringCompareArguments: //Register
 		crdtValue := tmpState.(RegisterState).Value.(string)
 		if (typedArgs.IsEqualComp && crdtValue == typedArgs.Value) || (!typedArgs.IsEqualComp && crdtValue != typedArgs.Value) {
 			return tmpState
 		}
-	case *BytesCompareArguments: //Register
+	case BytesCompareArguments: //Register
 		crdtValue := tmpState.(RegisterState).Value.([]byte)
 		if typedArgs.IsEqualComp {
 			if len(crdtValue) == len(typedArgs.Value) {
@@ -782,7 +1376,7 @@ func (crdt *RWEmbMapCrdt) getStateIfCondition(inCrdt CRDT, upds []UpdateArgument
 				return tmpState
 			}
 		}
-	case *BoolCompareArguments: //Flag
+	case BoolCompareArguments: //Flag
 		crdtValue := tmpState.(FlagState).Flag
 		if (typedArgs.IsEqualComp && crdtValue == typedArgs.Value) || (!typedArgs.IsEqualComp && crdtValue != typedArgs.Value) {
 			return tmpState
@@ -793,17 +1387,113 @@ func (crdt *RWEmbMapCrdt) getStateIfCondition(inCrdt CRDT, upds []UpdateArgument
 	return nil
 }
 
-func (crdt *RWEmbMapCrdt) getValues(updsNotYetApplied []UpdateArguments, keys []string) (state EmbMapEntryState) {
+// State must be of a counter (int) or MaxMin
+func (crdt *RWEmbMapCrdt) intCompareHelper(state State, crdtType proto.CRDTType, compType CompType, value int64) State {
+	var crdtValue int64
+	if crdtType == proto.CRDTType_COUNTER {
+		crdtValue = int64(state.(CounterState))
+	} else {
+		crdtValue = state.(MaxMinState).Value
+	}
+	switch compType {
+	case EQ:
+		//fmt.Printf("[RWEmbMap][GetStateIfCondition]Equal comparison in IntCompare. CrdtValue: %d. CompareToValue: %d. %d = %d\n",
+		//crdtValue, typedArgs.Value, crdtValue, typedArgs.Value)
+		if crdtValue == value {
+			return state
+		}
+	case NEQ:
+		if crdtValue != value {
+			return state
+		}
+	case LEQ:
+		if crdtValue <= value {
+			return state
+		}
+	case L:
+		if crdtValue < value {
+			return state
+		}
+	case H:
+		//fmt.Printf("[RWEmbMap][GetStateIfCondition]Higher comparison in IntCompare. CrdtValue: %d. CompareToValue: %d. %d > %d\n",
+		//crdtValue, value, crdtValue, value)
+		if crdtValue > value {
+			//fmt.Printf("[RWEmbMap][GetStateIfCondition]Returning state as %d > %d\nState: %+v\n", crdtValue, value, tmpState)
+			return state
+		}
+	case HEQ:
+		if crdtValue >= value {
+			return state
+		}
+	}
+	return nil
+}
+
+func (crdt *RWEmbMapCrdt) floatCompareHelper(state State, crdtType proto.CRDTType, compType CompType, value float64) State {
+	var crdtValue float64
+	if crdtType == proto.CRDTType_COUNTER_FLOAT {
+		crdtValue = float64(state.(CounterFloatState))
+	} else {
+		crdtValue = state.(AvgState).Value
+	}
+	switch compType {
+	case EQ:
+		if crdtValue == value {
+			return state
+		}
+	case NEQ:
+		if crdtValue != value {
+			return state
+		}
+	case LEQ:
+		if crdtValue <= value {
+			return state
+		}
+	case L:
+		if crdtValue < value {
+			return state
+		}
+	case H:
+		if crdtValue > value {
+			return state
+		}
+	case HEQ:
+		if crdtValue >= value {
+			return state
+		}
+	}
+	return nil
+}
+
+func (crdt *RWEmbMapCrdt) getValues(updsNotYetApplied []UpdateArguments, keys []string) (state EmbMapGetValuesState) { //(state EmbMapEntryState) {
 	//Similar to getState
-	states := make(map[string]State)
+	states, fullRead := make(map[string]State), StateReadArguments{}
+	var inCRDTState State
+	//fmt.Printf("[RWEmbMapCrdt][GetValues]Start.")
 	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+		crdt.initReadHelpers()
 		for _, key := range keys {
 			if embCrdt, has := crdt.entries[key]; has {
-				states[key] = embCrdt.Read(StateReadArguments{}, updsNotYetApplied)
-			}
+				if embCrdt.IsBigCRDT() {
+					crdt.bigCrdtReadHelper(embCrdt, key, fullRead, updsNotYetApplied)
+				} else if inCRDTState = embCrdt.Read(fullRead, updsNotYetApplied); inCRDTState != nil {
+					states[key] = inCRDTState
+					//fmt.Printf("[RWEmbMapCrdt][GetValues]Key %v has state %+v\n", key, inCRDTState)
+				}
+			} /*else {
+				fmt.Printf("[RWEmbMapCrdt][GetValues]Key %v not found in entries\n", key)
+			}*/
 		}
-		return EmbMapEntryState{States: states}
+		/*fmt.Printf("[RWEmbMapCrdt][GetValues]Keys: ")
+		for key := range crdt.entries {
+			fmt.Print(key + ", ")
+		}
+		fmt.Println()*/
+		crdt.receiveRoutineReads(states)
+		return EmbMapGetValuesState{States: states}
+		//return EmbMapEntryState{States: states}
 	}
+	//fmt.Printf("[RWEmbMapCrdt][GetValues]UpdsNotYetApplied is not nil!.")
 
 	applyByCRDT := crdt.prepareApplyByCRDTMap(updsNotYetApplied)
 
@@ -827,18 +1517,26 @@ func (crdt *RWEmbMapCrdt) getValues(updsNotYetApplied []UpdateArguments, keys []
 		}
 	}
 
-	return EmbMapEntryState{States: states}
+	return EmbMapGetValuesState{States: states}
+	//return EmbMapEntryState{States: states}
 }
 
 func (crdt *RWEmbMapCrdt) getAllExcept(updsNotYetApplied []UpdateArguments, exceptKeys map[string]struct{}, argForAll ReadArguments) (state EmbMapGetValuesState) {
 	//Similar to getState
 	states := make(map[string]State)
+	var inCRDTState State
 	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+		crdt.initReadHelpers()
 		for key, embCrdt := range crdt.entries {
 			if _, has := exceptKeys[key]; !has {
-				states[key] = embCrdt.Read(argForAll, updsNotYetApplied)
+				if embCrdt.IsBigCRDT() {
+					crdt.bigCrdtReadHelper(embCrdt, key, argForAll, updsNotYetApplied)
+				} else if inCRDTState = embCrdt.Read(argForAll, updsNotYetApplied); inCRDTState != nil {
+					states[key] = inCRDTState
+				}
 			}
 		}
+		crdt.receiveRoutineReads(states)
 		return EmbMapGetValuesState{States: states}
 	}
 
@@ -875,18 +1573,92 @@ func (crdt *RWEmbMapCrdt) getAllExcept(updsNotYetApplied []UpdateArguments, exce
 	return EmbMapGetValuesState{States: states}
 }
 
+func (crdt *RWEmbMapCrdt) getExceptSingleState(updsNotYetApplied []UpdateArguments, exceptKey string, argForAll ReadArguments) (state EmbMapGetValuesState) {
+	//Similar to getAllExcept but for a single except key (avoids map overhead)
+	states := make(map[string]State)
+	var inCRDTState State
+	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+		crdt.initReadHelpers()
+		for key, embCrdt := range crdt.entries {
+			if key != exceptKey {
+				if embCrdt.IsBigCRDT() {
+					crdt.bigCrdtReadHelper(embCrdt, key, argForAll, updsNotYetApplied)
+				} else if inCRDTState = embCrdt.Read(argForAll, updsNotYetApplied); inCRDTState != nil {
+					states[key] = inCRDTState
+				}
+			}
+		}
+		crdt.receiveRoutineReads(states)
+		return EmbMapGetValuesState{States: states}
+	}
+
+	applyByCRDT := crdt.prepareApplyByCRDTMap(updsNotYetApplied)
+
+	for key, upds := range applyByCRDT {
+		if key != exceptKey {
+			if (upds[0] == NoOp{}) {
+				if len(upds) > 1 {
+					//Start from scratch
+					states[key] = InitializeCrdt((upds[1]).GetCRDTType(),
+						crdt.replicaID).Read(argForAll, upds[1:])
+				} else {
+					//Removed CRDT, thus doesn't belong to state
+					continue
+				}
+			} else {
+				embCrdt, _ := crdt.getOrCreateEmbCrdt(key, (upds[0]))
+				states[key] = embCrdt.Read(argForAll, upds)
+			}
+		}
+	}
+
+	//Also need to include CRDTs that aren't referred in applyByCRDT
+	for key, embCrdt := range crdt.entries {
+		if key != exceptKey {
+			if _, has := applyByCRDT[key]; !has {
+				states[key] = embCrdt.Read(argForAll, []UpdateArguments{})
+			}
+		}
+	}
+	return EmbMapGetValuesState{States: states}
+}
+
 func (crdt *RWEmbMapCrdt) getPartialState(updsNotYetApplied []UpdateArguments, args map[string]ReadArguments) (state EmbMapGetValuesState) {
 	//Very similar to getState
 	//fmt.Println("[RWEmb][EmbMapPartialArguments]Args:", args)
 	states := make(map[string]State)
+	var inCRDTState State
+	//failed := false
 	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+		crdt.initReadHelpers()
 		for key, arg := range args {
 			//fmt.Printf("[RWEmb][EmbMapPartialArguments]Key: %v. Arg: %v (%T)\n", key, arg, arg)
 			if embCrdt, has := crdt.entries[key]; has {
-				states[key] = embCrdt.Read(arg, updsNotYetApplied)
-				//fmt.Printf("[RWEmb][EmbMapPartialArguments]State: %v\n", states[key])
-			}
+				if embCrdt.IsBigCRDT() {
+					crdt.bigCrdtReadHelper(embCrdt, key, arg, updsNotYetApplied)
+				} else if inCRDTState = embCrdt.Read(arg, updsNotYetApplied); inCRDTState != nil {
+					states[key] = inCRDTState
+				}
+				//states[key] = embCrdt.Read(arg, updsNotYetApplied)
+				//fmt.Printf("[RWEmb][EmbMapPartialArguments]State: %v (Key: %v)\n", states[key], key)
+			} /*else {
+				//failed = true
+				fmt.Printf("[RWEmb][EmbMapPartialArguments]WARNING!!! Does not have %v\n", key)
+			}*/
 		}
+		/*if failed {
+			crdtKeys, askedKeys, i, j := make([]string, len(crdt.entries)), make([]string, len(args)), 0, 0
+			for key := range crdt.entries {
+				crdtKeys[i] = key
+				i++
+			}
+			for key := range args {
+				askedKeys[j] = key
+				j++
+			}
+			fmt.Printf("[RWEmb][EmbMapPartialArguments]WARNING! At least one read failed. List of CRDT's keys: %v. Asked keys: %v\n", crdtKeys, askedKeys)
+		}*/
+		crdt.receiveRoutineReads(states)
 		return EmbMapGetValuesState{States: states}
 	}
 
@@ -987,11 +1759,15 @@ func (crdt *RWEmbMapCrdt) getValue(updsNotYetApplied []UpdateArguments,
 		//Return right away
 		inCrdt, has := crdt.entries[key]
 		if !has {
+			//fmt.Printf("[RWEmbMap][GetValue]Key %v not found in entries. Returning empty RegisterState.\n", key)
 			return EmbMapGetValueState{State: RegisterState{Value: ""}}
 		}
 		/*state := inCrdt.Read(args, updsNotYetApplied).(EmbMapEntryState)
 		inCrdtMap := inCrdt.(*RWEmbMapCrdt)
 		fmt.Printf("[RWEmbMap][GetValue]Length of state read: %d. Keys of inside CRDT: %d\n", len(state.States), len(inCrdtMap.entries))*/
+		//readState := inCrdt.Read(args, updsNotYetApplied)
+		//fmt.Printf("[RWEmbMap][GetValue]Read arguments: %v. CRDT inside: %+v\nRead state: %+v\n", args, inCrdt, readState)
+		//return EmbMapGetValueState{State: readState}
 		return EmbMapGetValueState{State: inCrdt.Read(args, updsNotYetApplied)}
 	}
 
@@ -1238,10 +2014,12 @@ func (crdt *RWEmbMapCrdt) applyUpdateAllArray(updTs clocksi.Timestamp, upds []Ke
 
 	//Optimized insertion without checking for removes
 	if len(crdt.removes) == 0 {
+		//start := time.Now().UnixNano()
 		//If the number of new CRDTs is much higher than the existing ones, force a resize
 		//Better than having Go do automatically many small resizes
 		//This is specially useful when doing initial load of data.
 		if len(upds) >= 1000 && len(upds)/100 > len(crdt.entries) {
+			//fmt.Printf("[RWEmb][ApplyUpdateAllArray]Optimized resize (number of upds: %d)\n", len(upds))
 			newEntries := make(map[string]CRDT, len(upds)+len(crdt.entries))
 			for key, inCrdt := range crdt.entries {
 				newEntries[key] = inCrdt
@@ -1251,6 +2029,9 @@ func (crdt *RWEmbMapCrdt) applyUpdateAllArray(updTs clocksi.Timestamp, upds []Ke
 
 		//Further optimized insertion
 		if len(crdt.entries) == 0 {
+			/*if len(upds) > 50 {
+				fmt.Printf("[RWEmb][ApplyUpdateAllArray]Optimized insertion (number of upds: %d)\n", len(upds))
+			}*/
 			for i, pair := range upds {
 				//Store effect, even if it's a redo
 				effect.Updated[i] = pair.Key
@@ -1265,6 +2046,10 @@ func (crdt *RWEmbMapCrdt) applyUpdateAllArray(updTs clocksi.Timestamp, upds []Ke
 				}
 			}
 			updatedIndex = len(upds)
+			//timeTaken := (time.Now().UnixNano() - start) / 1000000
+			/*if timeTaken > 10 {
+				fmt.Printf("[RWEmb][ApplyUpdateAllArray]Optimized insertion took %dms for %d upds.\n", timeTaken, len(upds))
+			}*/
 		} else {
 			for i, pair := range upds {
 				//Store effect, even if it's a redo
@@ -1369,6 +2154,10 @@ func (crdt *RWEmbMapCrdt) applyUpdateAll(updTs clocksi.Timestamp, upds map[strin
 	}
 	newDown := make(map[string]DownstreamArguments) //emb NuCRDTs may generate new downstreams
 	updatedIndex := 0
+
+	/*if inUpds := upds["120"]; inUpds != nil {
+		fmt.Printf("[RWEmb][UpdateAll]Got update for 120: %v\n", inUpds)
+	}*/
 
 	//Optimized insertion without checking for removes
 	if len(crdt.removes) == 0 {
@@ -1803,7 +2592,7 @@ func (crdtState EmbMapGetValuesState) ToReadResp() (protobuf *proto.ApbReadObjec
 		keys[i], values[i] = []byte(key), &proto.ApbMapGetValueResp{Crdttype: &crdtType, Parttype: &readType, Value: state.(ProtoState).ToReadResp()}
 		i++
 	}
-	//fmt.Printf("[RWEmb][EmbMapGetValuesState]ToReadResp end. Keys: %+v, Values: %+v\n", keys, values)
+	//sfmt.Printf("[RWEmb][EmbMapGetValuesState]ToReadResp end. Keys: %+v, Values: %+v\n", keys, values)
 	return &proto.ApbReadObjectResp{Partread: &proto.ApbPartialReadResp{Map: &proto.ApbMapPartialReadResp{
 		Getvalues: &proto.ApbMapGetValuesResp{Keys: keys, Values: values}}}}
 }
@@ -1853,6 +2642,18 @@ func (args EmbMapExceptArguments) FromPartialRead(protobuf *proto.ApbPartialRead
 	return args
 }
 
+func (args EmbMapSingleExceptArguments) FromPartialRead(protobuf *proto.ApbPartialReadArgs) (readArgs ReadArguments) {
+	exceptProto := protobuf.GetMap().GetExceptsingleread()
+	protoKey, protoArgs := exceptProto.GetKey(), exceptProto.GetArgs()
+	args.ExceptKey = string(protoKey)
+	if protoArgs == nil {
+		args.ArgForAll = StateReadArguments{}
+	} else {
+		args.ArgForAll = *PartialReadOpToAntidoteRead(protoArgs.GetArgs(), protoArgs.GetType(), protoArgs.GetReadtype())
+	}
+	return args
+}
+
 func (args EmbMapConditionalReadArguments) FromPartialRead(protobuf *proto.ApbPartialReadArgs) (readArgs ReadArguments) {
 	protoArgs := protobuf.GetMap().GetCondread().GetCondargs()
 	condArgs := make(map[string]CompareArguments, len(protoArgs))
@@ -1881,14 +2682,43 @@ func (args EmbMapConditionalReadExceptArguments) FromPartialRead(protobuf *proto
 	return EmbMapConditionalReadExceptArguments{ExceptKeys: keys, CondArgForAll: condArg}
 }
 
+func (args EmbMapConditionalReadExceptSingleArguments) FromPartialRead(protobuf *proto.ApbPartialReadArgs) (readArgs ReadArguments) {
+	condProto := protobuf.GetMap().GetExceptcondsingleread()
+	_, condArg := protoArgsToCompareArgsHelper(condProto.GetCondarg())
+	return EmbMapConditionalReadExceptSingleArguments{ExceptKey: string(condProto.GetKey()), CondArgForAll: condArg}
+}
+
+func (args EmbMapAggregateArguments) FromPartialRead(protobuf *proto.ApbPartialReadArgs) (readArgs ReadArguments) {
+	aggProto := protobuf.GetMap().GetAggregateread()
+	args.AggregateType = AggregateType(aggProto.GetAggregationtype())
+	keysP, condP, readArgP, aggrKey := aggProto.GetKeys(), aggProto.GetCondarg(), aggProto.GetArgs(), aggProto.GetAggrKey()
+	if keysP != nil {
+		args.Keys = keysP
+	}
+	if condP != nil {
+		_, condArg := protoArgsToCompareArgsHelper(condP)
+		args.CompForAll = condArg
+	} else if readArgP != nil {
+		args.ArgForAll = *PartialReadOpToAntidoteRead(readArgP.GetArgs(), readArgP.GetType(), readArgP.GetReadtype())
+	} else {
+		args.ArgForAll = StateReadArguments{}
+	}
+	if aggrKey != "" {
+		args.AggrKey = aggrKey
+	}
+	//fmt.Printf("[RWEmb][FromPartialRead]Args: %+v\n", args)
+	return args
+}
+
 func protoArgsToCompareArgsHelper(protoArg *proto.ApbMapCondArgs) (key string, condArg CompareArguments) {
 	key = protoArg.GetKey()
+	//Missing the CompareArguments with variables?
 	if intComp := protoArg.GetIntcomp(); intComp != nil {
-		condArg = &IntCompareArguments{Value: intComp.GetValue(), CompType: CompType(intComp.GetComp())}
+		condArg = IntCompareArguments{Value: intComp.GetValue(), CompType: CompType(intComp.GetComp())}
 	} else if floatComp := protoArg.GetFloatcomp(); floatComp != nil {
-		condArg = &FloatCompareArguments{Value: floatComp.GetValue(), CompType: CompType(floatComp.GetComp())}
+		condArg = FloatCompareArguments{Value: floatComp.GetValue(), CompType: CompType(floatComp.GetComp())}
 	} else if noComp := protoArg.GetNocomp(); noComp != nil {
-		condArg = &GetNoCompareArguments{}
+		condArg = GetNoCompareArguments{}
 	} else if mapComp := protoArg.GetMapcomp(); mapComp != nil {
 		mapArgs := make(map[string]CompareArguments)
 		var mapKey string
@@ -1896,14 +2726,14 @@ func protoArgsToCompareArgsHelper(protoArg *proto.ApbMapCondArgs) (key string, c
 			mapKey, condArg = protoArgsToCompareArgsHelper(entry)
 			mapArgs[mapKey] = condArg
 		}
-		condArg = &MapCompareArguments{MapArgs: mapArgs}
+		condArg = MapCompareArguments{MapArgs: mapArgs}
 	} else if stringComp := protoArg.GetStringcomp(); stringComp != nil {
-		condArg = &StringCompareArguments{Value: stringComp.GetValue(), IsEqualComp: stringComp.GetIsEqualComp()}
+		condArg = StringCompareArguments{Value: stringComp.GetValue(), IsEqualComp: stringComp.GetIsEqualComp()}
 	} else if boolComp := protoArg.GetBoolcomp(); boolComp != nil {
-		condArg = &BoolCompareArguments{Value: boolComp.GetValue(), IsEqualComp: boolComp.GetIsEqualComp()}
+		condArg = BoolCompareArguments{Value: boolComp.GetValue(), IsEqualComp: boolComp.GetIsEqualComp()}
 	} else {
 		bytesComp := protoArg.GetBytescomp()
-		condArg = &BytesCompareArguments{Value: bytesComp.GetValue(), IsEqualComp: bytesComp.GetIsEqualComp()}
+		condArg = BytesCompareArguments{Value: bytesComp.GetValue(), IsEqualComp: bytesComp.GetIsEqualComp()}
 	}
 	return
 }
@@ -1947,6 +2777,15 @@ func (args EmbMapExceptArguments) ToPartialRead() (protobuf *proto.ApbPartialRea
 	return &proto.ApbPartialReadArgs{Map: &proto.ApbMapPartialRead{Exceptread: &exceptProto}}
 }
 
+func (args EmbMapSingleExceptArguments) ToPartialRead() (protobuf *proto.ApbPartialReadArgs) {
+	exceptProto := proto.ApbMapExceptSingleRead{Key: []byte(args.ExceptKey)}
+	if args.ArgForAll == nil {
+		return &proto.ApbPartialReadArgs{Map: &proto.ApbMapPartialRead{Exceptsingleread: &exceptProto}}
+	}
+	exceptProto.Args = createMapGetValuesRead(args.ArgForAll)
+	return &proto.ApbPartialReadArgs{Map: &proto.ApbMapPartialRead{Exceptsingleread: &exceptProto}}
+}
+
 func (args EmbMapConditionalReadArguments) ToPartialRead() (protobuf *proto.ApbPartialReadArgs) {
 	protoArgs := make([]*proto.ApbMapCondArgs, len(args.CondArgs))
 	i := 0
@@ -1975,19 +2814,47 @@ func (args EmbMapConditionalReadExceptArguments) ToPartialRead() (protobuf *prot
 	return &proto.ApbPartialReadArgs{Map: &proto.ApbMapPartialRead{Exceptcondread: &proto.ApbMapExceptCondRead{Keys: keys, Condarg: protoArg}}}
 }
 
+func (args EmbMapConditionalReadExceptSingleArguments) ToPartialRead() (protobuf *proto.ApbPartialReadArgs) {
+	protoArg := &proto.ApbMapCondArgs{}
+	compareArgsToProtoHelper("", args.CondArgForAll, protoArg)
+	return &proto.ApbPartialReadArgs{Map: &proto.ApbMapPartialRead{Exceptcondsingleread: &proto.ApbMapExceptCondSingleRead{Key: []byte(args.ExceptKey), Condarg: protoArg}}}
+}
+
+func (args EmbMapAggregateArguments) ToPartialRead() (protobuf *proto.ApbPartialReadArgs) {
+	aggrType := proto.AGGRType(args.AggregateType)
+	protoAggr := proto.ApbMapAggregateRead{Aggregationtype: &aggrType}
+	if args.Keys != nil {
+		protoAggr.Keys = args.Keys
+	}
+	if args.CompForAll != nil {
+		protoAggr.Condarg = &proto.ApbMapCondArgs{}
+		compareArgsToProtoHelper("", args.CompForAll, protoAggr.Condarg)
+	} else if args.ArgForAll != nil {
+		protoAggr.Args = createMapGetValuesRead(args.ArgForAll)
+	}
+	if args.AggrKey != "" {
+		protoAggr.AggrKey = &args.AggrKey
+	}
+	//If full read, then it's okay for all to be empty. FromPartialRead will handle it.
+	//fmt.Printf("[RWEmb][ToPartialRead]Keys: %v. AggrType: %v. CondArg: %+v. ArgForAll: %+v.\n", args.Keys, args.AggregateType, args.CompForAll, args.ArgForAll)
+	//fmt.Printf("[RWEmb][ToPartialRead]In Proto: Keys: %v. AggrType: %v. CondArg: %+v. ArgForAll: %+v.\n", protoAggr.Keys, protoAggr.Aggregationtype, protoAggr.Condarg, protoAggr.Args)
+	return &proto.ApbPartialReadArgs{Map: &proto.ApbMapPartialRead{Aggregateread: &protoAggr}}
+}
+
 func compareArgsToProtoHelper(key string, args CompareArguments, protobuf *proto.ApbMapCondArgs) {
 	if key != "" {
 		protobuf.Key = pb.String(key)
 	}
 	var compType proto.COMPType
+	//Missing the CompareArguments with the variables?
 	switch typedArgs := args.(type) {
-	case *IntCompareArguments:
+	case IntCompareArguments:
 		compType = proto.COMPType(typedArgs.CompType)
 		protobuf.Intcomp = &proto.ApbCondIntCompare{Value: pb.Int64(typedArgs.Value), Comp: &compType}
-	case *FloatCompareArguments:
+	case FloatCompareArguments:
 		compType = proto.COMPType(typedArgs.CompType)
 		protobuf.Floatcomp = &proto.ApbCondFloatCompare{Value: pb.Float64(typedArgs.Value), Comp: &compType}
-	case *MapCompareArguments:
+	case MapCompareArguments:
 		protobuf.Mapcomp = &proto.ApbCondMapCompare{Value: make([]*proto.ApbMapCondArgs, len(typedArgs.MapArgs))}
 		i := 0
 		for key, args := range typedArgs.MapArgs {
@@ -1995,13 +2862,13 @@ func compareArgsToProtoHelper(key string, args CompareArguments, protobuf *proto
 			compareArgsToProtoHelper(key, args, protobuf.Mapcomp.Value[i])
 			i++
 		}
-	case *BoolCompareArguments:
+	case BoolCompareArguments:
 		protobuf.Boolcomp = &proto.ApbCondBoolCompare{Value: pb.Bool(typedArgs.Value), IsEqualComp: &typedArgs.IsEqualComp}
-	case *StringCompareArguments:
+	case StringCompareArguments:
 		protobuf.Stringcomp = &proto.ApbCondStringCompare{Value: pb.String(typedArgs.Value), IsEqualComp: &typedArgs.IsEqualComp}
-	case *BytesCompareArguments:
+	case BytesCompareArguments:
 		protobuf.Bytescomp = &proto.ApbCondBytesCompare{Value: typedArgs.Value, IsEqualComp: &typedArgs.IsEqualComp}
-	case *GetNoCompareArguments:
+	case GetNoCompareArguments:
 		protobuf.Nocomp = &proto.ApbCondGetNoCompare{}
 	}
 }

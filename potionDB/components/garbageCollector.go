@@ -48,8 +48,10 @@ func (gc *GarbageCollector) cleanRoutine() {
 		//fmt.Println("[GC]Sleeping...")
 		time.Sleep(GCFreq)
 		//fmt.Println("[GC]It's sweeping time!")
+		//var tmSliceClk []int64
 		gc.tm.localClock.Lock()
 		tmClk := gc.tm.localClock.Copy()
+		//tmSliceClk = gc.tm.localClock.Copy()
 		gc.tm.localClock.Unlock()
 
 		var safeClk clocksi.Timestamp = clocksi.HighestTs //All entries maxed
@@ -68,6 +70,7 @@ func (gc *GarbageCollector) cleanRoutine() {
 			//fmt.Println("[GC]No pending clock! We can clean up to the TM's clock.")
 			//No pending clk.
 			safeClk = tmClk
+			//safeClk = clocksi.FromSortedSliceToClockSi(tmSliceClk)
 		}
 		if safeClk.IsEqual(gc.lastCleanClk) {
 			if noCleans%10 == 0 {
@@ -75,7 +78,8 @@ func (gc *GarbageCollector) cleanRoutine() {
 			}
 			noCleans++
 		} else {
-			fmt.Printf("[GC]Clock to clean: %s. TM clock: %s\n", safeClk.ToSortedString(), tmClk.ToSortedString())
+			//fmt.Printf("[GC]Clock to clean: %s. TM clock: %v\n", safeClk.ToSortedString(), tmSliceClk)
+			fmt.Printf("[GC]Clock to clean: %s. TM clock: %v\n", safeClk.ToSortedString(), tmClk)
 			gc.tm.mat.SendRequestToAllChannels(MaterializerRequest{MatRequestArgs: MatGCArgs{SafeClk: safeClk}})
 			gc.lastCleanClk, noCleans = safeClk.Copy(), 0
 		}

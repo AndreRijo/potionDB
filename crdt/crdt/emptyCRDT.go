@@ -22,6 +22,8 @@ func (crdt *EmptyCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (
 	return crdt
 }
 
+func (crdt *EmptyCrdt) IsBigCRDT() bool { return false }
+
 func (crdt *EmptyCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
 	return EmptyState{}
 }

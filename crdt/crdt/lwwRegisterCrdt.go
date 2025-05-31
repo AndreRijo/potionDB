@@ -1,7 +1,9 @@
 package crdt
 
 import (
+	"fmt"
 	rand "math/rand"
+	"strconv"
 	"time"
 
 	"potionDB/crdt/clocksi"
@@ -53,6 +55,23 @@ func (args RegisterState) GetREADType() proto.READType { return proto.READType_F
 
 func (args DownstreamSetValue) MustReplicate() bool { return true }
 
+// Utility function. Not necessary for this CRDT but may be useful when manipulating its read state.
+func (args RegisterState) ToFloat64() (value float64) {
+	valueI, err := strconv.ParseInt(args.Value.(string), 10, 64)
+	if err != nil {
+		valueF, errF := strconv.ParseFloat(args.Value.(string), 64)
+		if errF != nil {
+			fmt.Println("[LWWRegister]Error parsing RegisterState value in aggregateStates. Both float and int conversions failed.")
+			fmt.Println("[LWWRegister]ErrInt:", err, "ErrFloat:", errF, "Register value:", args.Value)
+			panic(1)
+		}
+		value = valueF
+	} else {
+		value = float64(valueI)
+	}
+	return
+}
+
 // Note: crdt can (and most often will be) nil
 func (crdt *LwwRegisterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
 	return &LwwRegisterCrdt{
@@ -69,6 +88,8 @@ func (crdt *LwwRegisterCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, 
 	crdt.CRDTVM, crdt.localReplicaID = (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete), replicaID
 	return crdt
 }
+
+func (crdt *LwwRegisterCrdt) IsBigCRDT() bool { return false }
 
 func (crdt *LwwRegisterCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
 	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {

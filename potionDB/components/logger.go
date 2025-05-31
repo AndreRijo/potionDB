@@ -187,6 +187,7 @@ func (logger *MemLogger) handleRequests() {
 			fmt.Printf("[LOG%d]No request received in the last 7s. Current time: %v.\n", logger.partId, time.Now().Format("15:04:05.000"))
 		}*/
 		req := <-logger.logChan
+		//fmt.Printf("[LOG%d]Got request %d at %s.\n", logger.partId, req.GetRequestType(), time.Now().Format("15:04:05.000"))
 		switch req.GetRequestType() {
 		case TxnLogRequest:
 			logger.handleTxnLogRequest(req.LogRequestArgs.(LogTxnArgs))
@@ -294,11 +295,13 @@ func (logger *MemLogger) handleClkTimeoutRequest() {
 		//logger.partId, logger.replReplyChan == nil, logger.lastSharedPos == logger.currentTxnPos, time.Now().Format("15:04:05.000"))
 		return //If the former, we already received the reply from MAT and replied to Repl. If the later, we have to keep waiting for MAT :()
 	}
+
 	txns := logger.log[logger.lastSharedPos:logger.currentTxnPos]
 	logger.lastSharedPos = logger.currentTxnPos
 	if !keepWholeLog {
 		logger.lastSharedPos, logger.currentTxnPos = 0, 0
 	}
+
 	//fmt.Printf("[LOG%d]Timer fired. Sending last clock of log to repl. Current time: %v.\n", logger.partId, time.Now().Format("15:04:05.000"))
 	logger.replReplyChan <- StableClkUpdatesPair{stableClock: txns[len(txns)-1].clk.Copy(), upds: txns, partID: logger.partId}
 	logger.replReplyChan = nil

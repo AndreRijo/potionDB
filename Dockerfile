@@ -60,3 +60,4 @@ ADD potionDB/configs /go/bin/configs
 # Run the protoserver
 #CMD ["sh", "-c", "go/bin/start.sh $CONFIG"]
 CMD ["bash", "go/bin/start.sh"]
+#CMD ["sh", "go/bin/start.sh"]
