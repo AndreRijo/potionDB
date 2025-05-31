@@ -170,7 +170,7 @@ Parameter -v shares the folder with the desired configuration file with the cont
 PotionDB will automatically use the configuration file inside the shared folder. 
 Depending on your operating system and Docker installation, you may need to set up your Docker to allow sharing of folders.
 
-Many different settings can be changed through configuration files - check [protoServer.go](potiondb/main/protoServer.go), method `loadConfigs()` for a list of settings.
+Many different settings can be changed through configuration files - check [protoServer.go](potionDB/main/protoServer.go), method `loadConfigs()` for a list of settings.
 It is suggested to use one of the existing configuration files as a starting point.
 [These ones are a good starting point](configs/singlePC/docker), as they showcase how to have multiple servers connected and achieve partial replication.
 
@@ -180,7 +180,7 @@ You can find out [here how to run multiple PotionDB instances](#Running-multiple
 #### Advanced usage
 
 For advanced users, it is also possible to pass specific PotionDB parameters by setting environment variables on the creation of a docker container.
-A list of possible configurations and their environment names can be found on [protoServer.go](potiondb/main/protoServer.go), method `loadConfigs()` and [start.sh](dockerStuff/start.sh).
+A list of possible configurations and their environment names can be found on [protoServer.go](potionDB/main/protoServer.go), method `loadConfigs()` and [start.sh](dockerStuff/start.sh).
 For instructions on how to use environment variables (-e) on docker, as well as how to share folders/files with Docker (-v), please check https://docs.docker.com/engine/reference/commandline/run/.
 For most users, however, modifying one of the existing configuration files should be simpler and cleaner.
 
