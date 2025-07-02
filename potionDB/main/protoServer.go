@@ -114,6 +114,7 @@ func main() {
 
 	antidote.SetVMToUse()
 	tm := antidote.Initialize(id)
+	sqlP := antidote.InitializeSQLProcessor(tm)
 	go handleTC(configs)
 	time.Sleep(150 * time.Millisecond)
 
@@ -156,7 +157,7 @@ func main() {
 			go startS2SListener(port, id, tm)
 		} else {
 			listenerChans[i] = make(chan bool, 1)
-			go startListener(port, id, tm, connChan, listenerChans[i])
+			go startListener(port, id, tm, connChan, listenerChans[i], sqlP)
 		}
 	}
 
@@ -183,13 +184,13 @@ func main() {
 	nConns, done := len(connChan), false
 	for ; nConns < 0; nConns-- {
 		conn := <-connChan
-		go processConnection(conn, tm, id)
+		go processConnection(conn, tm, sqlP, id)
 	}
 	timer := time.NewTimer(3 * time.Second)
 	for !done { //Try again in case we receive some late connection attempt
 		select {
 		case conn := <-connChan:
-			go processConnection(conn, tm, id)
+			go processConnection(conn, tm, sqlP, id)
 		case <-timer.C:
 			done = true
 		}
@@ -274,7 +275,7 @@ func main() {
 }
 
 // Listens to new connections on ports other than the main one while PotionDB isn't ready.
-func listenBeforePotionDBStart(port string, id int16, tm *antidote.TransactionManager, ready chan bool) {
+func listenBeforePotionDBStart(port string, id int16, tm *antidote.TransactionManager, sqlP *antidote.SQLProcessor, ready chan bool) {
 	server, err := net.Listen("tcp", "0.0.0.0:"+strings.TrimSpace(port))
 	utilities.CheckErr(utilities.PORT_ERROR, err)
 	waitingConns := make([]net.Conn, 0, 10)
@@ -283,7 +284,7 @@ func listenBeforePotionDBStart(port string, id int16, tm *antidote.TransactionMa
 		select {
 		case tmReady = <-ready:
 			for _, conn := range waitingConns {
-				go processConnection(conn, tm, id)
+				go processConnection(conn, tm, sqlP, id)
 			}
 		default:
 			conn, err := server.Accept()
@@ -314,7 +315,7 @@ func startS2SListener(port string, id int16, tm *antidote.TransactionManager) {
 	}
 }
 
-func startListener(port string, id int16, tm *antidote.TransactionManager, connChan chan net.Conn, listenerChan chan bool) {
+func startListener(port string, id int16, tm *antidote.TransactionManager, connChan chan net.Conn, listenerChan chan bool, sqlP *antidote.SQLProcessor) {
 	server, err := net.Listen("tcp", "0.0.0.0:"+strings.TrimSpace(port))
 	utilities.CheckErr(utilities.PORT_ERROR, err)
 	//Stop listening to port on shutdown
@@ -328,7 +329,7 @@ func startListener(port string, id int16, tm *antidote.TransactionManager, connC
 		select {
 		case <-listenerChan:
 			ready = true
-			go processConnection(conn, tm, id)
+			go processConnection(conn, tm, sqlP, id)
 		default:
 			connChan <- conn
 		}
@@ -337,7 +338,7 @@ func startListener(port string, id int16, tm *antidote.TransactionManager, connC
 	for {
 		conn, err := server.Accept()
 		utilities.CheckErr(utilities.NEW_CONN_ERROR, err)
-		go processConnection(conn, tm, id)
+		go processConnection(conn, tm, sqlP, id)
 	}
 }
 
@@ -393,7 +394,7 @@ Note that this is the same interaction type as in antidote.
 
 conn - the TCP connection between the client and this server.
 */
-func processConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID int16) {
+func processConnection(conn net.Conn, tm *antidote.TransactionManager, sqlP *antidote.SQLProcessor, replicaID int16) {
 	utilities.FancyDebugPrint(utilities.PROTO_PRINT, replicaID, "Accepted connection.")
 	defer conn.Close()
 	tmChan := tm.CreateClientHandler()
@@ -538,9 +539,10 @@ func processConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID
 			s2sChan = handleServerConnReplicaID(protobuf.(*proto.ApbServerConnReplicaID), tmChan, conn)
 			continue
 		case antidote.SQLString:
-			handleSQLString(protobuf.(*proto.ApbStringSQL), tmChan, clientId)
+			handleSQLString(protobuf.(*proto.ApbStringSQL), tmChan, sqlP, clientId)
 			continue //TODO
 		case antidote.SQLTyped:
+			handleSQLTyped(protobuf.(*proto.ApbTypedSQL), tmChan, sqlP, clientId)
 			continue //TODO
 		case antidote.MultiConnect:
 			nClients := int(*protobuf.(*proto.ApbMultiClientConnect).NClients)
@@ -567,7 +569,7 @@ func processConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID
 	}
 }
 
-func handleSQLString(proto *proto.ApbStringSQL, tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) {
+func handleSQLString(proto *proto.ApbStringSQL, tmChan chan antidote.TransactionManagerRequest, sqlP *antidote.SQLProcessor, clientId antidote.ClientId) {
 	sqlString := proto.GetSql()
 	listener := sql.SQLStringToListener(sqlString)
 	switch typedListener := listener.(type) {
@@ -587,6 +589,27 @@ func handleSQLString(proto *proto.ApbStringSQL, tmChan chan antidote.Transaction
 
 	case *sql.ListenerDropTable:
 
+	}
+}
+
+func handleSQLTyped(proto *proto.ApbTypedSQL, tmChan chan antidote.TransactionManagerRequest, sqlP *antidote.SQLProcessor, clientId antidote.ClientId) {
+	switch proto.GetType() {
+	case proto.SQL_Type_CREATE_TABLE:
+		listener := sql.ListenerCreateTable{}.FromProtobuf(proto).(*sql.ListenerCreateTable)
+		sqlP.ProcessCreateTable(listener)
+	case proto.SQL_Type_CREATE_INDEX:
+
+	case proto.SQL_Type_CREATE_VIEW:
+
+	case proto.SQL_Type_INSERT:
+
+	case proto.SQL_Type_UPDATE:
+
+	case proto.SQL_Type_DELETE:
+
+	case proto.SQL_Type_DROP:
+
+	case proto.SQL_Type_QUERY:
 	}
 }
 

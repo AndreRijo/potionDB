@@ -21,7 +21,7 @@ type SQLProcessor struct {
 
 type TableMetadata struct {
 	tableName         string
-	concurrencyPolicy sql.CTPolicy
+	concurrencyPolicy sql.RowPolicy
 	types             map[string]proto.CRDTType
 	defaults          map[string]crdt.UpdateArguments
 	invariants        map[string]sql.Invariant
@@ -61,7 +61,7 @@ func (sqlP *SQLProcessor) ProcessCreateTable(listener *sql.ListenerCreateTable) 
 		columns:           listener.Columns,
 	}
 	for columnName, sqlType := range listener.Types {
-		tableMeta.types[columnName] = DataTypeSQLToCRDTType(sqlType, listener.Invariants[columnName])
+		tableMeta.types[columnName] = DataTypeSQLToCRDTType(sqlType, listener.TypesPolicy[columnName], listener.Invariants[columnName])
 	}
 	for columnName, stringValue := range listener.Defaults {
 		tableMeta.defaults[columnName] = SqlValueToCRDTUpdate(stringValue, tableMeta.types[columnName])

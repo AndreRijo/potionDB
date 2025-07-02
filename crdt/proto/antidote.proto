@@ -30,6 +30,11 @@ enum CRDT_type {
     PAIR_COUNTER = 19;
     ARRAY_COUNTER = 20;
     MULTI_ARRAY = 21;
+    SIMPLE_DATE = 22;
+    SETW_DATE = 23;
+    INCW_DATE = 24;
+    SET_ONLY_DATE = 25;
+    NOOP = 32;
 }
 
 // Riak Error response
@@ -452,6 +457,94 @@ message ApbGetMultiArrayResp {
     repeated int64 counts = 5;
 }
 
+// Date
+
+message ApbDateUpdate {
+    optional ApbDateSet set = 1;
+    optional ApbDateOnlySet dateSet = 2;
+    optional ApbTimeOnlySet timeSet = 3;
+    optional ApbSetMS setMS = 4;
+    optional ApbDateInc inc = 5;
+    optional ApbDateOnlyInc dateInc = 6;
+    optional ApbTimeOnlyInc timeInc = 7;
+    optional ApbIncMS incMS = 8;
+    optional ApbDateInitialize initialize = 9;
+}
+
+message ApbDateSet {    //At least one must be set
+    optional int32 year = 1;
+    optional int32 month = 2;
+    optional int32 day = 3;
+    optional int32 hour = 4;
+    optional int32 minute = 5;
+    optional int32 second = 6;
+    optional int32 millisecond = 7;
+}
+
+message ApbDateOnlySet {    //At least one must be set
+    optional int32 year = 1;
+    optional int32 month = 2;
+    optional int32 day = 3;
+}
+
+message ApbTimeOnlySet {    //At least one must be set
+    optional int32 hour = 1;
+    optional int32 minute = 2;
+    optional int32 second = 3;
+    optional int32 millisecond = 4;
+}
+
+message ApbDateInc {
+    optional int32 year = 1;
+    optional int32 month = 2;
+    optional int32 day = 3;
+    optional int32 hour = 4;
+    optional int32 minute = 5;
+    optional int32 second = 6;
+    optional int32 millisecond = 7;
+}
+
+message ApbDateOnlyInc {
+    optional int32 year = 1;
+    optional int32 month = 2;
+    optional int32 day = 3;
+}
+
+message ApbTimeOnlyInc {
+    optional int32 hour = 4;
+    optional int32 minute = 5;
+    optional int32 second = 6;
+    optional int32 millisecond = 7;
+}
+
+message ApbDateInitialize { //Can only be issued once.
+    optional int32 year = 1;
+    optional int32 month = 2;
+    optional int32 day = 3;
+    optional int32 hour = 4;
+    optional int32 minute = 5;
+    optional int32 second = 6;
+    optional int32 millisecond = 7;
+}
+
+//Note: Not recommended for the average user. This is intended only for benchmarks or heavy dataload scenarios.
+message ApbSetMS {
+    required int64 ms = 1; //0 corresponds to the Julian Calendar epoch
+}
+
+message ApbIncMS {
+    required int64 inc = 1;
+}
+
+message ApbGetDateResp {
+    required int32 year = 1;
+    required int32 month = 2;
+    required int32 day = 3;
+    required int32 hour = 4;
+    required int32 minute = 5;
+    required int32 second = 6;
+}
+
 //--------------------------------------------------------------
 
 // Properties parameters of a transaction
@@ -498,6 +591,7 @@ message ApbUpdateOperation {
     optional ApbPairCounterUpdate paircounterop = 8;
     optional ApbArrayCounterUpdate arraycounterop = 9;
     optional ApbMultiArrayUpdate multiarrayop = 17;
+    optional ApbDateUpdate dateop = 18;
 }
 
 // Objects to be updated
@@ -557,6 +651,7 @@ message ApbReadObjectResp {
     optional ApbGetPairCounterResp paircounter = 9;
     optional ApbGetArrayCounterResp arraycounter = 10;
     optional ApbGetMultiArrayResp multiarray = 17;
+    optional ApbGetDateResp date = 18;
 	optional ApbPartialReadResp partread = 8;	//Generic for non-full state reads from any CRDT
 }
 
@@ -622,20 +717,64 @@ message ApbGetTriggersReply {
     repeated ApbNewTrigger genericMapping = 2;
 }
 
+//SQL
+
+enum ROW_Policy {  //Concurrency policy
+    AW = 1;
+    RW = 2;
+    LWW = 3;
+    STRONG = 4;
+}
+
+enum COL_Policy {
+    LWW_C = 1;
+    MW = 2;
+    EW = 3;
+    DW = 4;
+}
+
+enum SQL_Datatype {
+    COUNTER_SQL = 1;
+    INTEGER = 2;
+    BOOLEAN = 3;
+    VARCHAR = 4;
+    DATE = 5;
+}
+
+enum SQL_Type {
+    CREATE_TABLE = 1;
+    CREATE_INDEX = 2;
+    CREATE_VIEW = 3;
+    INSERT = 4;
+    UPDATE = 5;
+    DELETE = 6;
+    DROP = 7;
+    QUERY = 8;
+}
+
 message ApbStringSQL {required string sql = 1;}
 
 message ApbTypedSQL {
-    optional ApbSQLCreateTable createTable = 1;
-    optional ApbSQLCreateIndex createIndex = 2;
-    optional ApbSQLCreateView createView = 3;
-    optional ApbSQLInsert insert = 4;
-    optional ApbSQLUpdate update = 5;
-    optional ApbSQLDelete delete = 6;;
-    optional ApbSQLDrop drop = 7;
-    optional ApbSQLQuery query = 8;
+    required string tableName = 1;
+    required SQL_Type type = 2; //Type of SQL operation
+    optional ApbSQLCreateTable createTable = 3;
+    optional ApbSQLCreateIndex createIndex = 4;
+    optional ApbSQLCreateView createView = 5;
+    optional ApbSQLInsert insert = 6;
+    optional ApbSQLUpdate update = 7;
+    optional ApbSQLDelete delete = 8;
+    optional ApbSQLDrop drop = 9;
+    optional ApbSQLQuery query = 10;
 }
 
-message ApbSQLCreateTable {required string tableName = 1;}
+message ApbSQLCreateTable {
+    required ROW_Policy rowPolicy = 1;
+    repeated string columns = 2;
+    repeated SQL_Datatype datatypes = 3; //Note: The order of the data types must match the order of the columns in the table.
+    repeated COL_Policy colPolicies = 4; //Note: The order of the column policies must match the order of the columns in the table.
+    repeated string defaults = 5;
+    repeated ApbSQLInvariant invariants = 6;
+}
 message ApbSQLCreateIndex {required string tableName = 1;}
 message ApbSQLCreateView {required string tableName = 1;}
 message ApbSQLInsert {required string tableName = 1;}
@@ -644,6 +783,25 @@ message ApbSQLDelete {required string tableName = 1;}
 message ApbSQLDrop {required string tableName = 1;}
 message ApbSQLQuery {required string tableName = 1;}
 
+message ApbSQLInvariant {
+    optional ApbSQLPrimaryKey primaryKey = 1;
+    optional ApbSQLForeignKey foreignKey = 2;
+    optional ApbSQLPrimaryKey unique = 3;
+    optional ApbSQLCheck check = 4;
+}
+
+message ApbSQLPrimaryKey {}
+
+message ApbSQLForeignKey {
+    required string foreignTable = 1;
+    required string foreignColumn = 2;
+}
+
+message ApbSQLCheck {
+    required COMP_type conditionType = 1;
+    required int32 value = 2;
+}
+
 //Partial reading
 
 enum READ_type {
@@ -651,6 +809,8 @@ enum READ_type {
 	//Set
     LOOKUP = 1;
     N_ELEMS = 10;
+    //MW_REG
+    GET_SINGLE = 33;
 	//Maps
 	GET_VALUE = 2;
 	HAS_KEY = 3;
@@ -688,6 +848,11 @@ enum READ_type {
     MULTI_DATA_COND = 30;
     MULTI_CUSTOM = 31;
     MULTI_DATA_INT = 32;
+    //Date
+    DATE_FULL = 40;
+    DATE_ONLY = 41;
+    DATE_TIME_ONLY = 42;
+    DATE_TIMESTAMP = 43;
 }
 
 enum COMP_type {EQ = 0; NEQ = 1; LEQ = 2; L = 3; H = 4; HEQ = 5;}
@@ -731,6 +896,8 @@ message ApbPartialReadArgs {
     optional ApbPairCounterPartialRead paircounter = 6;
     optional ApbArrayCounterPartialRead arraycounter = 7;
     optional ApbMultiArrayPartialRead multiarray = 8;
+    optional ApbMVRegPartialRead mvreg = 9;
+    optional ApbDatePartialRead date = 10;
 }
 
 //A special operation. It executes a group of reads (pre-reads), aggregates the results and 
@@ -901,6 +1068,15 @@ message ApbMultiArrayCustomRead {
 }
 message IntSlice {repeated int32 values = 1;}
 
+//MVREG
+message ApbMVRegPartialRead {optional ApbMVRegSingleRead single = 1;}
+message ApbMVRegSingleRead{}
+
+//DATE
+message ApbDatePartialRead {    //No data is needed, only to know the type. So let's just include the enum to decide.
+    required READ_type dataReadType = 1;
+} 
+
 //RESP
 message ApbPartialReadResp {
 	optional ApbSetPartialReadResp set = 1;
@@ -910,6 +1086,8 @@ message ApbPartialReadResp {
     optional ApbPairCounterPartialReadResp paircounter = 5;
     optional ApbArrayCounterPartialReadResp arraycounter = 6;   //Sub read uses the non-partial reply.
     optional ApbMultiArrayPartialReadResp multiarray = 7;   //Note: Reads returning multiple arrays use non-partial reply.
+    optional ApbMVRegPartialReadResp mvreg = 8;
+    optional ApbDatePartialReadResp date = 9;
 }
 
 message ApbSetPartialReadResp {
@@ -987,4 +1165,41 @@ message ApbMultiArrayDataAndSingleResp {
     optional int64 intValue = 2;        //Also doubles as sumValue for avg 
     optional double floatValue = 3;
     optional int64 countValue = 4;
+}
+
+message ApbMVRegPartialReadResp {optional ApbMVRegSingleResp single = 1;}
+message ApbMVRegSingleResp {required bytes value = 1;}
+
+message ApbDatePartialReadResp {
+    optional ApbDateFullResp full = 1;
+    optional ApbTimeResp time = 2;
+    optional ApbDateOnlyResp dateOnly = 3;
+    optional ApbTimestampResp timestamp = 4;
+}
+
+message ApbDateFullResp {
+    required int32 year = 1;
+    required int32 month = 2;
+    required int32 day = 3;
+    required int32 hour = 4;
+    required int32 minute = 5;
+    required int32 second = 6;
+    required int32 millisecond = 7;
+}
+
+message ApbTimeResp {
+    required int32 hour = 1;
+    required int32 minute = 2;
+    required int32 second = 3;
+    required int32 millisecond = 4;
+}
+
+message ApbDateOnlyResp {
+    required int32 year = 1;
+    required int32 month = 2;
+    required int32 day = 3;
+}
+
+message ApbTimestampResp {
+    required int64 timestamp = 1;
 }

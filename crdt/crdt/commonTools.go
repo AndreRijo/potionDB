@@ -1,6 +1,7 @@
 package crdt
 
 import (
+	"potionDB/crdt/clocksi"
 	"potionDB/crdt/proto"
 	"potionDB/shared/shared"
 )
@@ -8,6 +9,11 @@ import (
 var (
 	NReplicas int32 //Information that may be used by CRDTs if needed. Note: doesn't update when a new replica joins the system besides the intended number. But is that even supported atm?
 )
+
+type PairValueClk struct { //Used by MW-Register
+	Value interface{}
+	Clk   clocksi.Timestamp
+}
 
 type Unique uint64
 
@@ -118,6 +124,8 @@ func InitializeCrdt(crdtType proto.CRDTType, replicaID int16) (newCrdt CRDT) {
 		newCrdt = (&CounterArrayCrdt{}).Initialize(nil, replicaID)
 	case proto.CRDTType_MULTI_ARRAY:
 		newCrdt = (&MultiArrayCrdt{}).Initialize(nil, replicaID)
+	case proto.CRDTType_MVREG:
+		newCrdt = (&MVRegisterCrdt{}).Initialize(nil, replicaID)
 	default:
 		newCrdt = nil
 	}

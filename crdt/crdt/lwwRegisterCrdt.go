@@ -16,29 +16,29 @@ import (
 // Note: Implements both CRDT and InversibleCRDT
 type LwwRegisterCrdt struct {
 	CRDTVM
-	value          interface{}
+	value          any
 	ts             int64
 	replicaID      int16
 	localReplicaID int16 //ReplicaID of the replica with this CRDT instance
 }
 
 type RegisterState struct {
-	Value interface{}
+	Value any
 }
 
 type SetValue struct {
-	NewValue interface{}
+	NewValue any
 }
 
 type DownstreamSetValue struct {
-	NewValue  interface{}
+	NewValue  any
 	Ts        int64
 	ReplicaID int16 //replicaID is only used to dinstiguish cases in which Ts is equal
 }
 
 // Stores the value previous to the latest setValue
 type SetValueEffect struct {
-	NewValue  interface{}
+	NewValue  any
 	Ts        int64
 	ReplicaID int16
 }
@@ -49,9 +49,9 @@ func (args SetValue) GetCRDTType() proto.CRDTType { return proto.CRDTType_LWWREG
 
 func (args DownstreamSetValue) GetCRDTType() proto.CRDTType { return proto.CRDTType_LWWREG }
 
-func (args RegisterState) GetCRDTType() proto.CRDTType { return proto.CRDTType_LWWREG }
+func (state RegisterState) GetCRDTType() proto.CRDTType { return proto.CRDTType_LWWREG }
 
-func (args RegisterState) GetREADType() proto.READType { return proto.READType_FULL }
+func (state RegisterState) GetREADType() proto.READType { return proto.READType_FULL }
 
 func (args DownstreamSetValue) MustReplicate() bool { return true }
 

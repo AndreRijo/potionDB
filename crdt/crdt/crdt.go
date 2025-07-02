@@ -13,12 +13,14 @@ type CRDT interface {
 
 	Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State)
 
+	//Prepare
 	Update(args UpdateArguments) (downstreamArgs DownstreamArguments)
 
+	//Effect
 	//For now only non-uniform CRDTs need to return upds when downstreaming
 	Downstream(updTs clocksi.Timestamp, downstreamArgs DownstreamArguments) (otherDownstreamArgs DownstreamArguments)
 
-	IsOperationWellTyped(args UpdateArguments) (ok bool, err error)
+	IsOperationWellTyped(args UpdateArguments) (ok bool, err error) //return true, nil
 
 	GetCRDTType() proto.CRDTType
 
@@ -28,7 +30,7 @@ type CRDT interface {
 	//This should be O(1) based on some criteria of the existing data in the CRDT, e.g., set/map/array size.
 	//Simple CRDTs (average, flags, counters, registers, etc.) should always return false.
 	//Recommendation: maps and sets, return true if size >= 100; arrays/slices, if size >= 500.
-	IsBigCRDT() bool
+	IsBigCRDT() bool //return false
 }
 
 // The idea is to include here the methods/data common to every CRDT. For now, there's... nothing

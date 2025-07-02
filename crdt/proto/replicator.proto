@@ -63,6 +63,11 @@ message ProtoOpDownstream {
     optional ProtoPairCounterDownstream pairCounterOp = 16;
     optional ProtoArrayCounterDownstream arrayCounterOp = 17;
     optional ProtoMultiArrayDownstream multiArrayOp = 18;
+    optional ProtoMVRegisterDownstream mvregOp = 19;
+    optional ProtoSimpleDateDownstream simpleDateOp = 20;
+    optional ProtoSetWDateDownstream setWDateOp = 21;
+    optional ProtoIncWDateDownstream incWDateOp = 22;
+    optional ProtoSetOnlyDateDownstream dateOnlyDateOp = 23;
 }
 
 message ProtoCounterDownstream {
@@ -449,6 +454,56 @@ message ProtoMultiArraySetSizeDownstream {
     optional int32 avgSize = 4;
 }
 
+message ProtoMVRegisterDownstream {
+    required bytes value = 1;
+    required bytes clk = 2;
+    required int32 replicaID = 3;
+}
+
+message ProtoSimpleDateDownstream {
+    optional bool isInitialSet = 1;  //If not present, it's assumed to be false.
+    required int64 inc = 2;
+}
+
+message ProtoSetWDateDownstream {
+    optional ProtoSetWIncDownstream setWInc = 1;
+    optional ProtoSetWSetDownstream setWSet = 2;
+}
+
+//TODO: Need to update this (and the incW too.)
+
+message ProtoSetWIncDownstream {
+    required bytes vc = 1;
+    required int64 inc = 2;
+}
+
+message ProtoSetWSetDownstream {
+    required bytes vc = 1;
+    required int64 value = 2;
+    required int32 replicaID = 3; 
+}
+
+message ProtoIncWDateDownstream {
+    optional ProtoIncWIncDownstream incWInc = 1;
+    optional ProtoIncWSetDownstream incWSet = 2;
+}
+
+message ProtoIncWIncDownstream {
+    required int64 inc = 1;
+    required int32 replicaID = 2;
+}
+
+message ProtoIncWSetDownstream {
+    required bytes vc = 1;
+    required int64 value = 2;
+    required int32 replicaID = 3;
+}
+
+message ProtoSetOnlyDateDownstream {
+    required int64 value = 1;
+    required int64 ts = 2;
+    required int32 replicaID = 3;
+}
 
 /*****REPLICA MANAGEMENT*****/
 
@@ -522,6 +577,11 @@ message ProtoState {
     optional ProtoPairCounterState pairCounter = 14;
     optional ProtoArrayCounterState arrayCounter = 15;
     optional ProtoMultiArrayState multiArray = 16;
+    optional ProtoMVRegState mvreg = 17;
+    optional ProtoSimpleDateState simpleDate = 18;
+    optional ProtoSetWDateState setWDate = 19;
+    optional ProtoIncWDateState incWDate = 20;
+    optional ProtoSetOnlyDateState setOnlyDate = 21;
 }
 
 message ProtoReplyEmpty {
@@ -624,4 +684,42 @@ message ProtoMultiArrayState {
     repeated bytes data = 3;
     repeated int64 sums = 4;
     repeated int64 counts = 5;
+}
+
+message ProtoMVRegState {
+    required bytes value = 1;
+    required bytes clk = 2;
+    required int32 replicaID = 3;
+    repeated bytes concValues = 4;
+    repeated bytes concClks = 5;    //Same size as concValues
+}
+
+message ProtoSimpleDateState {
+    required int64 dateTs = 1;
+}
+
+message ProtoSetWDateState {
+    required bytes setClk = 1;
+    required int64 setValue = 2;
+    required int64 setTs = 3;
+    required int64 inc = 4;
+    required int32 setReplicaID = 5;
+    required bytes currClk = 6;
+}
+
+message ProtoIncWDateState {
+    required bytes setClk = 1;
+    required int64 setValue = 2;
+    required int64 setTs = 3;
+    required int32 setReplicaID = 4;
+    map<int32,int64> incs = 5;  //replicaID -> value
+    map<int32,int64> cancels = 6;
+    map<int32,int64> cancelsTs = 7;
+    required bytes currClk = 8;
+}
+
+message ProtoSetOnlyDateState {
+    required int64 dateTs = 1;
+    required int64 writeTs = 2;
+    required int32 replicaID = 3;
 }

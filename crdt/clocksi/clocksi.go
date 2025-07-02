@@ -133,11 +133,12 @@ var (
 	DummyTs   = NewClockSiTimestampFromId(0)
 	knownIDs  = make([]int16, 0, 5) //Known replicaIDs. All new ClockSiTimestamps generated with NewClockSiTimestamp() will contain entries for these IDs
 	HighestTs = ClockSiTimestamp{VectorClock: make(map[int16]int64, 5)}
+	MinimumTs = ClockSiTimestamp{VectorClock: make(map[int16]int64, 5)}
 )
 
 func AddNewID(id int16) {
 	knownIDs = append(knownIDs, id)
-	addToHighestTs(id)
+	addToHighestAndMinimumTs(id)
 }
 
 // Returns a copy of the known IDs
@@ -545,8 +546,8 @@ func (ts ClockSiTimestamp) Update() {
 	}
 }
 
-func addToHighestTs(id int16) {
-	HighestTs.VectorClock[id] = math.MaxInt64
+func addToHighestAndMinimumTs(id int16) {
+	HighestTs.VectorClock[id], MinimumTs.VectorClock[id] = math.MaxInt64, math.MinInt64
 }
 
 func (ts ClockSiTimestamp) ToBytes() (bytes []byte) {

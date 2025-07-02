@@ -99,6 +99,8 @@ func UpdateProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation, crdtType pr
 		return updateArrayCounterProtoToAntidoteUpdate(protobuf)
 	case proto.CRDTType_MULTI_ARRAY:
 		return updateMultiArrayProtoToAntidoteUpdate(protobuf)
+	case proto.CRDTType_MVREG:
+		return MVSetValue{}.FromUpdateObject(protobuf)
 	}
 
 	return nil
@@ -192,6 +194,10 @@ func PartialReadOpToAntidoteRead(protobuf *proto.ApbPartialReadArgs, crdtType pr
 	case proto.READType_MULTI_SUB:
 		tmpRead = partialMultiSubOpToAntidoteRead(protobuf)
 
+	//Reg
+	case proto.READType_GET_SINGLE:
+		tmpRead = MVRegisterSingleReadArguments{}.FromPartialRead(protobuf)
+
 	//Process
 	case proto.READType_PROCESS:
 		tmpRead = ReadProcessingObjectParams{}.FromPartialRead(protobuf)
@@ -239,6 +245,8 @@ func ReadRespProtoToAntidoteState(protobuf *proto.ApbReadObjectResp, crdtType pr
 		state = CounterArrayState{}.FromReadResp(protobuf)
 	case proto.CRDTType_MULTI_ARRAY:
 		state = MultiArrayState{}.FromReadResp(protobuf)
+	case proto.CRDTType_MVREG:
+		state = MVRegisterState{}.FromReadResp(protobuf)
 	}
 
 	return
@@ -285,13 +293,13 @@ func partialReadRespProtoToAntidoteState(protobuf *proto.ApbReadObjectResp, crdt
 	case proto.READType_PAIR_SECOND:
 		state = SingleSecondCounterState(0.0).FromReadResp(protobuf)
 
-		//ArrayCounter
+	//ArrayCounter
 	case proto.READType_COUNTER_SINGLE:
 		state = CounterArraySingleState(0).FromReadResp(protobuf)
 	case proto.READType_COUNTER_EXCEPT, proto.READType_COUNTER_SUB, proto.READType_COUNTER_EXCEPT_RANGE:
 		state = CounterArrayState{}.FromReadResp(protobuf)
 
-		//MultiArray
+	//MultiArray
 	case proto.READType_MULTI_DATA_COND:
 		state = partialMultiDataCondRespToAntidoteState(protobuf)
 	case proto.READType_MULTI_COND:
@@ -302,6 +310,10 @@ func partialReadRespProtoToAntidoteState(protobuf *proto.ApbReadObjectResp, crdt
 		state = MultiArrayState{}.FromReadResp(protobuf)
 	case proto.READType_MULTI_SINGLE:
 		state = partialMultiSingleRespToAntidoteRead(protobuf)
+
+	//Reg
+	case proto.READType_GET_SINGLE:
+		state = MVRegisterSingleState{}.FromReadResp(protobuf)
 	}
 
 	return
@@ -350,6 +362,8 @@ func DownstreamProtoToAntidoteDownstream(protobuf *proto.ProtoOpDownstream, crdt
 		downOp = downstreamProtoCounterArrayToAntidoteDownstream(protobuf)
 	case proto.CRDTType_MULTI_ARRAY:
 		downOp = downstreamProtoMultiArrayToAntidoteDownstream(protobuf)
+	case proto.CRDTType_MVREG:
+		downOp = DownstreamMVSetValue{}.FromReplicatorObj(protobuf)
 	}
 
 	return
@@ -393,6 +407,8 @@ func StateProtoToCrdt(protobuf *proto.ProtoState, crdtType proto.CRDTType, ts *c
 		crdt = (&CounterArrayCrdt{}).FromProtoState(protobuf, ts, replicaID)
 	case proto.CRDTType_MULTI_ARRAY:
 		crdt = (&MultiArrayCrdt{}).FromProtoState(protobuf, ts, replicaID)
+	case proto.CRDTType_MVREG:
+		crdt = (&MVRegisterCrdt{}).FromProtoState(protobuf, ts, replicaID)
 	}
 	return
 }
