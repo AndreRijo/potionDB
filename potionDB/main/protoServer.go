@@ -101,7 +101,7 @@ func main() {
 	fmt.Printf("[PS]Setting an initial empty array of size %.4f GB\n", floatSize/1000000000)
 	startProfiling(configs)
 
-	portString := configs.GetOrDefault(PORT_KEY, "8887 35548")
+	portString := configs.GetOrDefault(PORT_KEY, "8887")
 	ports := strings.Split(portString, " ")
 	shared.PotionDBPort, _ = strconv.Atoi(ports[0])
 	ports = append(ports, strconv.Itoa(shared.PotionDBPort*4%65535)) //Special port for initial S2S.
@@ -592,10 +592,10 @@ func handleSQLString(proto *proto.ApbStringSQL, tmChan chan antidote.Transaction
 	}
 }
 
-func handleSQLTyped(proto *proto.ApbTypedSQL, tmChan chan antidote.TransactionManagerRequest, sqlP *antidote.SQLProcessor, clientId antidote.ClientId) {
-	switch proto.GetType() {
+func handleSQLTyped(protobuf *proto.ApbTypedSQL, tmChan chan antidote.TransactionManagerRequest, sqlP *antidote.SQLProcessor, clientId antidote.ClientId) {
+	switch protobuf.GetType() {
 	case proto.SQL_Type_CREATE_TABLE:
-		listener := sql.ListenerCreateTable{}.FromProtobuf(proto).(*sql.ListenerCreateTable)
+		listener := sql.ListenerCreateTable{}.FromProtobuf(protobuf).(*sql.ListenerCreateTable)
 		sqlP.ProcessCreateTable(listener)
 	case proto.SQL_Type_CREATE_INDEX:
 

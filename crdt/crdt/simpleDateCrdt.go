@@ -86,7 +86,7 @@ type SetTime struct {
 	Second      int8
 }
 
-type SetMS int64
+type SetMS int64 //This is not only the millisecond part, but rather the whole date represented as a single int64.
 
 type IncDate struct { //Supports receiving negative numbers
 	Year   int16
@@ -342,36 +342,40 @@ func (crdt *SimpleDateCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateA
 	if updsNotYetApplied != nil && len(updsNotYetApplied) > 0 {
 		ms = crdt.getTsWithUpdsNotYetApplied(updsNotYetApplied)
 	}
+	return dateReadHelper(args, ms)
+}
+
+func dateReadHelper(args ReadArguments, ms int64) (state State) {
 	switch args.(type) {
 	case DateFullArguments:
-		return crdt.getFullDate(ms)
+		return getFullDateHelper(ms)
 	case DateOnlyArguments:
-		return crdt.getDateOnly(ms)
+		return getDateOnlyHelper(ms)
 	case TimeArguments:
-		return crdt.getTimeOnly(ms)
+		return getTimeOnlyHelper(ms)
 	case TimestampArguments:
-		return crdt.getTimestamp(ms)
+		return getTimestampHelper(ms)
 	}
 	return
 }
 
-func (crdt *SimpleDateCrdt) getFullDate(updatedMs int64) (state State) {
+func getFullDateHelper(updatedMs int64) (state State) {
 	year, month, day := TsToGregorian(updatedMs)
 	hour, min, sec, ms := ExtractHourMinSecMS(updatedMs)
 	return DateFullState{Year: year, Month: month, Day: day, Hour: hour, Minute: min, Second: sec, Millisecond: ms}
 }
 
-func (crdt *SimpleDateCrdt) getDateOnly(updatedMs int64) (state State) {
+func getDateOnlyHelper(updatedMs int64) (state State) {
 	year, month, day := TsToGregorian(updatedMs)
 	return DateOnlyState{Year: year, Month: month, Day: day}
 }
 
-func (crdt *SimpleDateCrdt) getTimeOnly(updatedMs int64) (state State) {
+func getTimeOnlyHelper(updatedMs int64) (state State) {
 	hour, min, sec, ms := ExtractHourMinSecMS(updatedMs)
 	return TimeState{Hour: hour, Minute: min, Second: sec, Millisecond: ms}
 }
 
-func (crdt *SimpleDateCrdt) getTimestamp(updatedMs int64) (state State) {
+func getTimestampHelper(updatedMs int64) (state State) {
 	return TimestampState(updatedMs)
 }
 
@@ -399,7 +403,7 @@ func (crdt *SimpleDateCrdt) Update(args UpdateArguments) (downstreamArgs Downstr
 	if dateUpd, ok := args.(DateUpd); ok {
 		ms := dateUpd.ToMS()
 		switch args.(type) {
-		case SetDate, SetDateOnly, SetDateFull: //We want the direct difference, and issue an increment representing it
+		case SetDate, SetDateOnly, SetDateFull, SetMS: //We want the direct difference, and issue an increment representing it
 			return DownstreamIncMS(ms - crdt.dateTs)
 		case IncDate, IncMS:
 			return DownstreamIncMS(ms)

@@ -491,12 +491,14 @@ message ProtoIncWDateDownstream {
 message ProtoIncWIncDownstream {
     required int64 inc = 1;
     required int32 replicaID = 2;
+    required bytes vc = 3;
 }
 
 message ProtoIncWSetDownstream {
     required bytes vc = 1;
     required int64 value = 2;
     required int32 replicaID = 3;
+    map<int32,int64> seenIncs = 4;  //replicaID -> value
 }
 
 message ProtoSetOnlyDateDownstream {

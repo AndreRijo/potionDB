@@ -3,7 +3,7 @@ module potionDB/potionDB
 go 1.16
 
 require (
-	github.com/AndreRijo/go-tools v0.0.0-20240922171453-2d12c5769f8a
+	github.com/AndreRijo/go-tools v0.0.0-20250702122434-f5d7580301a7
 	github.com/streadway/amqp v1.1.0
 	github.com/twmb/murmur3 v1.1.5
 	google.golang.org/protobuf v1.34.2

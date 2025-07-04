@@ -9,6 +9,29 @@ import (
 	pb "google.golang.org/protobuf/proto"
 )
 
+/*
+For future consideration: regarding concurrency on set (applies to incW and setW)
+At the moment, we consider sets as setting the "whole date". If the user issues a partial set (e.g., only hh:mm:ss), we take in the current date for the unset fields (dd:mm:yyyy)
+This is the simplest semantics to implement, however, questionably it may be undesirable. E.g., if we change only hh:mm:ss, we may be okay with concurrent sets changing the dd:mm:yyyy
+Alternative semantics:
+Consider collision based on each field: yyyy:mm:dd, hh:mm:ss:ms.
+Sets that change different fields (e.g., year and day) commute.
+If a user does not want his set to commute with others, he can set the other fields to the current value.
+E.g.: a user wanting to change hh:mm:ss, but wants to keep current day and month, must issue a SetDate that sets month, day, hh:mm:ss.
+This gives the best of both worlds.
+Problems:
+How to represent concurrency? Now we may have multiple sets that are relevant.
+	- Maybe a bitset and assume replicaIDs are sorted and have a very small range (64? Could extend as needed). Could be very add to update when new replicas are added.
+	- (...)
+	- How to represent setValue itself? Set only relevant fields? But how to correctly identify that + how to deal with casually previous sets, that now should not lead to conflicts anymore?
+		- Well, maybe clk can help with this but... not sure.
+How to maintain proper set-wins semantics? E.g., if we set only the day, increasing hours can lead to day increases, thus ruining the intended semantics.
+So, probably better to abandon this idea. Or alternatively, have to ensure that a set makes all concurrent increments of his field or lower fields be ignored
+(E.g: setting a day makes concurrent increments of any of dd:hh:mm:ss:ms ignored/conflict.)
+It would still allow a concurrent set to a smaller field to work through.
+So yeah. For now, keep it simple. It's ok.
+*/
+
 // To read: Start with setValue, add all incs and then minus all cancels.
 type IncWDateCrdt struct {
 	CRDTVM
@@ -110,37 +133,7 @@ func (crdt *IncWDateCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArg
 	if updsNotYetApplied != nil && len(updsNotYetApplied) > 0 {
 		ms = crdt.getTsWithUpdsNotYetApplied(ms, updsNotYetApplied)
 	}
-	switch args.(type) {
-	case DateFullIncWArguments:
-		return crdt.getFullDate(ms)
-	case DateOnlyIncWArguments:
-		return crdt.getDateOnly(ms)
-	case TimeIncWArguments:
-		return crdt.getTimeOnly(ms)
-	case TimestampIncWArguments:
-		return crdt.getTimestamp(ms)
-	}
-	return
-}
-
-func (crdt *IncWDateCrdt) getFullDate(updatedMs int64) (state State) {
-	year, month, day := TsToGregorian(updatedMs)
-	hour, min, sec, ms := ExtractHourMinSecMS(updatedMs)
-	return DateFullState{Year: year, Month: month, Day: day, Hour: hour, Minute: min, Second: sec, Millisecond: ms}
-}
-
-func (crdt *IncWDateCrdt) getDateOnly(updatedMs int64) (state State) {
-	year, month, day := TsToGregorian(updatedMs)
-	return DateOnlyState{Year: year, Month: month, Day: day}
-}
-
-func (crdt *IncWDateCrdt) getTimeOnly(updatedMs int64) (state State) {
-	hour, min, sec, ms := ExtractHourMinSecMS(updatedMs)
-	return TimeState{Hour: hour, Minute: min, Second: sec, Millisecond: ms}
-}
-
-func (crdt *IncWDateCrdt) getTimestamp(updatedMs int64) (state State) {
-	return TimestampState(updatedMs)
+	return dateReadHelper(args, ms)
 }
 
 func (crdt *IncWDateCrdt) getTsWithUpdsNotYetApplied(baseMs int64, updsNotYetApplied []UpdateArguments) (updMs int64) {
@@ -168,10 +161,13 @@ func (crdt *IncWDateCrdt) Update(args UpdateArguments) (downstreamArgs Downstrea
 	if dateUpd, ok := args.(DateUpd); ok {
 		ms, nextVc := dateUpd.ToMS(), crdt.currClk.NextTimestamp(crdt.localReplicaID)
 		switch args.(type) {
-		case SetDate, SetDateOnly, SetDateFull: //We want the direct difference, and issue an increment representing it
+		case SetDate, SetDateOnly, SetDateFull, SetMS:
 			return DownstreamSetTsIncW{Value: ms, Vc: nextVc, ReplicaID: crdt.localReplicaID, IncsSeen: tools.MapCopy(crdt.incs)}
 		case IncDate, IncMS:
 			return DownstreamIncTsIncW{Inc: ms, Vc: nextVc, ReplicaID: crdt.localReplicaID}
+		case SetTime: //Special case: Find the current year, month, day and maintain those. Change only the hour, min and day.
+			currMsDay := HourMinSecToMs(ExtractHourMinSec(ms))
+			return DownstreamSetTsIncW{Value: ms + currMsDay, Vc: nextVc, ReplicaID: crdt.localReplicaID}
 		}
 	}
 	return
@@ -276,21 +272,29 @@ func (crdt *IncWDateCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
 //Protobuf functions - most are already defined in simpleDateCrdt. Only need to define downstream and ProtoState.
 
 func (downOp DownstreamIncTsIncW) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
-	downProto := protobuf.GetSetWDateOp().GetSetWInc()
-	return DownstreamIncTsIncW{Inc: downProto.GetInc(), Vc: clocksi.ClockSiTimestamp{}.FromBytes(downProto.GetVc())}
+	downProto := protobuf.GetIncWDateOp().GetIncWInc()
+	return DownstreamIncTsIncW{Inc: downProto.GetInc(), ReplicaID: int16(downProto.GetReplicaID()), Vc: clocksi.ClockSiTimestamp{}.FromBytes(downProto.GetVc())}
 }
 
 func (downOp DownstreamIncTsIncW) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	return &proto.ProtoOpDownstream{IncWDateOp: &proto.ProtoIncWDateDownstream{IncWInc: &proto.ProtoIncWIncDownstream{Inc: &downOp.Inc, ReplicaID: pb.Int32(int32(downOp.ReplicaID))}}}
+	return &proto.ProtoOpDownstream{IncWDateOp: &proto.ProtoIncWDateDownstream{IncWInc: &proto.ProtoIncWIncDownstream{Inc: &downOp.Inc, ReplicaID: pb.Int32(int32(downOp.ReplicaID)), Vc: downOp.Vc.ToBytes()}}}
 }
 
 func (downOp DownstreamSetTsIncW) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
 	downProto := protobuf.GetIncWDateOp().GetIncWSet()
-	return DownstreamSetTsIncW{Value: downProto.GetValue(), Vc: clocksi.ClockSiTimestamp{}.FromBytes(downProto.GetVc()), ReplicaID: int16(downProto.GetReplicaID())}
+	incsSeen, protoIncsSeen := make(map[int16]int64, len(downOp.IncsSeen)), downProto.GetSeenIncs()
+	for replicaID, inc := range protoIncsSeen {
+		incsSeen[int16(replicaID)] = inc
+	}
+	return DownstreamSetTsIncW{Value: downProto.GetValue(), Vc: clocksi.ClockSiTimestamp{}.FromBytes(downProto.GetVc()), ReplicaID: int16(downProto.GetReplicaID()), IncsSeen: incsSeen}
 }
 
 func (downOp DownstreamSetTsIncW) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	return &proto.ProtoOpDownstream{IncWDateOp: &proto.ProtoIncWDateDownstream{IncWSet: &proto.ProtoIncWSetDownstream{Value: &downOp.Value, Vc: downOp.Vc.ToBytes(), ReplicaID: pb.Int32(int32(downOp.ReplicaID))}}}
+	protoIncsSeen := make(map[int32]int64, len(downOp.IncsSeen))
+	for replicaID, inc := range downOp.IncsSeen {
+		protoIncsSeen[int32(replicaID)] = inc
+	}
+	return &proto.ProtoOpDownstream{IncWDateOp: &proto.ProtoIncWDateDownstream{IncWSet: &proto.ProtoIncWSetDownstream{Value: &downOp.Value, Vc: downOp.Vc.ToBytes(), ReplicaID: pb.Int32(int32(downOp.ReplicaID)), SeenIncs: protoIncsSeen}}}
 }
 
 func (crdt *IncWDateCrdt) ToProtoState() (state *proto.ProtoState) {

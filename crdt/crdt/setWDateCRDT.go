@@ -131,37 +131,7 @@ func (crdt *SetWDateCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArg
 	if updsNotYetApplied != nil && len(updsNotYetApplied) > 0 {
 		ms = crdt.getTsWithUpdsNotYetApplied(updsNotYetApplied)
 	}
-	switch args.(type) {
-	case DateFullSetWArguments:
-		return crdt.getFullDate(ms)
-	case DateOnlySetWArguments:
-		return crdt.getDateOnly(ms)
-	case TimeSetWArguments:
-		return crdt.getTimeOnly(ms)
-	case TimestampSetWArguments:
-		return crdt.getTimestamp(ms)
-	}
-	return
-}
-
-func (crdt *SetWDateCrdt) getFullDate(updatedMs int64) (state State) {
-	year, month, day := TsToGregorian(updatedMs)
-	hour, min, sec, ms := ExtractHourMinSecMS(updatedMs)
-	return DateFullState{Year: year, Month: month, Day: day, Hour: hour, Minute: min, Second: sec, Millisecond: ms}
-}
-
-func (crdt *SetWDateCrdt) getDateOnly(updatedMs int64) (state State) {
-	year, month, day := TsToGregorian(updatedMs)
-	return DateOnlyState{Year: year, Month: month, Day: day}
-}
-
-func (crdt *SetWDateCrdt) getTimeOnly(updatedMs int64) (state State) {
-	hour, min, sec, ms := ExtractHourMinSecMS(updatedMs)
-	return TimeState{Hour: hour, Minute: min, Second: sec, Millisecond: ms}
-}
-
-func (crdt *SetWDateCrdt) getTimestamp(updatedMs int64) (state State) {
-	return TimestampState(updatedMs)
+	return dateReadHelper(args, ms)
 }
 
 func (crdt *SetWDateCrdt) getTsWithUpdsNotYetApplied(updsNotYetApplied []UpdateArguments) (updMs int64) {
@@ -193,6 +163,9 @@ func (crdt *SetWDateCrdt) Update(args UpdateArguments) (downstreamArgs Downstrea
 			return DownstreamSetTsSetW{Value: ms, Vc: nextVc, ReplicaID: crdt.localReplicaID}
 		case IncDate, IncMS:
 			return DownstreamIncTsSetW{Inc: ms, Vc: nextVc}
+		case SetTime:
+			currMsDay := HourMinSecToMs(ExtractHourMinSec(ms))
+			return DownstreamSetTsIncW{Value: ms + currMsDay, Vc: nextVc, ReplicaID: crdt.localReplicaID}
 		}
 	}
 	return

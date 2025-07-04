@@ -2,7 +2,6 @@ package crdt
 
 import (
 	"fmt"
-	rand "math/rand"
 	"strconv"
 	"time"
 
@@ -105,8 +104,9 @@ func (crdt *LwwRegisterCrdt) GetValue() (state State) {
 
 func (crdt *LwwRegisterCrdt) Update(args UpdateArguments) (downStreamArgs DownstreamArguments) {
 	newTs := time.Now().UTC().UnixNano()
-	if newTs < crdt.ts {
-		newTs = crdt.ts + rand.Int63n(100)
+	if newTs < crdt.ts { //This may happen as there is a small clock-skew across replicas.
+		newTs = crdt.ts + (int64(crdt.localReplicaID) % 100) //Generates a new timestamp that is consistent - sequential updates will generate the same ts, which is OK.
+		//newTs = crdt.ts + rand.Int63n(100)
 	}
 	return DownstreamSetValue{NewValue: args.(SetValue).NewValue, ReplicaID: crdt.localReplicaID, Ts: newTs}
 }
@@ -119,7 +119,7 @@ func (crdt *LwwRegisterCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs 
 func (crdt *LwwRegisterCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect *Effect) {
 	setValue := downstreamArgs.(DownstreamSetValue)
 	var effectValue Effect
-	if setValue.Ts > crdt.ts || (setValue.Ts == crdt.ts && setValue.ReplicaID > crdt.replicaID) {
+	if setValue.Ts > crdt.ts || (setValue.Ts == crdt.ts && setValue.ReplicaID >= crdt.replicaID) {
 		effectValue = SetValueEffect{Ts: crdt.ts, NewValue: crdt.value, ReplicaID: crdt.replicaID}
 		crdt.ts, crdt.replicaID, crdt.value = setValue.Ts, setValue.ReplicaID, setValue.NewValue
 	} else {

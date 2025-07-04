@@ -1,5 +1,5 @@
-github.com/AndreRijo/go-tools v0.0.0-20240922171453-2d12c5769f8a h1:/XdEyW3HLioSGvkybGjP5Bp9Cnm4i9+2+Stb/BK0iXU=
-github.com/AndreRijo/go-tools v0.0.0-20240922171453-2d12c5769f8a/go.mod h1:fmE775TSWIT/Bii/+jk98uukGNljK+/lQq62K53DZ98=
+github.com/AndreRijo/go-tools v0.0.0-20250702122434-f5d7580301a7 h1:/swRSkrNx3FN3CR7vf8aCHEFYIb1s+Z9Lz2DR8oCQ2o=
+github.com/AndreRijo/go-tools v0.0.0-20250702122434-f5d7580301a7/go.mod h1:fmE775TSWIT/Bii/+jk98uukGNljK+/lQq62K53DZ98=
 github.com/antlr/antlr4/runtime/Go/antlr/v4 v4.0.0-20230321174746-8dcc6526cfb1 h1:X8MJ0fnN5FPdcGF5Ij2/OW+HgiJrRg3AfHAx1PJtIzM=
 github.com/antlr/antlr4/runtime/Go/antlr/v4 v4.0.0-20230321174746-8dcc6526cfb1/go.mod h1:pSwJ0fSY5KhvocuWSx4fz3BA8OrA1bQn+K1Eli3BRwM=
 github.com/golang/protobuf v1.5.0/go.mod h1:FsONVRAS9T7sI+LIUmWTfcYkHO4aIWwzhcaSAoJOfIk=
