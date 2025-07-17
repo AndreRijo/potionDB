@@ -32,7 +32,7 @@ List of other relevant repositories:
 - [PostgreSQL TPC-H Go Client](https://github.com/AndreRijo/postgres-tpch-client)
 - [PostgreSQL TPC-H Go Library](https://github.com/AndreRijo/postgres-tpch-go-lib)
 - [DockerManager](https://github.com/AndreRijo/DockerManager)
-- [CVSProcessor] (https://github.com/AndreRijo/cvsprocessor)
+- [CVSProcessor](https://github.com/AndreRijo/cvsprocessor)
 - [Test configurations repository](https://github.com/AndreRijo/potiondb-vldb-configs-rep)
 - [PotionDB SQL](https://github.com/AndreRijo/potiondbSQL)
 - [Go Tools](https://github.com/AndreRijo/go-tools)
@@ -79,7 +79,7 @@ To generate the dataset and the set of updates to be used, run, respectively:
 
 ```
 dbgen -s 1
-dbgen -s 1 -u 1000
+dbgen -s 1 -U 1000
 ```
 
 Note: If testing PotionDB on a single machine with modest hardware, you may want to test with a lower `-s` (for example, 0.1).
