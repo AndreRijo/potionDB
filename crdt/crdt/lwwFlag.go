@@ -13,52 +13,49 @@ import (
 
 type LwwFlagCrdt struct {
 	CRDTVM
-	flag           bool
 	ts             int64
-	replicaID      int16
-	localReplicaID int16 //ReplicaID of the replica with this CRDT instance
+	flag           bool
+	replicaID      uint16
+	localReplicaID uint16 //ReplicaID of the replica with this CRDT instance
 }
 
 type DownstreamEnableFlagLWW struct {
 	Ts        int64
-	ReplicaID int16 //replicaID is only used to dinstiguish cases in which Ts is equal
+	ReplicaID uint16 //replicaID is only used to dinstiguish cases in which Ts is equal
 }
 
 type DownstreamDisableFlagLWW struct {
 	Ts        int64
-	ReplicaID int16
+	ReplicaID uint16
 }
 
 // Stores the value previous to the latest setValue
 type FlagLWWEffect struct {
 	NewFlag   bool
 	Ts        int64
-	ReplicaID int16
+	ReplicaID uint16
 }
 
 func (crdt *LwwFlagCrdt) GetCRDTType() proto.CRDTType { return proto.CRDTType_FLAG_LWW }
+func (crdt *LwwFlagCrdt) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 
-func (args DownstreamEnableFlagLWW) GetCRDTType() proto.CRDTType { return proto.CRDTType_FLAG_LWW }
-
+func (args DownstreamEnableFlagLWW) GetCRDTType() proto.CRDTType  { return proto.CRDTType_FLAG_LWW }
+func (args DownstreamEnableFlagLWW) GetDATAType() proto.DATAType  { return proto.DATAType_DEFAULT }
 func (args DownstreamDisableFlagLWW) GetCRDTType() proto.CRDTType { return proto.CRDTType_FLAG_LWW }
+func (args DownstreamDisableFlagLWW) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 
-func (args DownstreamEnableFlagLWW) MustReplicate() bool { return true }
-
+func (args DownstreamEnableFlagLWW) MustReplicate() bool  { return true }
 func (args DownstreamDisableFlagLWW) MustReplicate() bool { return true }
 
-func (crdt *LwwFlagCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
-	return &LwwFlagCrdt{
-		CRDTVM:         (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete),
-		flag:           false,
-		ts:             0,
-		replicaID:      replicaID,
-		localReplicaID: replicaID,
-	}
+func (crdt *LwwFlagCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+	crdt = &LwwFlagCrdt{flag: false, ts: 0, replicaID: replicaID, localReplicaID: replicaID}
+	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
+	return crdt
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *LwwFlagCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID int16) (sameCRDT *LwwFlagCrdt) {
-	crdt.CRDTVM, crdt.localReplicaID = (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete), replicaID
+func (crdt *LwwFlagCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *LwwFlagCrdt) {
+	crdt.CRDTVM, crdt.localReplicaID = (&genericInversibleCRDT{}).initialize(crdt), replicaID
 	return crdt
 }
 
@@ -88,16 +85,30 @@ func (crdt *LwwFlagCrdt) Update(args UpdateArguments) (downstreamArgs Downstream
 	if newTs < crdt.ts {
 		newTs = crdt.ts + rand.Int63n(100)
 	}
-	switch args.(type) {
+	switch typedArgs := args.(type) {
 	case EnableFlag:
 		return DownstreamEnableFlagLWW{Ts: newTs, ReplicaID: crdt.localReplicaID}
 	case DisableFlag:
 		return DownstreamDisableFlagLWW{Ts: newTs, ReplicaID: crdt.localReplicaID}
+	case MultiUpd:
+		multiDowns := make(MultiUpd, len(typedArgs))
+		for i, innerUpd := range typedArgs {
+			multiDowns[i] = crdt.Update(innerUpd)
+		}
+		return multiDowns
+	default:
+		fmt.Printf("[LWWFlag][Update]Unknown update type: %v (%T)\n", args, args)
 	}
 	return
 }
 
 func (crdt *LwwFlagCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs DownstreamArguments) (otherDownstreamArgs DownstreamArguments) {
+	if multiUpd, ok := downstreamArgs.(MultiUpd); ok {
+		for _, upd := range multiUpd {
+			crdt.Downstream(updTs, upd.(DownstreamArguments))
+		}
+		return nil
+	}
 	crdt.addToHistory(&updTs, &downstreamArgs, crdt.applyDownstream(downstreamArgs))
 	return nil
 }
@@ -118,6 +129,8 @@ func (crdt *LwwFlagCrdt) applyDownstream(downstreamArgs DownstreamArguments) (ef
 			effectValue = FlagLWWEffect{NewFlag: crdt.flag, Ts: crdt.ts, ReplicaID: crdt.replicaID} //Store previous values
 			crdt.flag, crdt.ts, crdt.replicaID = false, typedUpd.Ts, typedUpd.ReplicaID
 		}
+	default:
+		fmt.Printf("[LWWFlag][Downstream]Unsupported downstream type: %v (%T)\n", downstreamArgs, downstreamArgs)
 	}
 	return &effectValue
 }
@@ -159,37 +172,34 @@ func (crdt *LwwFlagCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
 // Protobuf functions
 func (downOp DownstreamEnableFlagLWW) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
 	flagOp := protobuf.GetFlagOp().GetEnableLWW()
-	downOp.Ts, downOp.ReplicaID = flagOp.GetTs(), int16(flagOp.GetReplicaID())
+	downOp.Ts, downOp.ReplicaID = flagOp.GetTs(), uint16(flagOp.GetReplicaID())
 	return downOp
 }
 
 func (downOp DownstreamEnableFlagLWW) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	return &proto.ProtoOpDownstream{FlagOp: &proto.ProtoFlagDownstream{EnableLWW: &proto.ProtoEnableLWWDownstream{
-		Ts: pb.Int64(downOp.Ts), ReplicaID: pb.Int32(int32(downOp.ReplicaID)),
-	}}}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_FlagOp{FlagOp: &proto.ProtoFlagDownstream{EnableLWW: &proto.ProtoEnableLWWDownstream{
+		Ts: pb.Int64(downOp.Ts), ReplicaID: pb.Int32(int32(downOp.ReplicaID))}}}}
 }
 
 func (downOp DownstreamDisableFlagLWW) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
 	flagOp := protobuf.GetFlagOp().GetDisableLWW()
-	downOp.Ts, downOp.ReplicaID = flagOp.GetTs(), int16(flagOp.GetReplicaID())
+	downOp.Ts, downOp.ReplicaID = flagOp.GetTs(), uint16(flagOp.GetReplicaID())
 	return downOp
 }
 
 func (downOp DownstreamDisableFlagLWW) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	return &proto.ProtoOpDownstream{FlagOp: &proto.ProtoFlagDownstream{DisableLWW: &proto.ProtoDisableLWWDownstream{
-		Ts: pb.Int64(downOp.Ts), ReplicaID: pb.Int32(int32(downOp.ReplicaID)),
-	}}}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_FlagOp{FlagOp: &proto.ProtoFlagDownstream{DisableLWW: &proto.ProtoDisableLWWDownstream{
+		Ts: pb.Int64(downOp.Ts), ReplicaID: pb.Int32(int32(downOp.ReplicaID))}}}}
 }
 
 func (crdt *LwwFlagCrdt) ToProtoState() (protobuf *proto.ProtoState) {
-	return &proto.ProtoState{Flag: &proto.ProtoFlagState{Lww: &proto.ProtoFlagLWWState{
-		Flag: pb.Bool(crdt.flag), Ts: pb.Int64(crdt.ts), ReplicaID: pb.Int32(int32(crdt.replicaID)),
-	}}}
+	return &proto.ProtoState{State: &proto.ProtoState_Flag{Flag: &proto.ProtoFlagState{Lww: &proto.ProtoFlagLWWState{
+		Flag: pb.Bool(crdt.flag), Ts: pb.Int64(crdt.ts), ReplicaID: pb.Int32(int32(crdt.replicaID))}}}}
 }
 
-func (crdt *LwwFlagCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID int16) (newCRDT CRDT) {
+func (crdt *LwwFlagCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	flag := proto.GetFlag().GetLww()
-	return (&LwwFlagCrdt{flag: flag.GetFlag(), ts: flag.GetTs(), replicaID: int16(flag.GetReplicaID())}).initializeFromSnapshot(ts, replicaID)
+	return (&LwwFlagCrdt{flag: flag.GetFlag(), ts: flag.GetTs(), replicaID: uint16(flag.GetReplicaID())}).initializeFromSnapshot(ts, replicaID)
 }
 
 func (crdt *LwwFlagCrdt) GetCRDT() CRDT { return crdt }

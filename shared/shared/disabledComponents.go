@@ -4,16 +4,15 @@
 package shared
 
 const (
-	//CRDTs
-	IsVMDisabled            = true
 	IsCRDTDisabled          = false //Replaces all CRDTs by EmptyCrdt instances
-	IsGCDisabled            = false
 	IsBCPermSharingDisabled = true
 )
 
 // Vars as they come from configs
 var (
 	//PotionDB
+	IsGCDisabled          = true
+	IsVMDisabled          = false
 	IsReplDisabled        = false
 	IsLogDisabled         = false
 	IsReadWaitingDisabled = false //If this is true, all reads are returned instantly, ignoring any clock restrictions.

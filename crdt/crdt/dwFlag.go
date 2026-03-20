@@ -37,34 +37,31 @@ type DisableDWEffect struct {
 	Unique
 }
 
-func (crdt *DwFlagCrdt) GetCRDTType() proto.CRDTType { return proto.CRDTType_FLAG_DW }
-
-func (args DownstreamEnableFlagDW) GetCRDTType() proto.CRDTType { return proto.CRDTType_FLAG_DW }
-
+func (crdt *DwFlagCrdt) GetCRDTType() proto.CRDTType             { return proto.CRDTType_FLAG_DW }
+func (crdt *DwFlagCrdt) GetDATAType() proto.DATAType             { return proto.DATAType_DEFAULT }
+func (args DownstreamEnableFlagDW) GetCRDTType() proto.CRDTType  { return proto.CRDTType_FLAG_DW }
+func (args DownstreamEnableFlagDW) GetDATAType() proto.DATAType  { return proto.DATAType_DEFAULT }
 func (args DownstreamDisableFlagDW) GetCRDTType() proto.CRDTType { return proto.CRDTType_FLAG_DW }
+func (args DownstreamDisableFlagDW) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
+func (args DownstreamEnableFlagDW) MustReplicate() bool          { return true }
+func (args DownstreamDisableFlagDW) MustReplicate() bool         { return true }
 
-func (args DownstreamEnableFlagDW) MustReplicate() bool { return true }
-
-func (args DownstreamDisableFlagDW) MustReplicate() bool { return true }
-
-func (crdt *DwFlagCrdt) Initialize(startTs *clocksi.Timestamp, repliicaID int16) (newCrdt CRDT) {
-	return &DwFlagCrdt{
-		CRDTVM:   (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete),
-		disables: makeUniqueSet(),
-		random:   rand.NewSource(time.Now().Unix()),
-	}
+func (crdt *DwFlagCrdt) Initialize(startTs *clocksi.Timestamp, repliicaID uint16) (newCrdt CRDT) {
+	crdt = &DwFlagCrdt{disables: makeUniqueSet(), random: rand.NewSource(time.Now().Unix())}
+	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
+	return crdt
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *DwFlagCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID int16) (sameCRDT *DwFlagCrdt) {
-	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete)
+func (crdt *DwFlagCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *DwFlagCrdt) {
+	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
 
 func (crdt *DwFlagCrdt) IsBigCRDT() bool { return false }
 
 func (crdt *DwFlagCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
-	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+	if len(updsNotYetApplied) == 0 {
 		return crdt.GetValue()
 	}
 	//Correct value is always the one in the last update
@@ -84,18 +81,32 @@ func (crdt *DwFlagCrdt) GetValue() (state State) {
 }
 
 func (crdt *DwFlagCrdt) Update(args UpdateArguments) (downstreamArgs DownstreamArguments) {
-	switch args.(type) {
+	switch typedArgs := args.(type) {
 	case EnableFlag:
 		fmt.Println("[DWFlag][Update]Returning enable upd")
 		return DownstreamEnableFlagDW{Seen: crdt.disables.copy()}
 	case DisableFlag:
 		fmt.Println("[DWFlag][Update]Returning disable upd")
 		return DownstreamDisableFlagDW{Unique: Unique(crdt.random.Int63())}
+	case MultiUpd:
+		multiDowns := make(MultiUpd, len(typedArgs))
+		for i, innerUpd := range typedArgs {
+			multiDowns[i] = crdt.Update(innerUpd)
+		}
+		return multiDowns
+	default:
+		fmt.Printf("[DWFlag][Update]Unknown update type: %v (%T)\n", args, args)
 	}
 	return
 }
 
 func (crdt *DwFlagCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs DownstreamArguments) (otherDownstreamAgs DownstreamArguments) {
+	if multiUpd, ok := downstreamArgs.(MultiUpd); ok {
+		for _, upd := range multiUpd {
+			crdt.Downstream(updTs, upd.(DownstreamArguments))
+		}
+		return nil
+	}
 	crdt.addToHistory(&updTs, &downstreamArgs, crdt.applyDownstream(downstreamArgs))
 	return nil
 }
@@ -107,6 +118,8 @@ func (crdt *DwFlagCrdt) applyDownstream(downstreamArgs DownstreamArguments) (eff
 		return crdt.applyEnableFlag(opType)
 	case DownstreamDisableFlagDW:
 		return crdt.applyDisableFlag(opType)
+	default:
+		fmt.Printf("[DWFlag][Downstream]Unsupported downstream type: %v (%T)\n", downstreamArgs, downstreamArgs)
 	}
 	return
 }
@@ -168,9 +181,8 @@ func (downOp DownstreamEnableFlagDW) FromReplicatorObj(protobuf *proto.ProtoOpDo
 }
 
 func (downOp DownstreamEnableFlagDW) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	return &proto.ProtoOpDownstream{FlagOp: &proto.ProtoFlagDownstream{EnableDW: &proto.ProtoEnableDWDownstream{
-		SeenUniques: UniqueSetToUInt64Array(downOp.Seen),
-	}}}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_FlagOp{FlagOp: &proto.ProtoFlagDownstream{EnableDW: &proto.ProtoEnableDWDownstream{
+		SeenUniques: UniqueSetToUInt64Array(downOp.Seen)}}}}
 }
 
 func (downOp DownstreamDisableFlagDW) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
@@ -179,16 +191,15 @@ func (downOp DownstreamDisableFlagDW) FromReplicatorObj(protobuf *proto.ProtoOpD
 }
 
 func (downOp DownstreamDisableFlagDW) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	return &proto.ProtoOpDownstream{FlagOp: &proto.ProtoFlagDownstream{DisableDW: &proto.ProtoDisableDWDownstream{
-		Unique: pb.Uint64(uint64(downOp.Unique)),
-	}}}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_FlagOp{FlagOp: &proto.ProtoFlagDownstream{DisableDW: &proto.ProtoDisableDWDownstream{
+		Unique: pb.Uint64(uint64(downOp.Unique))}}}}
 }
 
 func (crdt *DwFlagCrdt) ToProtoState() (protobuf *proto.ProtoState) {
-	return &proto.ProtoState{Flag: &proto.ProtoFlagState{Dw: &proto.ProtoFlagDWState{Uniques: UniqueSetToUInt64Array(crdt.disables)}}}
+	return &proto.ProtoState{State: &proto.ProtoState_Flag{Flag: &proto.ProtoFlagState{Dw: &proto.ProtoFlagDWState{Uniques: UniqueSetToUInt64Array(crdt.disables)}}}}
 }
 
-func (crdt *DwFlagCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID int16) (newCRDT CRDT) {
+func (crdt *DwFlagCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	return (&DwFlagCrdt{disables: UInt64ArrayToUniqueSet(proto.GetFlag().GetDw().GetUniques())}).initializeFromSnapshot(ts, replicaID)
 }
 

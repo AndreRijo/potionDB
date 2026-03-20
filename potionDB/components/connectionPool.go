@@ -158,17 +158,20 @@ func (pool *connPool) establishNormalConnection(ip string) net.Conn {
 	success, timeout := false, 10*time.Millisecond
 	var conn net.Conn
 	var err error
+	nTries := 0
 	for !success {
 		conn, err = dialer.Dial("tcp", ip)
 		if err == nil {
 			success = true
 		} else {
-			fmt.Printf("[CP]Network connection establishment err on connectionPool.establishNormalConnection for ip %s. Error: %s.\n"+
-				"Re-attempting connection to %s in a short while. This is likely caused by internal data loading and thus is normal.\n", ip, err, ip)
+			if nTries%10 == 9 {
+				fmt.Printf("[CP]Network connection establishment err on connectionPool.establishNormalConnection for ip %s. Error: %s.\n"+
+					"Re-attempting connection to %s in a short while. This is likely caused by internal data loading and thus is normal.\n", ip, err, ip)
+			}
 			time.Sleep(timeout)
 			timeout *= 2
 		}
-		if timeout > 1000*time.Millisecond { //Something wrong with the other server (e.g., crashed while we tried to connect). State is unknown so better exit.
+		if timeout > 2000*time.Millisecond { //Something wrong with the other server (e.g., crashed while we tried to connect). State is unknown so better exit.
 			fmt.Printf("[CP]Network connection establishment on connectionPool.establishNormalConnection for ip %s failed after several attempts. Exiting PotionDB.\n", ip)
 			os.Exit(1)
 		}
@@ -187,6 +190,9 @@ func (pool *connPool) establishOptimisticConnection(ip string) (net.Conn, error)
 	for !success {
 		conn, err = dialer.Dial("tcp", ip)
 		if err == nil {
+			if nAttempts >= 10 {
+				fmt.Printf("[CP]Successful optimistic connection after %d attempts. IP: %s\n", nAttempts+1, ip)
+			}
 			//fmt.Println("[CP]Successful optimistic connection.")
 			success = true
 		} else {
@@ -196,9 +202,8 @@ func (pool *connPool) establishOptimisticConnection(ip string) (net.Conn, error)
 			timeout = time.Duration(float64(timeout) * 1.5)
 			nAttempts++
 		}
-		if nAttempts == 10 {
-			fmt.Printf("[CP]Unsuccessful optimistic connection after 10 attempts. Maybe the other server is not initialized yet or on a different machine from RabbitMQ/different server from this server? Target IP: %s\n", ip)
-
+		if nAttempts%10 == 0 && nAttempts > 0 {
+			fmt.Printf("[CP]Unsuccessful optimistic connection after %d attempts. Maybe the other server is not initialized yet or on a different machine from RabbitMQ/different server from this server? Target IP: %s. Will keep trying.\n", nAttempts, ip)
 		}
 	}
 	return conn, err

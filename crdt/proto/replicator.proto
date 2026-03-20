@@ -1,3 +1,5 @@
+syntax = "proto2";
+
 import "antidote.proto";
 option go_package = "potionDB/crdt/proto";
 
@@ -12,7 +14,7 @@ message ProtoReplicatePart {
     required int32 senderID = 1;
     required ProtoRemoteTxn txn = 2;
     required int64 partitionID = 3;
-    required int32 txnID = 4;       //Note: this ID is not the actual txnID, just an ID used to distinguish different txns
+    required int32 txnID = 4; //Note: this ID is not the actual txnID, just an ID used to distinguish different txns
 }
 
 message ProtoReplicateGroupTxn {
@@ -25,7 +27,7 @@ message ProtoReplicateGroupTxn {
 message ProtoReplicateTxn {
     required int32 senderID = 1;
     required bytes timestamp = 2;
-    repeated ProtoNewRemoteTxn part = 3;       //One per partition in the txn
+    repeated ProtoNewRemoteTxn part = 3; //One per partition in the txn
     required int32 txnID = 4;
 }
 
@@ -44,35 +46,44 @@ message ProtoDownstreamUpd {
     required ProtoOpDownstream op = 2;
 }
 
-message ProtoOpDownstream {
-    optional ProtoCounterDownstream counterOp = 1;
-    optional ProtoSetDownstream setOp = 2;
-    optional ProtoTopKRmvDownstream topkrmvOp = 3;
-    optional ProtoLWWRegisterDownstream lwwregOp = 4;
-    optional ProtoORMapDownstream ormapOp = 5;
-    optional ProtoAvgDownstream avgOp = 6;
-    optional ProtoMaxMinDownstream maxminOp = 7;
-    optional ProtoRWEmbMapDownstream rwembmapOp = 8;
-    optional ProtoTopSumDownstream topsumOp = 9;
-    optional ProtoFlagDownstream flagOp = 10;
-    optional ProtoBCounterDownstream bcounterOp = 11;
-    optional ProtoTopKDownstream topkOp = 12;
-    optional ProtoCounterFloatDownstream counterfloatOp = 13;
-    optional ProtoTopKInitDownstream topkinitOp = 14;
-    optional ProtoResetDownstream resetOp = 15;
-    optional ProtoPairCounterDownstream pairCounterOp = 16;
-    optional ProtoArrayCounterDownstream arrayCounterOp = 17;
-    optional ProtoMultiArrayDownstream multiArrayOp = 18;
-    optional ProtoMVRegisterDownstream mvregOp = 19;
-    optional ProtoSimpleDateDownstream simpleDateOp = 20;
-    optional ProtoSetWDateDownstream setWDateOp = 21;
-    optional ProtoIncWDateDownstream incWDateOp = 22;
-    optional ProtoSetOnlyDateDownstream dateOnlyDateOp = 23;
+message ProtoOpDownstream { //Note: if this gets over 32 fields, consider splitting into multiple messages (up to 32 fields are encoded with a single field byte). Or grouping similar types.
+    oneof op {
+        ProtoCounterDownstream counterOp = 1;
+        ProtoSetDownstream setOp = 2;
+        ProtoTopKRmvDownstream topkrmvOp = 3; //TopKRmvExt also uses this, as the data to be replicated is the same.
+        ProtoLWWRegisterDownstream lwwregOp = 4;
+        ProtoORMapDownstream ormapOp = 5;
+        ProtoAvgDownstream avgOp = 6;
+        ProtoMaxMinDownstream maxminOp = 7;
+        ProtoRWEmbMapDownstream rwembmapOp = 8;
+        ProtoTopSumDownstream topsumOp = 9;
+        ProtoFlagDownstream flagOp = 10;
+        ProtoBCounterDownstream bcounterOp = 11;
+        ProtoTopKDownstream topkOp = 12;
+        ProtoCounterFloatDownstream counterfloatOp = 13;
+        ProtoTopKInitDownstream topkinitOp = 14;
+        //ProtoResetDownstream resetOp = 15;
+        ProtoPairCounterDownstream pairCounterOp = 16;
+        ProtoArrayCounterDownstream arrayCounterOp = 17;
+        ProtoArrayFloatDownstream arrayFloatOp = 18;
+        ProtoMultiArrayDownstream multiArrayOp = 19;
+        ProtoMVRegisterDownstream mvregOp = 20;
+        ProtoSimpleDateDownstream simpleDateOp = 21;
+        ProtoSetWDateDownstream setWDateOp = 22;
+        ProtoIncWDateDownstream incWDateOp = 23;
+        ProtoSetOnlyDateDownstream setOnlyDateOp = 24;
+        ProtoCompactArrayDownstream compactArrayOp = 25;
+        ProtoStringArrayDownstream stringArrayOp = 26;
+        ProtoByteArrayDownstream byteArrayOp = 27;
+        ProtoMapCounterDownstream mapCounterOp = 28;
+        ProtoMultiUpdateDownstream multiUpdOp = 31;
+    }
+    optional SPECIAL_UPD specialop = 15; //Used to signal if it is a reset or multiupd. This is handy for more efficient processing, as sometimes CRDTType is not enough.
 }
 
 message ProtoCounterDownstream {
     required bool isInc = 1;
-    required int32 change = 2;
+    required sint32 change = 2;
 }
 
 message ProtoCounterFloatDownstream {
@@ -82,17 +93,18 @@ message ProtoCounterFloatDownstream {
 
 message ProtoLWWRegisterDownstream {
     required bytes value = 1;
-    required int64 ts = 2;
-    required int32 replicaID = 3;
+    required uint64 tsId = 2; //Highest 48 bits is the timestamp; lowest 16 bits is the replicaID.
+    //required int64 ts = 2;
+    //required int32 replicaID = 3;
 }
 
 message ProtoSetDownstream {
-    repeated ProtoValueUnique adds = 1;    //key -> unique
-    repeated ProtoValueUniques rems = 2;   //key -> set/array of uniques
+    repeated ProtoValueUnique adds = 1; //key -> unique
+    repeated ProtoValueUniques rems = 2; //key -> set/array of uniques
 }
 
 message ProtoORMapDownstream {
-    repeated ProtoKeyValueUnique adds = 1;  //key -> (element, unique)
+    repeated ProtoKeyValueUnique adds = 1; //key -> (element, unique)
     repeated ProtoORMapRemove rems = 2;
 }
 
@@ -106,18 +118,19 @@ message ProtoTopKDownstream {
 }
 
 message ProtoTopKRmvRemove {
-    repeated bytes vcs = 1;  //If client-generated remove: only 1 entry. If topk-generated due to add: 1 entry per id.
-    repeated int32 ids = 2;
+    repeated bytes vcs = 1; //If client-generated remove: only 1 entry. If topk-generated due to add: 1 entry per id.
+    repeated sint32 ids = 2 [packed = true];
 }
 
 message ProtoTopKInitDownstream {
     required uint32 topSize = 1;
-    optional bool isTopSum = 2; //If not present, it's assumed to be TopK.
+    optional uint32 notTopSize = 2; //Only used by TopKRmv.
+    optional CRDT_type topType = 3; //If not present, it's assumed to be TopK.
 }
 
 message ProtoAvgDownstream {
-    required int64 sumValue = 1;
-    required int64 nAdds = 2;
+    required sint64 sumValue = 1;
+    required sint64 nAdds = 2;
 }
 
 message ProtoMaxMinDownstream {
@@ -126,11 +139,11 @@ message ProtoMaxMinDownstream {
 }
 
 message ProtoMaxDownstream {
-    required int64 value = 1;
+    required sint64 value = 1;
 }
 
 message ProtoMinDownstream {
-    required int64 value = 1;
+    required sint64 value = 1;
 }
 
 message ProtoValueUnique {
@@ -140,7 +153,7 @@ message ProtoValueUnique {
 
 message ProtoValueUniques {
     required bytes value = 1;
-    repeated uint64 uniques = 2;
+    repeated uint64 uniques = 2 [packed = true];
 }
 
 message ProtoKeyValueUnique {
@@ -155,16 +168,17 @@ message ProtoORMapRemove {
 }
 
 message ProtoTopKElement {
-    required int32 id = 1;
-    required int32 score = 2;
-    required int64 ts = 3;
-    required int32 replicaID = 4;
-    optional bytes data = 5;
+    required sint32 id = 1;
+    required sint32 score = 2;
+    //required int64 ts = 3;
+    //required int32 replicaID = 4;
+    required uint64 tsId = 3; //Highest 48 bits is the timestamp; lowest 16 bits is the replicaID.
+    optional bytes data = 4;
 }
 
 message ProtoTopKScore {
-    required int32 id = 1;
-    required int32 score = 2;
+    required sint32 id = 1;
+    required sint32 score = 2;
     optional bytes data = 3;
 }
 
@@ -176,13 +190,24 @@ message ProtoTopKIdVc {
 message ProtoRWEmbMapDownstream {
     optional ProtoRWEmbMapUpdates adds = 1;
     optional ProtoRWEmbMapRemoves rems = 2;
+    optional ProtoRWEmbMapInit init = 3;
+}
+
+message ProtoRWEmbMapInit {
+    required int64 size = 1;
+    optional bool useMapWithSlice = 5; //If the map supports it, use a map backup up by a slice for fast reading of the full map.
+    //If the above field is true, this field controls the degree of parallelism of full map reads.
+    //One thread will be used per parallelReadFactor entries.
+    optional int64 parallelReadFactor = 6; 
 }
 
 message ProtoRWEmbMapUpdates {
     repeated ProtoEmbMapUpd upds = 1;
-    repeated ProtoStableClock vc = 2;
+    //repeated ProtoStableClock vc = 2;
+    repeated int64 vc = 2 [packed = true]; //VC assuming that IDs are sorted.
     required int32 replicaID = 3;
     optional bool isArray = 4;  //If not present, it's assumed to be false.
+    optional bool isFirstUpd = 5; //If not present, it's assumed to be false.
 }
 
 message ProtoRWEmbMapRemoves {
@@ -198,14 +223,15 @@ message ProtoEmbMapUpd {
 }
 
 message ProtoTopSumElement {
-    required int32 id = 1;
-    required int32 score = 2;
+    required sint32 id = 1;
+    required sint32 score = 2;
     optional bytes data = 3;
 }
 
 message ProtoTopSumDownstream {
     repeated ProtoTopSumElement elems = 1;
-    required bool isPositive = 2;
+    required uint32 positiveLen = 2; //Set to 0 if all numbers are negative, or to length of elems if all are positive.
+    optional int32 replicaID = 3; //Only required by adds (incs)
 }
 
 message ProtoFlagDownstream {
@@ -232,11 +258,11 @@ message ProtoEnableEWDownstream {
 }
 
 message ProtoDisableEWDownstream {
-    repeated uint64 seenUniques = 1; 
+    repeated uint64 seenUniques = 1 [packed = true]; 
 }
 
 message ProtoEnableDWDownstream {
-    repeated uint64 seenUniques = 1;
+    repeated uint64 seenUniques = 1 [packed = true];
 }
 
 message ProtoDisableDWDownstream {
@@ -251,24 +277,24 @@ message ProtoBCounterDownstream {
 }
 
 message ProtoSetBoundCounterDownstream {
-    required int32 limit = 1;
+    required sint32 limit = 1;
     required bool compEq = 2;
-    required int32 value = 3;
+    required sint32 value = 3;
 }
 
 message ProtoTransferCounterDownstream {
-    required int32 transferValue = 1;
+    required sint32 transferValue = 1;
     required int32 fromID = 2;
     required int32 toID = 3;
 }
 
 message ProtoIncBCounterDownstream {
-    required int32 change = 1;
+    required sint32 change = 1;
     required int32 replicaID = 2;
 }
 
 message ProtoDecBCounterDownstream {
-    required int32 change = 1;
+    required sint32 change = 1;
     required int32 replicaID = 2;
 }
 
@@ -283,29 +309,67 @@ message ProtoPairCounterDownstream {
 
 message ProtoArrayCounterDownstream {
     required bool isInc = 1;
-    optional ProtoArrayCounterIncrementDownstream inc = 2;
-    optional ProtoArrayCounterIncrementAllDownstream incAll = 3;
-    optional ProtoArrayCounterIncrementMultiDownstream incMulti = 4;
-    optional ProtoArrayCounterIncrementSubDownstream incSub = 5;
-    optional ProtoArraySetSize size = 6;
+    oneof upd {
+        ProtoArrayCounterIncrementDownstream inc = 2;
+        ProtoArrayCounterIncrementAllDownstream incAll = 3;
+        ProtoArrayCounterIncrementMultiDownstream incMulti = 4;
+        ProtoArrayCounterIncrementSubDownstream incSub = 5;
+        ProtoArraySetSize size = 6;
+    }
 }
 
 message ProtoArrayCounterIncrementDownstream {
     required int32 index = 1;
-    required int64 inc = 2;
+    required sint64 inc = 2;
 }
 
 message ProtoArrayCounterIncrementAllDownstream {
-    required int64 inc = 1;
+    required sint64 inc = 1;
 }
 
 message ProtoArrayCounterIncrementMultiDownstream {
-    repeated int64 incs = 1;
+    repeated sint64 incs = 1 [packed = true];
 }
 
 message ProtoArrayCounterIncrementSubDownstream {
-    repeated int32 indexes = 1;
-    repeated int64 incs = 2;
+    repeated int32 indexes = 1 [packed = true];
+    repeated sint64 incs = 2 [packed = true];
+}
+
+message ProtoArrayFloatDownstream {
+    required bool isInc = 1;
+    oneof upd {
+        ProtoArrayFloatIncrementDownstream inc = 2;
+        ProtoArrayFloatIncrementAllDownstream incAll = 3;
+        ProtoArrayFloatIncrementMultiDownstream incMulti = 4;
+        ProtoArrayFloatIncrementSubDownstream incSub = 5;
+        ProtoArrayFloatIncrementRangeDownstream incRange = 6;
+        ProtoArraySetSize size = 7;
+    }
+}
+
+message ProtoArrayFloatIncrementDownstream {
+    required int32 index = 1;
+    required double inc = 2;
+}
+
+message ProtoArrayFloatIncrementAllDownstream {
+    required double inc = 1;
+}
+
+message ProtoArrayFloatIncrementMultiDownstream {
+    repeated double incs = 1 [packed = true];
+}
+
+message ProtoArrayFloatIncrementSubDownstream {
+    repeated int32 indexes = 1 [packed = true];
+    repeated double incs = 2 [packed = true];
+}
+
+message ProtoArrayFloatIncrementRangeDownstream {
+    required int32 from = 1;
+    required int32 to = 2;
+    required double inc = 3;
 }
 
 message ProtoArraySetSize {
@@ -314,64 +378,74 @@ message ProtoArraySetSize {
 
 message ProtoMultiArrayDownstream {
     required MultiArrayType type = 1;
-    optional ProtoMultiArrayIntDownstream intUpd = 2;
-    optional ProtoMultiArrayFloatDownstream floatUpd = 3;
-    optional ProtoMultiArrayDataDownstream dataUpd = 4;
-    optional ProtoMultiArrayAvgDownstream avgUpd = 5;
-    optional ProtoMultiArrayMultiUpdateDownstream multiUpd = 6;
-    optional ProtoMultiArraySetSizeDownstream sizeUpd = 7;
+    oneof upd {
+        ProtoMultiArrayIntDownstream intUpd = 2;
+        ProtoMultiArrayFloatDownstream floatUpd = 3;
+        ProtoMultiArrayDataDownstream dataUpd = 4;
+        ProtoMultiArrayAvgDownstream avgUpd = 5;
+        ProtoMultiArrayMultiUpdateDownstream multiUpd = 6;
+        ProtoMultiArraySetSizeDownstream sizeUpd = 7;
+    }
 }
 
 message ProtoMultiArrayIntDownstream {
-    optional ProtoMultiArrayIntIncDownstream inc = 1;
-    optional ProtoMultiArrayIntIncSingleDownstream incSingle = 2;
-    optional ProtoMultiArrayIntIncPositionsDownstream incPos = 3;
-    optional ProtoMultiArrayIntIncRangeDownstream incRange = 4;
+    oneof upd {
+        ProtoMultiArrayIntIncDownstream inc = 1;
+        ProtoMultiArrayIntIncSingleDownstream incSingle = 2;
+        ProtoMultiArrayIntIncPositionsDownstream incPos = 3;
+        ProtoMultiArrayIntIncRangeDownstream incRange = 4;
+    }
 }
 
 message ProtoMultiArrayFloatDownstream {
-    optional ProtoMultiArrayFloatIncDownstream inc = 1;
-    optional ProtoMultiArrayFloatIncSingleDownstream incSingle = 2;
-    optional ProtoMultiArrayFloatIncPositionsDownstream incPos = 3;
-    optional ProtoMultiArrayFloatIncRangeDownstream incRange = 4;
+    oneof upd {
+        ProtoMultiArrayFloatIncDownstream inc = 1;
+        ProtoMultiArrayFloatIncSingleDownstream incSingle = 2;
+        ProtoMultiArrayFloatIncPositionsDownstream incPos = 3;
+        ProtoMultiArrayFloatIncRangeDownstream incRange = 4;
+    }
 }
 
 message ProtoMultiArrayDataDownstream {
-    optional ProtoMultiArrayDataSetDownstream set = 1;
-    optional ProtoMultiArrayDataSetSingleDownstream setSingle = 2;
-    optional ProtoMultiArrayDataSetPositionsDownstream setPos = 3;
-    optional ProtoMultiArrayDataSetRangeDownstream setRange = 4;
+    oneof upd {
+        ProtoMultiArrayDataSetDownstream set = 1;
+        ProtoMultiArrayDataSetSingleDownstream setSingle = 2;
+        ProtoMultiArrayDataSetPositionsDownstream setPos = 3;
+        ProtoMultiArrayDataSetRangeDownstream setRange = 4;
+    }
 }
 
 message ProtoMultiArrayAvgDownstream {
-    optional ProtoMultiArrayAvgIncDownstream inc = 1;
-    optional ProtoMultiArrayAvgIncSingleDownstream incSingle = 2;
-    optional ProtoMultiArrayAvgIncPositionsDownstream incPos = 3;
-    optional ProtoMultiArrayAvgIncRangeDownstream incRange = 4;
+    oneof upd {
+        ProtoMultiArrayAvgIncDownstream inc = 1;
+        ProtoMultiArrayAvgIncSingleDownstream incSingle = 2;
+        ProtoMultiArrayAvgIncPositionsDownstream incPos = 3;
+        ProtoMultiArrayAvgIncRangeDownstream incRange = 4;
+    }
 }
 
 message ProtoMultiArrayIntIncDownstream {
-    repeated int64 changes = 1;
+    repeated sint64 changes = 1;
 }
 
 message ProtoMultiArrayIntIncSingleDownstream {
     required int32 pos = 1;
-    required int64 change = 2;
+    required sint64 change = 2;
 }
 
 message ProtoMultiArrayIntIncPositionsDownstream {
-    repeated int32 pos = 1;
-    repeated int64 change = 2; //If only 1 value, the same value will be applied to all of pos.
+    repeated int32 pos = 1 [packed = true];
+    repeated sint64 change = 2 [packed = true]; //If only 1 value, the same value will be applied to all of pos.
 }
 
 message ProtoMultiArrayIntIncRangeDownstream {
     required int32 from = 1;
     required int32 to = 2;
-    required int64 change = 3;
+    required sint64 change = 3;
 }
 
 message ProtoMultiArrayFloatIncDownstream {
-    repeated double changes = 1;
+    repeated double changes = 1 [packed = true];
 }
 
 message ProtoMultiArrayFloatIncSingleDownstream {
@@ -380,8 +454,8 @@ message ProtoMultiArrayFloatIncSingleDownstream {
 }
 
 message ProtoMultiArrayFloatIncPositionsDownstream {
-    repeated int32 pos = 1;
-    repeated double change = 2; //If only 1 value, the same value will be applied to all of pos.
+    repeated int32 pos = 1 [packed = true];
+    repeated double change = 2 [packed = true]; //If only 1 value, the same value will be applied to all of pos.
 }
 
 message ProtoMultiArrayFloatIncRangeDownstream {
@@ -402,8 +476,8 @@ message ProtoMultiArrayDataSetSingleDownstream {
 }
 
 message ProtoMultiArrayDataSetPositionsDownstream {
-    repeated int32 pos = 1;
-    repeated bytes data = 2;    //If only 1 value, the same value will be applied to all of pos.
+    repeated int32 pos = 1 [packed = true];
+    repeated bytes data = 2; //If only 1 value, the same value will be applied to all of pos.
     required uint64 tsId = 3;
 }
 
@@ -415,36 +489,36 @@ message ProtoMultiArrayDataSetRangeDownstream {
 }
 
 message ProtoMultiArrayAvgIncDownstream {
-    repeated int64 value = 1;
-    repeated int32 count = 2;
+    repeated sint64 value = 1 [packed = true];
+    repeated sint32 count = 2 [packed = true];
 }
 
 message ProtoMultiArrayAvgIncSingleDownstream {
     required int32 pos = 1;
-    optional int32 count = 2;   //If not present, 1 is assumed.
-    required int64 value = 3;
+    optional sint32 count = 2;   //If not present, 1 is assumed.
+    required sint64 value = 3;
 }
 
 message ProtoMultiArrayAvgIncPositionsDownstream {
-    repeated int32 pos = 1;
-    repeated int64 value = 2;
-    repeated int32 count = 3;
+    repeated int32 pos = 1 [packed = true];
+    repeated sint64 value = 2 [packed = true];
+    repeated sint32 count = 3 [packed = true];
 }
 
 message ProtoMultiArrayAvgIncRangeDownstream {
     required int32 from = 1;
     required int32 to = 2;
-    required int64 value = 3;
-    required int32 count = 4;
+    required sint64 value = 3;
+    required sint32 count = 4;
 }
 
 message ProtoMultiArrayMultiUpdateDownstream {
-    repeated int64 ints = 1;
-    repeated double floats = 2;
+    repeated sint64 ints = 1 [packed = true];
+    repeated double floats = 2 [packed = true];
     repeated bytes data = 3;
     optional uint64 tsId = 4;    //Only needed if data is set.
-    repeated int32 counts = 5;
-    repeated int64 sums = 6;
+    repeated sint32 counts = 5 [packed = true];
+    repeated sint64 sums = 6 [packed = true];
 }
 
 message ProtoMultiArraySetSizeDownstream {
@@ -462,7 +536,7 @@ message ProtoMVRegisterDownstream {
 
 message ProtoSimpleDateDownstream {
     optional bool isInitialSet = 1;  //If not present, it's assumed to be false.
-    required int64 inc = 2;
+    required sint64 inc = 2;
 }
 
 message ProtoSetWDateDownstream {
@@ -470,16 +544,14 @@ message ProtoSetWDateDownstream {
     optional ProtoSetWSetDownstream setWSet = 2;
 }
 
-//TODO: Need to update this (and the incW too.)
-
 message ProtoSetWIncDownstream {
     required bytes vc = 1;
-    required int64 inc = 2;
+    required sint64 inc = 2;
 }
 
 message ProtoSetWSetDownstream {
     required bytes vc = 1;
-    required int64 value = 2;
+    required sint64 value = 2;
     required int32 replicaID = 3; 
 }
 
@@ -489,22 +561,179 @@ message ProtoIncWDateDownstream {
 }
 
 message ProtoIncWIncDownstream {
-    required int64 inc = 1;
+    required sint64 inc = 1;
     required int32 replicaID = 2;
     required bytes vc = 3;
 }
 
 message ProtoIncWSetDownstream {
     required bytes vc = 1;
-    required int64 value = 2;
+    required sint64 value = 2;
     required int32 replicaID = 3;
-    map<int32,int64> seenIncs = 4;  //replicaID -> value
+    repeated int32 seenIDs = 4 [packed = true];
+    repeated int64 seenValues = 5 [packed = true];
+    //map<int32,int64> seenIncs = 4; //replicaID -> value
 }
 
 message ProtoSetOnlyDateDownstream {
     required int64 value = 1;
     required int64 ts = 2;
     required int32 replicaID = 3;
+}
+
+message ProtoCompactArrayDownstream {
+    optional ProtoCompactArraySetValue setValue = 1;
+    optional ProtoCompactArrayIntInc intInc = 2;
+    optional ProtoCompactArrayFloatInc floatInc = 3;
+    optional ProtoCompactArraySetArray setArray = 4;
+    optional ProtoCompactArraySetSize size = 5;
+}
+
+message ProtoCompactArraySetValue {
+    required bytes value = 1;
+    required int32 index = 2;
+    required uint64 tsId = 3;
+}
+
+message ProtoCompactArrayIntInc {
+    required sint32 inc = 1;
+    required int32 index = 2;
+}
+
+message ProtoCompactArrayFloatInc {
+    required double inc = 1;
+    required int32 index = 2;
+}
+
+message ProtoCompactArraySetArray {
+    repeated bytes data = 1;
+    required uint64 tsId = 2;
+}
+
+message ProtoCompactArraySetSize {
+    required int32 size = 1;
+}
+
+message ProtoStringArrayDownstream {
+    optional ProtoStringArraySetValue setValue = 1;
+    optional ProtoStringArraySetArray setArray = 2;
+    optional ProtoStringArraySetArrayInit setArrayInit = 3;
+    optional ProtoStringArraySetSize size = 4;
+}
+
+message ProtoStringArraySetArrayInit {
+    repeated string data = 1;
+}
+
+message ProtoStringArraySetArray {
+    repeated string data = 1;
+    required uint64 tsId = 2;
+}
+
+message ProtoStringArraySetSize {
+    required int32 size = 1;
+}
+
+message ProtoStringArraySetValue {
+    required string value = 1;
+    required int32 index = 2;
+    required uint64 tsId = 3;
+}
+
+message ProtoByteArrayDownstream {
+    oneof upd {
+        ProtoByteArraySetValue setValue = 1;
+        ProtoByteArraySetData setData = 2;
+        ProtoByteArrayIntInc intInc = 3;
+        ProtoByteArrayFloatInc floatInc = 4;
+        ProtoByteArraySetDataInit setArrayInit = 5;
+    }
+}
+
+message ProtoByteArraySetValue {
+    required bytes value = 1;
+    required int32 index = 2;
+    required uint64 tsId = 3;
+}
+
+message ProtoByteArraySetData {
+    required bytes data = 1;
+    repeated uint32 dataStarts = 2 [packed = true];
+    required uint64 tsId = 3;
+}
+
+message ProtoByteArraySetDataInit {
+    required bytes data = 1;
+    repeated uint32 dataStarts = 2 [packed = true];
+}
+
+message ProtoByteArrayIntInc {
+    required sint32 inc = 1;
+    required int32 index = 2;
+}
+
+message ProtoByteArrayFloatInc {
+    required double inc = 1;
+    required int32 index = 2;
+}
+
+message ProtoMapCounterDownstream {
+    optional DATA_type dataType = 1;
+    optional bool isDec = 2;
+    oneof upd {
+            ProtoMapCounterIntInc intInc = 3;
+            ProtoMapCounterIntIncAll intIncAll = 4;
+            ProtoMapCounterIntIncMult intIncMult = 5;
+            ProtoMapCounterDoubleInc doubleInc = 6;
+            ProtoMapCounterDoubleIncAll doubleIncAll = 7;
+            ProtoMapCounterDoubleIncMult doubleIncMult = 8;
+            ProtoMapCounterInit init = 9;
+    }
+}
+
+message ProtoMapCounterIntInc {
+    required int32 key = 1;
+    required sint64 inc = 2;
+    optional bytes data = 3;
+}
+
+message ProtoMapCounterIntIncAll {
+    repeated int32 keys = 1 [packed = true];
+    required sint64 inc = 2;
+    optional bytes data = 3;
+}
+
+message ProtoMapCounterIntIncMult {
+    repeated int32 keys = 1 [packed = true];
+    repeated sint64 inc = 2 [packed = true];
+    repeated bytes data = 3; //Optional
+}
+
+message ProtoMapCounterDoubleInc {
+    required int32 key = 1;
+    required double inc = 2;
+    optional bytes data = 3;
+}
+
+message ProtoMapCounterDoubleIncAll {
+    repeated int32 keys = 1 [packed = true];
+    required double inc = 2;
+    optional bytes data = 3;
+}
+
+message ProtoMapCounterDoubleIncMult {
+    repeated int32 keys = 1 [packed = true];
+    repeated double inc = 2 [packed = true];
+    repeated bytes data = 3; //Optional
+}
+
+message ProtoMapCounterInit {
+    required int32 size = 1;
+}
+
+message ProtoMultiUpdateDownstream {
+    repeated ProtoOpDownstream updates = 1;
+    required CRDT_type type = 2;
 }
 
 /*****REPLICA MANAGEMENT*****/
@@ -528,7 +757,7 @@ message ProtoReplyJoin {
     repeated bytes partsClk = 2;
     required int32 replicaID = 3;
     //required int32 connID = 4;  //Used to know which connection to request the buckets from.
-    required string replicaIP = 4;  //Used to know which connection to request the buckets from.
+    required string replicaIP = 4; //Used to know which connection to request the buckets from.
 }
 
 /*
@@ -541,7 +770,7 @@ message ProtoRequestBucket {
     //repeated ProtoClock partsClk = 2;
     //repeated bytes partsClk = 2;
     required int32 replicaID = 2;
-    required string replicaIP = 3;  //Used to know which connection to send the buckets to
+    required string replicaIP = 3; //Used to know which connection to send the buckets to
 }
 
 //This contains CRDTs for all the buckets requested, not just one bucket.
@@ -563,27 +792,34 @@ message ProtoCRDT {
 
 //TODO: Clock for genericInversibleCRDT initialization? And replicaID.
 message ProtoState {
-    optional ProtoCounterState counter = 1;
-    optional ProtoLWWRegState lwwreg = 2;
-    optional ProtoAWSetState awset = 3;
-    optional ProtoORMapState ormap = 4;
-    optional ProtoEmbMapState embmap = 5;
-    optional ProtoMaxMinState maxmin = 6;
-    optional ProtoTopKRmvState topkrmv = 7;
-    optional ProtoAvgState avg = 8;
-    optional ProtoTopSumState topsum = 9;
-    optional ProtoFlagState flag = 10;
-    optional ProtoBoundedCounterState bcounter = 11;
-    optional ProtoTopKState topk = 12;
-    optional ProtoCounterFloatState counterfloat = 13;
-    optional ProtoPairCounterState pairCounter = 14;
-    optional ProtoArrayCounterState arrayCounter = 15;
-    optional ProtoMultiArrayState multiArray = 16;
-    optional ProtoMVRegState mvreg = 17;
-    optional ProtoSimpleDateState simpleDate = 18;
-    optional ProtoSetWDateState setWDate = 19;
-    optional ProtoIncWDateState incWDate = 20;
-    optional ProtoSetOnlyDateState setOnlyDate = 21;
+    oneof state {
+            ProtoCounterState counter = 1;
+            ProtoLWWRegState lwwreg = 2;
+            ProtoAWSetState awset = 3;
+            ProtoORMapState ormap = 4;
+            ProtoEmbMapState embmap = 5;
+            ProtoMaxMinState maxmin = 6;
+            ProtoTopKRmvState topkrmv = 7;
+            ProtoAvgState avg = 8;
+            ProtoTopSumState topsum = 9;
+            ProtoFlagState flag = 10;
+            ProtoBoundedCounterState bcounter = 11;
+            ProtoTopKState topk = 12;
+            ProtoCounterFloatState counterfloat = 13;
+            ProtoPairCounterState pairCounter = 14;
+            ProtoArrayCounterState arrayCounter = 15;
+            ProtoArrayFloatState arrayFloat = 16;
+            ProtoMultiArrayState multiArray = 17;
+            ProtoMVRegState mvreg = 18;
+            ProtoSimpleDateState simpleDate = 19;
+            ProtoSetWDateState setWDate = 20;
+            ProtoIncWDateState incWDate = 21;
+            ProtoSetOnlyDateState setOnlyDate = 22;
+            ProtoCompactArrayState compactArray = 23;
+            ProtoStringArrayState stringArray = 24;
+            ProtoByteArrayState byteArray = 25;
+            ProtoMapCounterState mapCounter = 26;
+    }
 }
 
 message ProtoReplyEmpty {
@@ -591,12 +827,13 @@ message ProtoReplyEmpty {
 }
 
 //*****STATES*****
-message ProtoCounterState {required int32 value = 1;}
+message ProtoCounterState {required sint32 value = 1;}
 message ProtoCounterFloatState { required double value = 1; }
 message ProtoLWWRegState {
     required bytes value = 1;
-    required int64 ts = 2;
-    required int32 replicaID = 3;
+    required uint64 tsId = 2; //Highest 48bits corresponds to the timestamp; lowest 16bits to the replicaID.
+    //required int64 ts = 2;
+    //required int32 replicaID = 3;
 }
 message ProtoAWSetState {repeated ProtoValueUniques elems = 1;}
 message ProtoORMapState {repeated ProtoORMapRemove entries = 1;}
@@ -613,14 +850,15 @@ message ProtoEmbMapEntry {
 }
 message ProtoEmbMapRemove {
     required string key = 1;
-    //TODO: Marks?
-    repeated ProtoStableClock clks = 2;
+    //repeated ProtoStableClock clks = 2; //TODO: Marks?
+    repeated int64 clks = 2 [packed = true];
 }
-message ProtoMaxMinState {required int64 value = 1;}
+message ProtoMaxMinState {required sint64 value = 1;}
 message ProtoAvgState {
-    required int64 sum = 1;
-    required int64 nAdds = 2;
+    required sint64 sum = 1;
+    required sint64 nAdds = 2;
 }
+
 //TODO: This one could be changed to just include the list of elements and maxElems,
 //and then have everything else be calculated on the moment.
 message ProtoTopKRmvState {
@@ -628,9 +866,10 @@ message ProtoTopKRmvState {
     repeated ProtoTopKIdVc rems = 2;
     //notTop maybe deserves its own msg? Since the key will be repeated.
     repeated ProtoTopKElement notTop = 3;
-    optional ProtoTopKElement smallest = 4;
+    //optional ProtoTopKElement smallest = 4;
     required int32 maxElems = 5;
-    required bytes vc = 6;
+    required int32 notTopSize = 6;
+    required bytes vc = 7;
 }
 
 //TODO: Same improvement as in TopKState.
@@ -661,14 +900,14 @@ message ProtoFlagLWWState {
     required int64 ts = 2;
     required int32 replicaID = 3;
 }
-message ProtoFlagEWState {repeated uint64 uniques = 1; }
-message ProtoFlagDWState {repeated uint64 uniques = 1;}
+message ProtoFlagEWState {repeated uint64 uniques = 1 [packed = true]; }
+message ProtoFlagDWState {repeated uint64 uniques = 1 [packed = true];}
 
-message ProtoBoundedCounterState {
+message ProtoBoundedCounterState { //NOTE: map<> is considered slow to marshall/unmarshall. Consider changing this if this is used in a hotspot.
     map<int32,int32> permissions = 1;
     map<int32,int32> decs = 2;
-    required int32 limit = 3;
-    required int32 value = 4;
+    required sint32 limit = 3;
+    required sint32 value = 4;
 }
 
 message ProtoPairCounterState {
@@ -677,15 +916,19 @@ message ProtoPairCounterState {
 }
 
 message ProtoArrayCounterState {
-    repeated int64 counts = 1;
+    repeated sint64 counts = 1 [packed = true];
+}
+
+message ProtoArrayFloatState {
+    repeated double values = 1 [packed = true];
 }
 
 message ProtoMultiArrayState {
-    repeated int64 intCounters = 1;
-    repeated double floatCounters = 2;
+    repeated sint64 intCounters = 1 [packed = true];
+    repeated double floatCounters = 2 [packed = true];
     repeated bytes data = 3;
-    repeated int64 sums = 4;
-    repeated int64 counts = 5;
+    repeated sint64 sums = 4 [packed = true];
+    repeated sint64 counts = 5 [packed = true];
 }
 
 message ProtoMVRegState {
@@ -693,7 +936,7 @@ message ProtoMVRegState {
     required bytes clk = 2;
     required int32 replicaID = 3;
     repeated bytes concValues = 4;
-    repeated bytes concClks = 5;    //Same size as concValues
+    repeated bytes concClks = 5; //Same size as concValues
 }
 
 message ProtoSimpleDateState {
@@ -709,12 +952,12 @@ message ProtoSetWDateState {
     required bytes currClk = 6;
 }
 
-message ProtoIncWDateState {
+message ProtoIncWDateState { //NOTE: map<> is considered slow to marshall/unmarshall. Consider changing this if this is used in a hotspot.
     required bytes setClk = 1;
     required int64 setValue = 2;
     required int64 setTs = 3;
     required int32 setReplicaID = 4;
-    map<int32,int64> incs = 5;  //replicaID -> value
+    map<int32,int64> incs = 5; //replicaID -> value
     map<int32,int64> cancels = 6;
     map<int32,int64> cancelsTs = 7;
     required bytes currClk = 8;
@@ -724,4 +967,27 @@ message ProtoSetOnlyDateState {
     required int64 dateTs = 1;
     required int64 writeTs = 2;
     required int32 replicaID = 3;
+}
+
+message ProtoCompactArrayState {
+    repeated bytes data = 1;
+    repeated uint64 tsId = 2 [packed = true];
+}
+
+message ProtoStringArrayState {
+    repeated string data = 1;
+    repeated uint64 tsId = 2 [packed = true];
+}
+
+message ProtoByteArrayState {
+    required bytes data = 1;
+    repeated uint32 dataStarts = 2 [packed = true];
+    repeated uint64 tsId = 3 [packed = true];
+}
+
+message ProtoMapCounterState {  //Only one between intValues and doubleValues should be set
+    required DATA_type dataType = 1;
+    repeated int32 keys = 2 [packed = true];
+    repeated sint64 intValues = 3 [packed = true];
+    repeated double doubleValues = 4 [packed = true];
 }

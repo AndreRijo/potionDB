@@ -27,15 +27,15 @@ func MakeMatBCUpdPermissions(nParts int) MatBCUpdPermissions {
 }
 
 // Send one grouped request but "split" by partitions
-func StartBCTimer(mat *Materializer, connPool *connPool, replicaIDToIndex map[int16]int, serverID int16) {
+func StartBCTimer(mat *Materializer, connPool *connPool, replicaIDToIndex map[uint16]int, serverID uint16) {
 	if shared.IsBCPermSharingDisabled {
 		return
 	}
 	nParts, replicaIDs := len(mat.channels), clocksi.GetCopyKeys()
 	req := MakeMatBCUpdPermissions(nParts)
 	matReq := MaterializerRequest{MatRequestArgs: req}
-	bcPermsPerServer := make(map[int16][]map[crdt.KeyParams]int32) //replicaID -> [partID][keyP]->amount
-	hasReqPerServer := make(map[int16]bool)
+	bcPermsPerServer := make(map[uint16][]map[crdt.KeyParams]int32) //replicaID -> [partID][keyP]->amount
+	hasReqPerServer := make(map[uint16]bool)
 	rng := rand.NewSource(time.Now().Unix())
 	go func() {
 		for {

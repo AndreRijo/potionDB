@@ -9,6 +9,7 @@ import (
 	"potionDB/crdt/proto"
 
 	//pb "github.com/golang/protobuf/proto"
+	"github.com/AndreRijo/go-tools/src/tools"
 	pb "google.golang.org/protobuf/proto"
 )
 
@@ -90,60 +91,61 @@ type RemoveAllEffect struct {
 }
 
 func (crdt *SetAWCrdt) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORSET }
+func (crdt *SetAWCrdt) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 
 // Ops
-func (args Add) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORSET }
-
-func (args Remove) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORSET }
-
-func (args AddAll) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORSET }
-
+func (args Add) GetCRDTType() proto.CRDTType       { return proto.CRDTType_ORSET }
+func (args Remove) GetCRDTType() proto.CRDTType    { return proto.CRDTType_ORSET }
+func (args AddAll) GetCRDTType() proto.CRDTType    { return proto.CRDTType_ORSET }
 func (args RemoveAll) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORSET }
+func (args Add) GetDATAType() proto.DATAType       { return proto.DATAType_DEFAULT }
+func (args Remove) GetDATAType() proto.DATAType    { return proto.DATAType_DEFAULT }
+func (args AddAll) GetDATAType() proto.DATAType    { return proto.DATAType_DEFAULT }
+func (args RemoveAll) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 
 // Downstreams
-func (args DownstreamAddAll) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORSET }
-
+func (args DownstreamAddAll) GetCRDTType() proto.CRDTType    { return proto.CRDTType_ORSET }
 func (args DownstreamRemoveAll) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORSET }
-
-func (args DownstreamAddAll) MustReplicate() bool { return true }
-
-func (args DownstreamRemoveAll) MustReplicate() bool { return true }
+func (args DownstreamAddAll) GetDATAType() proto.DATAType    { return proto.DATAType_DEFAULT }
+func (args DownstreamRemoveAll) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
+func (args DownstreamAddAll) MustReplicate() bool            { return true }
+func (args DownstreamRemoveAll) MustReplicate() bool         { return true }
 
 // States
-func (args SetAWValueState) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORSET }
-
-func (args SetAWValueState) GetREADType() proto.READType { return proto.READType_FULL }
-
-func (args SetAWLookupState) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORSET }
-
-func (args SetAWLookupState) GetREADType() proto.READType { return proto.READType_LOOKUP }
-
+func (args SetAWValueState) GetCRDTType() proto.CRDTType     { return proto.CRDTType_ORSET }
+func (args SetAWValueState) GetDATAType() proto.DATAType     { return proto.DATAType_DEFAULT }
+func (args SetAWValueState) GetREADType() proto.READType     { return proto.READType_FULL }
+func (args SetAWLookupState) GetCRDTType() proto.CRDTType    { return proto.CRDTType_ORSET }
+func (args SetAWLookupState) GetDATAType() proto.DATAType    { return proto.DATAType_DEFAULT }
+func (args SetAWLookupState) GetREADType() proto.READType    { return proto.READType_LOOKUP }
 func (args SetAWNElementsState) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORSET }
-
+func (args SetAWNElementsState) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 func (args SetAWNElementsState) GetREADType() proto.READType { return proto.READType_N_ELEMS }
 
 // Queries
 func (args LookupReadArguments) GetCRDTType() proto.CRDTType   { return proto.CRDTType_ORSET }
 func (args LookupReadArguments) GetREADType() proto.READType   { return proto.READType_LOOKUP }
+func (args LookupReadArguments) GetDATAType() proto.DATAType   { return proto.DATAType_DEFAULT }
 func (args LookupReadArguments) HasInnerReads() bool           { return false }
 func (args LookupReadArguments) HasVariables() bool            { return false }
 func (args GetNElementsArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORSET }
+func (args GetNElementsArguments) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 func (args GetNElementsArguments) GetREADType() proto.READType { return proto.READType_N_ELEMS }
 func (args GetNElementsArguments) HasInnerReads() bool         { return false }
 func (args GetNElementsArguments) HasVariables() bool          { return false }
 
 // Note: crdt can (and most often will be) nil
-func (crdt *SetAWCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
+func (crdt *SetAWCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	return &SetAWCrdt{
-		CRDTVM: (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete),
+		CRDTVM: (&genericInversibleCRDT{}).initialize(crdt),
 		elems:  make(map[Element]UniqueSet),
 		random: rand.NewSource(time.Now().Unix()),
 	}
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *SetAWCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID int16) (sameCRDT *SetAWCrdt) {
-	crdt.CRDTVM, crdt.random = (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete), rand.NewSource(time.Now().Unix())
+func (crdt *SetAWCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *SetAWCrdt) {
+	crdt.CRDTVM, crdt.random = (&genericInversibleCRDT{}).initialize(crdt), rand.NewSource(time.Now().Unix())
 	return crdt
 }
 
@@ -284,6 +286,14 @@ func (crdt *SetAWCrdt) Update(args UpdateArguments) (downstreamArgs DownstreamAr
 		downstreamArgs = crdt.getAddAllDownstreamArgs(opType.Elems)
 	case RemoveAll:
 		downstreamArgs = crdt.getRemoveAllDownstreamArgs(opType.Elems)
+	case MultiUpd:
+		multiDowns := make(MultiUpd, len(opType))
+		for i, innerUpd := range opType {
+			multiDowns[i] = crdt.Update(innerUpd)
+		}
+		return multiDowns
+	default:
+		fmt.Printf("[SetAW][Update]Unknown update type: %v (%T)\n", args, args)
 	}
 	return
 }
@@ -316,6 +326,12 @@ func (crdt *SetAWCrdt) getRemoveAllDownstreamArgs(elems []Element) (downstreamAr
 }
 
 func (crdt *SetAWCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs DownstreamArguments) (otherDownstreamArgs DownstreamArguments) {
+	if multiUpd, ok := downstreamArgs.(MultiUpd); ok {
+		for _, upd := range multiUpd {
+			crdt.Downstream(updTs, upd.(DownstreamArguments))
+		}
+		return nil
+	}
 	effect := crdt.applyDownstream(downstreamArgs)
 	//Necessary for inversibleCrdt
 	crdt.addToHistory(&updTs, &downstreamArgs, effect)
@@ -329,6 +345,8 @@ func (crdt *SetAWCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effe
 		effect = crdt.applyAddAll(opType.Elems)
 	case DownstreamRemoveAll:
 		effect = crdt.applyRemoveAll(opType.Elems)
+	default:
+		fmt.Printf("[SetAW][Downstream]Unsupported downstream type: %v (%T)\n", downstreamArgs, downstreamArgs)
 	}
 	//fmt.Println("[SETAWCRDT]State after downstream: ", crdt.getState(nil))
 	return
@@ -437,7 +455,7 @@ func (crdtOp AddAll) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op Up
 func (crdtOp AddAll) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
 	opType := proto.ApbSetUpdate_ADD
 	elements := ElementArrayToByteMatrix(crdtOp.Elems)
-	return &proto.ApbUpdateOperation{Setop: &proto.ApbSetUpdate{Optype: &opType, Adds: elements}}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Setop{Setop: &proto.ApbSetUpdate{Optype: &opType, Adds: elements}}}
 }
 
 func (crdtOp RemoveAll) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -448,7 +466,7 @@ func (crdtOp RemoveAll) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op
 func (crdtOp RemoveAll) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
 	opType := proto.ApbSetUpdate_REMOVE
 	elements := ElementArrayToByteMatrix(crdtOp.Elems)
-	return &proto.ApbUpdateOperation{Setop: &proto.ApbSetUpdate{Optype: &opType, Rems: elements}}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Setop{Setop: &proto.ApbSetUpdate{Optype: &opType, Rems: elements}}}
 }
 
 func (crdtOp Add) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -458,8 +476,8 @@ func (crdtOp Add) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op Updat
 
 func (crdtOp Add) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
 	opType := proto.ApbSetUpdate_ADD
-	element := [][]byte{[]byte(crdtOp.Element)}
-	return &proto.ApbUpdateOperation{Setop: &proto.ApbSetUpdate{Optype: &opType, Adds: element}}
+	element := [][]byte{tools.UnsafeStringToBytes(string(crdtOp.Element))}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Setop{Setop: &proto.ApbSetUpdate{Optype: &opType, Adds: element}}}
 }
 
 func (crdtOp Remove) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -469,8 +487,8 @@ func (crdtOp Remove) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op Up
 
 func (crdtOp Remove) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
 	opType := proto.ApbSetUpdate_REMOVE
-	element := [][]byte{[]byte(crdtOp.Element)}
-	return &proto.ApbUpdateOperation{Setop: &proto.ApbSetUpdate{Optype: &opType, Rems: element}}
+	element := [][]byte{tools.UnsafeStringToBytes(string(crdtOp.Element))}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Setop{Setop: &proto.ApbSetUpdate{Optype: &opType, Rems: element}}}
 }
 
 func (crdtState SetAWValueState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
@@ -479,7 +497,7 @@ func (crdtState SetAWValueState) FromReadResp(protobuf *proto.ApbReadObjectResp)
 }
 
 func (crdtState SetAWValueState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
-	return &proto.ApbReadObjectResp{Set: &proto.ApbGetSetResp{Value: ElementArrayToByteMatrix(crdtState.Elems)}}
+	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Set{Set: &proto.ApbGetSetResp{Value: ElementArrayToByteMatrix(crdtState.Elems)}}}
 }
 
 func (crdtState SetAWLookupState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
@@ -488,9 +506,8 @@ func (crdtState SetAWLookupState) FromReadResp(protobuf *proto.ApbReadObjectResp
 }
 
 func (crdtState SetAWLookupState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
-	return &proto.ApbReadObjectResp{Partread: &proto.ApbPartialReadResp{Set: &proto.ApbSetPartialReadResp{
-		Lookup: &proto.ApbSetLookupReadResp{Has: pb.Bool(crdtState.HasElem)},
-	}}}
+	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Set{
+		Set: &proto.ApbSetPartialReadResp{Lookup: &proto.ApbSetLookupReadResp{Has: pb.Bool(crdtState.HasElem)}}}}}}
 }
 
 func (crdtState SetAWNElementsState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
@@ -499,9 +516,8 @@ func (crdtState SetAWNElementsState) FromReadResp(protobuf *proto.ApbReadObjectR
 }
 
 func (crdtState SetAWNElementsState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
-	return &proto.ApbReadObjectResp{Partread: &proto.ApbPartialReadResp{Set: &proto.ApbSetPartialReadResp{
-		Nelems: &proto.ApbSetNElemsReadResp{Count: pb.Int32(int32(crdtState.Count))},
-	}}}
+	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Set{
+		Set: &proto.ApbSetPartialReadResp{Nelems: &proto.ApbSetNElemsReadResp{Count: pb.Int32(int32(crdtState.Count))}}}}}}
 }
 
 func (args LookupReadArguments) FromPartialRead(protobuf *proto.ApbPartialReadArgs) (readArgs ReadArguments) {
@@ -510,7 +526,7 @@ func (args LookupReadArguments) FromPartialRead(protobuf *proto.ApbPartialReadAr
 }
 
 func (args LookupReadArguments) ToPartialRead() (protobuf *proto.ApbPartialReadArgs) {
-	return &proto.ApbPartialReadArgs{Set: &proto.ApbSetPartialRead{Lookup: &proto.ApbSetLookupRead{Element: []byte(args.Elem)}}}
+	return &proto.ApbPartialReadArgs{Args: &proto.ApbPartialReadArgs_Set{Set: &proto.ApbSetPartialRead{Lookup: &proto.ApbSetLookupRead{Element: tools.UnsafeStringToBytes(string(args.Elem))}}}}
 }
 
 func (args GetNElementsArguments) FromPartialRead(protobuf *proto.ApbPartialReadArgs) (readArgs ReadArguments) {
@@ -518,12 +534,12 @@ func (args GetNElementsArguments) FromPartialRead(protobuf *proto.ApbPartialRead
 }
 
 func (args GetNElementsArguments) ToPartialRead() (protobuf *proto.ApbPartialReadArgs) {
-	return &proto.ApbPartialReadArgs{Set: &proto.ApbSetPartialRead{Nelems: &proto.ApbSetNElemsRead{}}}
+	return &proto.ApbPartialReadArgs{Args: &proto.ApbPartialReadArgs_Set{Set: &proto.ApbSetPartialRead{Nelems: &proto.ApbSetNElemsRead{}}}}
 }
 
 func (downOp DownstreamAddAll) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
 	adds := protobuf.GetSetOp().GetAdds()
-	downOp.Elems = make(map[Element]Unique)
+	downOp.Elems = make(map[Element]Unique, len(adds))
 	for _, pairProto := range adds {
 		downOp.Elems[Element(pairProto.GetValue())] = Unique(pairProto.GetUnique())
 	}
@@ -532,7 +548,7 @@ func (downOp DownstreamAddAll) FromReplicatorObj(protobuf *proto.ProtoOpDownstre
 
 func (downOp DownstreamRemoveAll) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
 	rems := protobuf.GetSetOp().GetRems()
-	downOp.Elems = make(map[Element]UniqueSet)
+	downOp.Elems = make(map[Element]UniqueSet, len(rems))
 	for _, pairProto := range rems {
 		downOp.Elems[Element(pairProto.GetValue())] = UInt64ArrayToUniqueSet(pairProto.GetUniques())
 	}
@@ -543,35 +559,35 @@ func (downOp DownstreamAddAll) ToReplicatorObj() (protobuf *proto.ProtoOpDownstr
 	adds := make([]*proto.ProtoValueUnique, len(downOp.Elems))
 	i := 0
 	for value, unique := range downOp.Elems {
-		adds[i] = &proto.ProtoValueUnique{Value: []byte(value), Unique: pb.Uint64(uint64(unique))}
+		adds[i] = &proto.ProtoValueUnique{Value: tools.UnsafeStringToBytes(string(value)), Unique: pb.Uint64(uint64(unique))}
 		i++
 	}
-	return &proto.ProtoOpDownstream{SetOp: &proto.ProtoSetDownstream{Adds: adds}}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_SetOp{SetOp: &proto.ProtoSetDownstream{Adds: adds}}}
 }
 
 func (downOp DownstreamRemoveAll) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
 	rems := make([]*proto.ProtoValueUniques, len(downOp.Elems))
 	i := 0
 	for value, uniques := range downOp.Elems {
-		rems[i] = &proto.ProtoValueUniques{Value: []byte(value), Uniques: UniqueSetToUInt64Array(uniques)}
+		rems[i] = &proto.ProtoValueUniques{Value: tools.UnsafeStringToBytes(string(value)), Uniques: UniqueSetToUInt64Array(uniques)}
 		i++
 	}
-	return &proto.ProtoOpDownstream{SetOp: &proto.ProtoSetDownstream{Rems: rems}}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_SetOp{SetOp: &proto.ProtoSetDownstream{Rems: rems}}}
 }
 
 func (crdt *SetAWCrdt) ToProtoState() (protobuf *proto.ProtoState) {
 	protoElems := make([]*proto.ProtoValueUniques, len(crdt.elems))
 	i := 0
 	for value, uniques := range crdt.elems {
-		protoElems[i] = &proto.ProtoValueUniques{Value: []byte(value), Uniques: UniqueSetToUInt64Array(uniques)}
+		protoElems[i] = &proto.ProtoValueUniques{Value: tools.UnsafeStringToBytes(string(value)), Uniques: UniqueSetToUInt64Array(uniques)}
 		i++
 	}
-	return &proto.ProtoState{Awset: &proto.ProtoAWSetState{Elems: protoElems}}
+	return &proto.ProtoState{State: &proto.ProtoState_Awset{Awset: &proto.ProtoAWSetState{Elems: protoElems}}}
 }
 
-func (crdt *SetAWCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID int16) (newCRDT CRDT) {
+func (crdt *SetAWCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	protoElems := proto.GetAwset().GetElems()
-	elems := make(map[Element]UniqueSet)
+	elems := make(map[Element]UniqueSet, len(protoElems))
 	for _, protoElem := range protoElems {
 		elems[Element(protoElem.GetValue())] = UInt64ArrayToUniqueSet(protoElem.GetUniques())
 	}

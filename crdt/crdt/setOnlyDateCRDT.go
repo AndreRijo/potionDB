@@ -1,6 +1,7 @@
 package crdt
 
 import (
+	"fmt"
 	"math"
 	"potionDB/crdt/clocksi"
 	"potionDB/crdt/proto"
@@ -14,9 +15,9 @@ import (
 type SetOnlyDateCrdt struct {
 	CRDTVM
 	dateTs         int64
-	writeTs        int64 //Timestamp of the last write operation.
-	replicaID      int16 //ReplicaID of the last write operation
-	localReplicaID int16
+	writeTs        int64  //Timestamp of the last write operation.
+	replicaID      uint16 //ReplicaID of the last write operation
+	localReplicaID uint16
 }
 
 type DateFullSetOnlyArguments struct{ DateFullArguments }
@@ -24,36 +25,46 @@ type DateOnlySetOnlyArguments struct{ DateOnlyArguments }
 type TimeSetOnlyArguments struct{ TimeArguments }
 type TimestampSetOnlyArguments struct{ TimestampArguments }
 
+// Updates supported:
+// SetDateFull, SetDate, SetDateOnly, SetTime, SetMSSetOnly
+type SetMSSetOnly int64
+
 type DownstreamSetTsSetOnly struct {
 	Value     int64 //The date value being set.
 	Ts        int64
-	ReplicaID int16 //ReplicaID of the replica that issued the set operation.
+	ReplicaID uint16 //ReplicaID of the replica that issued the set operation.
 }
 
 type SetTsSetOnlyEffect struct { //Values before the operation was applied
 	OldValue     int64
 	OldTs        int64
-	OldReplicaID int16
+	OldReplicaID uint16
 }
 
 // States and ops are the same from SimpleDateCRDT; queries are embedded from SimpleDateCRDT.
 
 func (crdt *SetOnlyDateCrdt) GetCRDTType() proto.CRDTType { return proto.CRDTType_SET_ONLY_DATE }
+func (crdt *SetOnlyDateCrdt) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
+
+// Ops
+func (args SetMSSetOnly) GetCRDTType() proto.CRDTType { return proto.CRDTType_SET_ONLY_DATE }
+func (args SetMSSetOnly) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 
 // Downstreams
 func (args DownstreamSetTsSetOnly) GetCRDTType() proto.CRDTType { return proto.CRDTType_SET_ONLY_DATE }
+func (args DownstreamSetTsSetOnly) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 func (args DownstreamSetTsSetOnly) MustReplicate() bool         { return true }
 
-func (crdt *SetOnlyDateCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
+func (crdt *SetOnlyDateCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	return &SetOnlyDateCrdt{
-		CRDTVM: (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete),
+		CRDTVM: (&genericInversibleCRDT{}).initialize(crdt),
 		dateTs: GregorianToTs(1, 1, 1), writeTs: math.MinInt64, replicaID: math.MaxInt16, localReplicaID: replicaID,
 	}
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *SetOnlyDateCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID int16) (sameCRDT *SetOnlyDateCrdt) {
-	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete)
+func (crdt *SetOnlyDateCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *SetOnlyDateCrdt) {
+	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
 
@@ -61,7 +72,7 @@ func (crdt *SetOnlyDateCrdt) IsBigCRDT() bool { return false }
 
 func (crdt *SetOnlyDateCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
 	var ms int64
-	if updsNotYetApplied != nil && len(updsNotYetApplied) > 0 {
+	if len(updsNotYetApplied) > 0 {
 		ms = updsNotYetApplied[len(updsNotYetApplied)-1].(DateUpd).ToMS()
 	} else {
 		ms = crdt.dateTs
@@ -82,19 +93,33 @@ func (crdt *SetOnlyDateCrdt) Update(args UpdateArguments) (downstreamArgs Downst
 			currMsDay := HourMinSecToMs(ExtractHourMinSec(ms))
 			return DownstreamSetTsSetOnly{Value: ms + currMsDay, Ts: newTs, ReplicaID: crdt.localReplicaID}
 		}
+	} else if multiUpd, ok := args.(MultiUpd); ok {
+		multiDowns := make(MultiUpd, len(multiUpd))
+		for i, innerUpd := range multiUpd {
+			multiDowns[i] = crdt.Update(innerUpd)
+		}
+		return multiDowns
+	} else {
+		fmt.Printf("[SetOnlyDateCrdt][Update]Unknown update type: %v (%T)\n", args, args)
 	}
 	return
 }
 
 func (crdt *SetOnlyDateCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs DownstreamArguments) (otherDownstreamArgs DownstreamArguments) {
+	if multiUpd, ok := downstreamArgs.(MultiUpd); ok {
+		for _, upd := range multiUpd {
+			crdt.Downstream(updTs, upd.(DownstreamArguments))
+		}
+		return nil
+	}
 	crdt.addToHistory(&updTs, &downstreamArgs, crdt.applyDownstream(downstreamArgs))
 	return nil
 }
 
 func (crdt *SetOnlyDateCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect *Effect) {
 	typedArgs, ok := downstreamArgs.(DownstreamSetTsSetOnly)
+	var effectValue Effect
 	if ok {
-		var effectValue Effect
 		if typedArgs.Ts > crdt.writeTs || (typedArgs.Ts == crdt.writeTs && typedArgs.ReplicaID <= crdt.replicaID) {
 			effectValue = SetTsSetOnlyEffect{OldTs: crdt.dateTs, OldValue: crdt.dateTs, OldReplicaID: crdt.replicaID}
 			crdt.dateTs, crdt.writeTs, crdt.replicaID = typedArgs.Value, typedArgs.Ts, typedArgs.ReplicaID
@@ -102,6 +127,9 @@ func (crdt *SetOnlyDateCrdt) applyDownstream(downstreamArgs DownstreamArguments)
 			effectValue = NoEffect{}
 		}
 		return &effectValue
+	} else {
+		effectValue = NoEffect{}
+		fmt.Printf("[SetOnlyDateCrdt][Downstream]Unsupported downstream type: %v (%T)\n", downstreamArgs, downstreamArgs)
 	}
 	return
 }
@@ -139,30 +167,36 @@ func (crdt *SetOnlyDateCrdt) undoEffect(effect *Effect) {
 
 func (crdt *SetOnlyDateCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
 
-//Protobuf functions - most are already defined in simpleDateCrdt. Only need to define downstream and ProtoState.
+//Protobuf functions - most are already defined in simpleDateCrdt. Only need to define downstream, ProtoState and SetMS.
+
+func (crdtOp SetMSSetOnly) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
+	return SetMSSetOnly(protobuf.GetDateop().GetSetMS().GetMs())
+}
+
+func (crdtOp SetMSSetOnly) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Dateop{Dateop: &proto.ApbDateUpdate{Upd: &proto.ApbDateUpdate_SetMS{SetMS: &proto.ApbSetMS{Ms: pb.Int64(int64(crdtOp))}}}}}
+}
 
 func (downOp DownstreamSetTsSetOnly) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
-	downProto := protobuf.GetDateOnlyDateOp()
-	return DownstreamSetTsSetOnly{Value: downProto.GetValue(), Ts: downProto.GetTs(), ReplicaID: int16(downProto.GetReplicaID())}
+	downProto := protobuf.GetSetOnlyDateOp()
+	return DownstreamSetTsSetOnly{Value: downProto.GetValue(), Ts: downProto.GetTs(), ReplicaID: uint16(downProto.GetReplicaID())}
 }
 
 func (downOp DownstreamSetTsSetOnly) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	return &proto.ProtoOpDownstream{DateOnlyDateOp: &proto.ProtoSetOnlyDateDownstream{Value: &downOp.Value, Ts: &downOp.Ts, ReplicaID: pb.Int32(int32(downOp.ReplicaID))}}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_SetOnlyDateOp{SetOnlyDateOp: &proto.ProtoSetOnlyDateDownstream{Value: &downOp.Value, Ts: &downOp.Ts, ReplicaID: pb.Int32(int32(downOp.ReplicaID))}}}
 }
 
-/*func (crdt *SetOnlyDateCrdt) ToProtoState() (state *proto.ProtoState) {
-	return &proto.ProtoState{SetOnlyDate: &proto.ProtoSetOnlyDateState{
-		SetClk: crdt.setClk.ToBytes(), SetValue: pb.Int64(crdt.setValue), SetTs: pb.Int64(crdt.setTs),
-		SetReplicaID: pb.Int32(int32(crdt.setReplicaID)), Inc: pb.Int64(crdt.inc), CurrClk: crdt.currClk.ToBytes()}}
+func (crdt *SetOnlyDateCrdt) ToProtoState() (state *proto.ProtoState) {
+	return &proto.ProtoState{State: &proto.ProtoState_SetOnlyDate{SetOnlyDate: &proto.ProtoSetOnlyDateState{
+		DateTs: pb.Int64(crdt.dateTs), WriteTs: pb.Int64(crdt.writeTs), ReplicaID: pb.Int32(int32(crdt.replicaID)),
+	}}}
 }
 
-func (crdt *SetOnlyDateCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID int16) (sameCRDT *SetWDateCrdt) {
-	protoState := proto.GetSetWDate()
-	crdt.setClk, crdt.setValue, crdt.setTs = clocksi.ClockSiTimestamp{}.FromBytes(protoState.GetSetClk()), protoState.GetSetValue(), protoState.GetSetTs()
-	crdt.setReplicaID, crdt.localReplicaID, crdt.inc = int16(protoState.GetSetReplicaID()), replicaID, protoState.GetInc()
-	crdt.currClk = clocksi.ClockSiTimestamp{}.FromBytes(protoState.GetCurrClk())
+func (crdt *SetOnlyDateCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (sameCRDT *SetOnlyDateCrdt) {
+	protoState := proto.GetSetOnlyDate()
+	crdt.dateTs, crdt.writeTs, crdt.replicaID = protoState.GetDateTs(), protoState.GetWriteTs(), uint16(protoState.GetReplicaID())
 	return crdt
-}*/
+}
 
 func (crdt *SetOnlyDateCrdt) GetCRDT() CRDT { return crdt }
 
@@ -170,12 +204,12 @@ func (crdt *SetOnlyDateCrdt) GetCRDT() CRDT { return crdt }
 type DownstreamSetTsSetOnly struct {
 	Value     int64 //The date value being set.
 	Ts        int64
-	ReplicaID int16 //ReplicaID of the replica that issued the set operation.
+	ReplicaID uint16 //ReplicaID of the replica that issued the set operation.
 }
 
 type SetTsSetOnlyEffect struct { //Values before the operation was applied
 	OldValue     int64
 	OldTs        int64
-	OldReplicaID int16
+	OldReplicaID uint16
 }
 */

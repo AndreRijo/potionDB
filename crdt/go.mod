@@ -1,6 +1,6 @@
 module potionDB/crdt
 
-go 1.20
+go 1.22
 
 require (
 	github.com/AndreRijo/go-tools v0.0.0-20250702122434-f5d7580301a7
@@ -9,6 +9,11 @@ require (
 	potionDB/shared v0.0.0
 )
 
+require (
+	github.com/klauspost/cpuid/v2 v2.0.9 // indirect
+	github.com/zeebo/xxh3 v1.0.2 // indirect
+)
+
 replace potionDB/shared => ../shared
 
-//replace github.com/AndreRijo/go-tools => ../../goTools
+replace github.com/AndreRijo/go-tools => ../../goTools

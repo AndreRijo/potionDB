@@ -13,12 +13,15 @@ type EmptyCrdt struct{}
 type EmptyState struct{}
 
 func (crdt *EmptyCrdt) GetCRDTType() proto.CRDTType { return proto.CRDTType_LWWREG }
+func (crdt *EmptyCrdt) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 
 func (args EmptyState) GetCRDTType() proto.CRDTType { return proto.CRDTType_LWWREG }
 
 func (args EmptyState) GetREADType() proto.READType { return proto.READType_FULL }
 
-func (crdt *EmptyCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
+func (args EmptyState) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
+
+func (crdt *EmptyCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	return crdt
 }
 

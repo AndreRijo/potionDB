@@ -63,10 +63,11 @@ To ease the process, check how a simple CRDT (e.g. counter, register) is impleme
 
 ## Client interaction
 
-To add support for PotionDB's clients to read or update the object, it is necessary to add support for them in the public interface. In PotionDB's case, this is done in three parts:
+To add support for PotionDB's clients to read or update the object, it is necessary to add support for them in the public interface. In PotionDB's case, this is done in four parts:
 - Defining the protobufs that will be used by the client to read/update the object (proto/antidote.proto);
 - Converting between protobufs and the internal CRDT operations, both ways (crdt/myCRDT.go);
-- Associating the protobufs with their internal representation (crdt/crdtProtoLib.go).
+- Associating the protobufs with their internal representation (crdt/crdtProtoLib.go);
+- Registering the CRDT's constructor/initializer (crdt/commonTools.go).
 
 #### Defining protobufs (proto/antidote.proto)
 
@@ -108,6 +109,16 @@ In practice, the following methods need to be modified:
 
 This part is easier done than explained, please check the code and it should be relatively intuitive :)
 
+#### Registering the CRDT's constructor (crdt/commonTools.go)
+
+Here we register the constructor of the new CRDT, so that the new CRDT can be used by PotionDB.
+
+For this, we add the following to the end of the switch case, in the method InitializeCrdt, in crdt/commonTools.go:
+case proto.CRDTType_MY_CRDT:
+    newCrdt = (&MyCrdt{}).Initialize(nil, replicaID)
+
+Replace MyCrdt and MY_CRDT respectivelly, with the name and type of the CRDT you just created.
+
 ## Replication
 
 Similarly to what is done for Client interaction, to support replication we can also group the tasks in three groups:
@@ -139,6 +150,8 @@ In this file we need to do the "connection" between the protobufs and the downst
 
 In practice, only one method needs to be modified, DownstreamProtoToAntidoteDownstream. This method, for a given protobuf and CRDT type, identifies the right downstream struct to call FromReplicatorObj upon. E.g., for a register, DownstreamSetValue{}.FromReplicatorObj(protobuf).
 
+
+
 ## Reads in the past/Version Management
 
 In PotionDB, due to the possibility of multiple transactions executing concurrently, as well as transactions commiting while others are ongoing, it is necessary to support reads in the past. In PotionDB, this is done by reconstructing any older version on demand, by keeping track of the effects of each update applied in a given CRDT and then reverting them.
@@ -146,7 +159,7 @@ In PotionDB, due to the possibility of multiple transactions executing concurren
 The first change that is necessary in the CRDT implementation is to create an instance of "*genericInversibleCRDT" and store it in the CRDT's struct. In the Initialize() method of the CRDT, the genericInversibleCRDT must be initialized too. For example:
 
 ```
-func (crdt *MyCRDT) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
+func (crdt *MyCRDT) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
     return &MyCRDT{
         genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
         ... //other fields of MyCRDT

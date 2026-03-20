@@ -1,3 +1,5 @@
+syntax = "proto2";
+
 // Java package specifiers
 option java_package = "com.basho.riak.protobuf";
 option java_outer_classname = "AntidotePB";
@@ -8,33 +10,61 @@ option go_package = "potionDB/crdt/proto";
 //The above restriction does not apply to enums (enums use 1 byte until 127)
 
 enum CRDT_type {
-    COUNTER = 3;
-    COUNTER_FLOAT = 18;
-    ORSET = 4;
-    LWWREG = 5;
-    MVREG = 6;
-    GMAP = 8;
-    RWSET = 10;
-    RRMAP = 11;
-    FATCOUNTER = 12;
-    FLAG_EW = 13;
-    FLAG_DW = 16;
-    FLAG_LWW = 17;
-    TOPK = 1;
-    TOPK_RMV = 2;
-    AVG = 7;
-    LEADERBOARD = 9;
-    MAXMIN = 0;
-    ORMAP = 15;
-    TOPSUM = 14;
+    COUNTER = 0;
+    COUNTER_FLOAT = 1;
+    ORSET = 2;
+    LWWREG = 3;
+    MVREG = 4;
+    GMAP = 5;
+    RWSET = 6;
+    RRMAP = 7;
+    FATCOUNTER = 8;
+    FLAG_EW = 9;
+    FLAG_DW = 10;
+    FLAG_LWW = 11;
+    TOPK = 12;
+    TOPK_RMV = 13;
+    AVG = 14;
+    LEADERBOARD = 15;
+    MAXMIN = 16;
+    ORMAP = 17;
+    TOPSUM = 18;
     PAIR_COUNTER = 19;
     ARRAY_COUNTER = 20;
-    MULTI_ARRAY = 21;
-    SIMPLE_DATE = 22;
-    SETW_DATE = 23;
-    INCW_DATE = 24;
-    SET_ONLY_DATE = 25;
-    NOOP = 32;
+    ARRAY_FLOAT = 21;
+    MULTI_ARRAY = 22;
+    SIMPLE_DATE = 23;
+    SETW_DATE = 24;
+    INCW_DATE = 25;
+    SET_ONLY_DATE = 26;
+    ARRAY_COMPACT = 27;
+    ARRAY_STRING = 28;
+    ARRAY_BYTE = 29;
+    MAP_COUNTER = 30; //Generic counter map. PotionDB's implementation supports both ints and floats under this CRDT (but only a single type per CRDT instance)
+    NOOP = 31;
+    TOPK_RMV_EXT = 32;
+}
+
+enum SPECIAL_UPD {
+    NORMAL = 0;
+    RESET = 1;
+    MULTI = 2;
+}
+
+// Used for CRDTs that support multiple types via generics. These data types are geared towards Go's typesystem and not all may make sense in other languages.
+// Non-generic CRDTs use the DEFAULT option.
+// In other languages, float32 and float64 are often known as, respectively, float and double.
+enum DATA_type {
+    DEFAULT = 0;
+    INT = 1;
+    DATA = 2; //bytes
+    STRING = 3;
+    INT8 = 4;
+    INT16 = 5;
+    INT32 = 6;
+    INT64 = 7;
+    FLOAT32 = 8;
+    FLOAT64 = 9;
 }
 
 // Riak Error response
@@ -77,8 +107,8 @@ message ApbGetCounterFloatResp {
 message ApbSetUpdate{
     enum SetOpType // TODO merge adds/removes
     {
-        ADD = 1;
-        REMOVE = 2;
+        ADD = 0;
+        REMOVE = 1;
     }
     required SetOpType optype = 1;
     repeated bytes adds = 2;
@@ -126,6 +156,15 @@ message ApbMapUpdate {
     repeated ApbMapNestedUpdate updates = 1;
     repeated ApbMapKey removedKeys = 2;
     optional bool isAddsArray = 3;      //If not present, it is assumed to be false.
+    optional ApbMapInit init = 4; //This field is only considered if all other fields are not set.
+}
+
+message ApbMapInit { //Intended for RWEmbMap.
+    required int64 size = 4; //To initialize the size of the map.
+    optional bool useMapWithSlice = 5; //If the map supports it, use a map backup up by a slice for fast reading of the full map.
+    //If the above field is true, this field controls the degree of parallelism of full map reads.
+    //One thread will be used per parallelReadFactor entries.
+    optional int64 parallelReadFactor = 6; 
 }
 
 message ApbMapNestedUpdate {
@@ -171,7 +210,11 @@ message ApbOperationResp {
 // Topk-rmv updates request
 message ApbTopkRmvUpdate{
     repeated ApbIntPair adds = 1;
-    repeated sint32 rems = 2;
+    repeated sint32 rems = 2 [packed = true];
+    //TopSum only. If multiple already existing IDs are being updated, please split the adds in two parts: the first part for non-negative scores, the second part for negative scores.
+    //This is a must as, internally, TopSum's operations are different depending if it is an add or a sub, so it is essential to separate both.
+    //Use the variable below to signal the number of positive elements.
+    optional uint32 positiveLen = 3; 
 }
 
 //Topk updates request
@@ -183,7 +226,8 @@ message ApbTopkUpdate{
 //Initializer to give a non-default size to the top
 message ApbTopKInit{
     required uint32 topSize = 1;
-    optional bool isTopSum = 2; //If not present, TopK is assumed.
+    optional uint32 notTopSize = 2; //Only used by TopKRmv and TopKRmvExt.
+    optional CRDT_type topType = 3; //If not present, TopK is assumed.
 }
 
 // Value topk/topk-rmv request
@@ -194,6 +238,11 @@ message ApbGetTopkResp {
 */
 message ApbGetTopkResp {
 	repeated ApbIntPair values = 1;
+}
+
+message ApbTopKAvgAggrResp {
+    required int64 aggrResult = 1;
+    optional int64 count = 2; //Used only by AVG.
 }
 
 //Holds a (playerId, score, data) triple
@@ -208,19 +257,19 @@ message ApbIntPair {
 
 message ApbLeaderboardUpdate {
 	repeated ApbIntPair adds = 1;
-    repeated int32 rems = 2;
+    repeated int32 rems = 2 [packed = true];
 }
 
 message ApbGetLeaderboardResp {
-	repeated int32 values = 1;
+	repeated int32 values = 1 [packed = true];
 }
 
 //--------------------
 // Average
 
 message ApbAverageUpdate {
-	required int64 value = 1;
-	optional int64 nValues = 2;
+	required sint64 value = 1;
+	optional sint64 nValues = 2;
 }
 
 message ApbGetAverageResp {
@@ -231,12 +280,12 @@ message ApbGetAverageResp {
 // MaxMin
 
 message ApbMaxMinUpdate {
-    required int64 value = 1;
+    required sint64 value = 1;
     required bool isMax = 2;
 }
 
 message ApbGetMaxMinResp {
-    required int64 value = 1;
+    required sint64 value = 1;
 }
 
 //--------------------
@@ -245,8 +294,8 @@ message ApbGetMaxMinResp {
 //This message is only intended to be used once by CRDT, to set the limit and initial value
 //For increments/decrements, use ApbCounterUpdate
 message ApbBoundCounterUpdate {
-    required int64 limit = 1;
-    required int64 initialValue = 2;
+    required sint64 limit = 1;
+    required sint64 initialValue = 2;
     required bool compEq = 3;
 }
 
@@ -267,29 +316,31 @@ message ApbGetPairCounterResp {
 // ArrayCounter
 
 message ApbArrayCounterUpdate {
-    optional ApbArrayCounterIncrement inc = 1;
-    optional ApbArrayCounterIncrementAll incAll = 2;
-    optional ApbArrayCounterIncrementMulti incMulti = 3;
-    optional ApbArrayCounterIncrementSub incSub = 4;
-    optional ApbArrayCounterSetSize size = 5;
+    oneof upd {
+        ApbArrayCounterIncrement inc = 1;
+        ApbArrayCounterIncrementAll incAll = 2;
+        ApbArrayCounterIncrementMulti incMulti = 3;
+        ApbArrayCounterIncrementSub incSub = 4;
+        ApbArrayCounterSetSize size = 5;
+    }
 }
 
 message ApbArrayCounterIncrement {
     required int32 index = 1;
-    required int64 inc = 2;
+    required sint64 inc = 2;
 }
 
 message ApbArrayCounterIncrementAll {
-    required int64 inc = 1;
+    required sint64 inc = 1;
 }
 
 message ApbArrayCounterIncrementMulti {
-    repeated int64 incs = 1;
+    repeated sint64 incs = 1 [packed = true];
 }
 
 message ApbArrayCounterIncrementSub {
-    repeated int32 indexes = 1;
-    repeated int64 incs = 2;
+    repeated int32 indexes = 1 [packed = true];
+    repeated sint64 incs = 2 [packed = true];
 }
 
 message ApbArrayCounterSetSize {
@@ -297,57 +348,112 @@ message ApbArrayCounterSetSize {
 }
 
 message ApbGetArrayCounterResp {
-    repeated int64 values = 1;
+    repeated sint64 values = 1 [packed = true];
+}
+
+// ArrayFloat
+
+message ApbArrayFloatUpdate {
+    oneof upd {
+        ApbArrayFloatIncrement inc = 1;
+        ApbArrayFloatIncrementAll incAll = 2;
+        ApbArrayFloatIncrementMulti incMulti = 3;
+        ApbArrayFloatIncrementSub incSub = 4;
+        ApbArrayFloatIncrementRange incRange = 5;
+        ApbArrayFloatSetSize size = 6;
+    }
+}
+
+message ApbArrayFloatIncrement {
+    required int32 index = 1;
+    required double inc = 2;
+}
+
+message ApbArrayFloatIncrementAll {
+    required double inc = 1;
+}
+
+message ApbArrayFloatIncrementMulti {
+    repeated double incs = 1 [packed = true];
+}
+
+message ApbArrayFloatIncrementSub {
+    repeated int32 indexes = 1 [packed = true];
+    repeated double incs = 2 [packed = true];
+}
+
+message ApbArrayFloatIncrementRange {
+    required int32 from = 1;
+    required int32 to = 2;
+    required double inc = 3;
+}
+
+message ApbArrayFloatSetSize {
+    required int32 size = 1;
+}
+
+message ApbGetArrayFloatResp {
+    repeated double values = 1 [packed = true];
 }
 
 //--------------------
 // MultiArray
 
 enum MultiArrayType {
-    INT = 0;
-    FLOAT = 1;
-    DATA = 2;   //bytes or string
-    AVG_TYPE = 3;
-    MULTI = 4;  //For updates/reads with more than one type
-    SIZE = 100;
+    MA_INT = 0;
+    MA_FLOAT = 1;
+    MA_DATA = 2; //bytes or string
+    MA_AVG = 3;
+    MA_MULTI = 4; //For updates/reads with more than one type
+    MA_SIZE = 5;
 }
 
 message ApbMultiArrayUpdate {
     required MultiArrayType type = 1;
-    optional ApbMultiArrayIntUpdate intUpd = 2;   //Note: incAll is not supported.
-    optional ApbMultiArrayFloatUpdate floatUpd = 3;
-    optional ApbMultiArrayDataUpdate dataUpd = 4;
-    optional ApbMultiArrayAvgUpdate avgUpd = 5;
-    optional ApbMultiArrayMultiUpdate multiUpd = 6;
-    optional ApbMultiArraySetSizeUpdate sizeUpd = 7;
+    oneof upd {
+        ApbMultiArrayIntUpdate intUpd = 2; //Note: incAll is not supported.
+        ApbMultiArrayFloatUpdate floatUpd = 3;
+        ApbMultiArrayDataUpdate dataUpd = 4;
+        ApbMultiArrayAvgUpdate avgUpd = 5;
+        ApbMultiArrayMultiUpdate multiUpd = 6;
+        ApbMultiArraySetSizeUpdate sizeUpd = 7;
+    }
 }
 
 message ApbMultiArrayIntUpdate {
-    optional ApbMultiArrayIntInc inc = 1;
-    optional ApbMultiArrayIntIncSingle incSingle = 2;
-    optional ApbMultiArrayIntIncPositions incPos = 3;
-    optional ApbMultiArrayIntIncRange incRange = 4;
+    oneof upd {
+        ApbMultiArrayIntInc inc = 1;
+        ApbMultiArrayIntIncSingle incSingle = 2;
+        ApbMultiArrayIntIncPositions incPos = 3;
+        ApbMultiArrayIntIncRange incRange = 4;
+    }
 }
 
 message ApbMultiArrayFloatUpdate {
-    optional ApbMultiArrayFloatInc inc = 1;
-    optional ApbMultiArrayFloatIncSingle incSingle = 2;
-    optional ApbMultiArrayFloatIncPositions incPos = 3;
-    optional ApbMultiArrayFloatIncRange incRange = 4;
+    oneof upd {
+        ApbMultiArrayFloatInc inc = 1;
+        ApbMultiArrayFloatIncSingle incSingle = 2;
+        ApbMultiArrayFloatIncPositions incPos = 3;
+        ApbMultiArrayFloatIncRange incRange = 4;
+    }
 }
 
 message ApbMultiArrayDataUpdate {
-    optional ApbMultiArrayDataSet set = 1;
-    optional ApbMultiArrayDataSetSingle setSingle = 2;
-    optional ApbMultiArrayDataSetPositions setPos = 3;
-    optional ApbMultiArrayDataSetRange setRange = 4;
+    oneof upd {
+        ApbMultiArrayDataSet set = 1;
+        ApbMultiArrayDataSetSingle setSingle = 2;
+        ApbMultiArrayDataSetPositions setPos = 3;
+        ApbMultiArrayDataSetRange setRange = 4;
+    }
 }
 
 message ApbMultiArrayAvgUpdate {
-    optional ApbMultiArrayAvgInc inc = 1;
-    optional ApbMultiArrayAvgIncSingle incSingle = 2;
-    optional ApbMultiArrayAvgIncPositions incPos = 3;
-    optional ApbMultiArrayAvgIncRange incRange = 4;
+    oneof upd {
+        ApbMultiArrayAvgInc inc = 1;
+        ApbMultiArrayAvgIncSingle incSingle = 2;
+        ApbMultiArrayAvgIncPositions incPos = 3;
+        ApbMultiArrayAvgIncRange incRange = 4;
+    }
 }
 
 message ApbMultiArraySetSizeUpdate {
@@ -358,27 +464,27 @@ message ApbMultiArraySetSizeUpdate {
 }
 
 message ApbMultiArrayIntInc {
-    repeated int64 changes = 1;
+    repeated sint64 changes = 1 [packed = true];
 }
 
 message ApbMultiArrayIntIncSingle {
     required int32 pos = 1;
-    required int64 change = 2;
+    required sint64 change = 2;
 }
 
 message ApbMultiArrayIntIncPositions {
-    repeated int32 pos = 1;
-    repeated int64 change = 2; //If only 1 value, the same value will be applied to all of pos.
+    repeated int32 pos = 1 [packed = true];
+    repeated sint64 change = 2 [packed = true]; //If only 1 value, the same value will be applied to all of pos.
 }
 
 message ApbMultiArrayIntIncRange {
     required int32 from = 1;
     required int32 to = 2;
-    required int64 change = 3;
+    required sint64 change = 3;
 }
 
 message ApbMultiArrayFloatInc {
-    repeated double changes = 1;
+    repeated double changes = 1 [packed = true];
 }
 
 message ApbMultiArrayFloatIncSingle {
@@ -387,8 +493,8 @@ message ApbMultiArrayFloatIncSingle {
 }
 
 message ApbMultiArrayFloatIncPositions {
-    repeated int32 pos = 1;
-    repeated double change = 2; //If only 1 value, the same value will be applied to all of pos.
+    repeated int32 pos = 1 [packed = true];
+    repeated double change = 2 [packed = true]; //If only 1 value, the same value will be applied to all of pos.
 }
 
 message ApbMultiArrayFloatIncRange {
@@ -407,8 +513,8 @@ message ApbMultiArrayDataSetSingle {
 }
 
 message ApbMultiArrayDataSetPositions {
-    repeated int32 pos = 1;
-    repeated bytes data = 2;    //If only 1 value, the same value will be applied to all of pos.
+    repeated int32 pos = 1 [packed = true];
+    repeated bytes data = 2; //If only 1 value, the same value will be applied to all of pos.
 }
 
 message ApbMultiArrayDataSetRange {
@@ -418,57 +524,59 @@ message ApbMultiArrayDataSetRange {
 }
 
 message ApbMultiArrayAvgInc {
-    repeated int64 values = 1;
-    repeated int32 counts = 2;
+    repeated sint64 values = 1 [packed = true];
+    repeated sint32 counts = 2 [packed = true];
 }
 
 message ApbMultiArrayAvgIncSingle {
     required int32 pos = 1;
-    optional int32 count = 2;   //If not present, 1 is assumed.
-    required int64 value = 3;
+    optional sint32 count = 2;   //If not present, 1 is assumed.
+    required sint64 value = 3;
 }
 
 message ApbMultiArrayAvgIncPositions {
-    repeated int32 pos = 1;
-    repeated int64 values = 2;
-    repeated int32 counts = 3;
+    repeated int32 pos = 1 [packed = true];
+    repeated sint64 values = 2 [packed = true];
+    repeated sint32 counts = 3 [packed = true];
 }
 
 message ApbMultiArrayAvgIncRange {
     required int32 from = 1;
     required int32 to = 2;
-    required int64 value = 3;
-    required int32 count = 4;
+    required sint64 value = 3;
+    required sint32 count = 4;
 }
 
 message ApbMultiArrayMultiUpdate {
-    repeated int64 ints = 1;
-    repeated double floats = 2;
+    repeated sint64 ints = 1 [packed = true];
+    repeated double floats = 2 [packed = true];
     repeated bytes data = 3;
-    repeated int32 counts = 4;
-    repeated int64 sums = 5;
+    repeated sint32 counts = 4 [packed = true];
+    repeated sint64 sums = 5 [packed = true];
 }
 
 message ApbGetMultiArrayResp {
-    repeated int64 intCounters = 1;
-    repeated double floatCounters = 2;
+    repeated sint64 intCounters = 1 [packed = true];
+    repeated double floatCounters = 2 [packed = true];
     repeated bytes dataArray = 3;
-    repeated int64 sums = 4;
-    repeated int64 counts = 5;
+    repeated sint64 sums = 4 [packed = true];
+    repeated sint64 counts = 5 [packed = true];
 }
 
 // Date
 
 message ApbDateUpdate {
-    optional ApbDateSet set = 1;
-    optional ApbDateOnlySet dateSet = 2;
-    optional ApbTimeOnlySet timeSet = 3;
-    optional ApbSetMS setMS = 4;
-    optional ApbDateInc inc = 5;
-    optional ApbDateOnlyInc dateInc = 6;
-    optional ApbTimeOnlyInc timeInc = 7;
-    optional ApbIncMS incMS = 8;
-    optional ApbDateInitialize initialize = 9;
+    oneof upd {
+        ApbDateSet set = 1;
+        ApbDateOnlySet dateSet = 2;
+        ApbTimeOnlySet timeSet = 3;
+        ApbSetMS setMS = 4;
+        ApbDateInc inc = 5;
+        ApbDateOnlyInc dateInc = 6;
+        ApbTimeOnlyInc timeInc = 7;
+        ApbIncMS incMS = 8;
+        ApbDateInitialize initialize = 9;
+    }
 }
 
 message ApbDateSet {    //At least one must be set
@@ -511,13 +619,13 @@ message ApbDateOnlyInc {
 }
 
 message ApbTimeOnlyInc {
-    optional int32 hour = 4;
-    optional int32 minute = 5;
-    optional int32 second = 6;
-    optional int32 millisecond = 7;
+    optional int32 hour = 1;
+    optional int32 minute = 2;
+    optional int32 second = 3;
+    optional int32 millisecond = 4;
 }
 
-message ApbDateInitialize { //Can only be issued once.
+message ApbDateInitialize { //Can only be issued once. Only supported by SIMPLE_DATE.
     optional int32 year = 1;
     optional int32 month = 2;
     optional int32 day = 3;
@@ -543,6 +651,211 @@ message ApbGetDateResp {
     required int32 hour = 4;
     required int32 minute = 5;
     required int32 second = 6;
+}
+
+//--------------------
+// CompactArray
+
+message ApbCompactArrayUpdate {
+    optional ApbCompArraySetSize setSize = 1;
+    optional ApbCompArraySetArray setArray = 2;
+    optional ApbCompArraySetValue setValue = 3;
+    optional ApbCompArrayIntInc intInc = 4;       //Used for both inc and dec
+    optional ApbCompArrayFloatInc floatInc = 5;
+}
+
+message ApbCompArraySetSize {
+    required int32 size = 1;
+}
+
+message ApbCompArraySetArray {
+    repeated bytes data = 1;
+}
+
+message ApbCompArraySetValue {
+    required int32 index = 1;
+    required bytes data = 2;
+}
+
+message ApbCompArrayIntInc {
+    required int32 index = 1;
+    required sint32 inc = 2; //Use negative for decrement
+}
+
+message ApbCompArrayFloatInc {
+    required int32 index = 1;
+    required double inc = 2; //Use negative for decrement
+}
+
+message ApbGetArrayCompResp {
+    repeated bytes data = 1;
+}
+
+//--------------------
+// StringArray
+
+message ApbStringArrayUpdate {
+    optional ApbStringArraySetValue setValue = 1;
+    optional ApbStringArraySetArray setArray = 2;
+    optional ApbStringArraySetArrayInit setArrayInit = 3;
+    optional ApbStringArraySetSize setSize = 4;
+}
+
+message ApbStringArraySetArray {
+    repeated string data = 1;
+}
+
+message ApbStringArraySetValue {
+    required int32 index = 1;
+    required string data = 2;
+}
+
+message ApbStringArraySetArrayInit {
+    repeated string data = 1;
+}
+
+message ApbStringArraySetSize {
+    required int32 size = 1;
+}
+
+message ApbGetArrayStringResp {
+    repeated string data = 1;
+}
+
+//--------------------
+// ByteArray
+
+message ApbByteArrayUpdate {
+    oneof upd {
+        ApbByteArraySetValue setValue = 1;
+        ApbByteArraySetData setData = 2;
+        ApbByteArrayIntInc intInc = 3;
+        ApbByteArrayFloatInc floatInc = 4;
+        ApbByteArraySetDataInit setDataInit = 5;
+    }
+}
+
+message ApbByteArraySetValue {
+    required int32 index = 1;
+    required bytes data = 2;
+}
+
+message ApbByteArraySetData {
+    required bytes data = 1;
+    repeated uint32 dataStarts = 2 [packed = true];
+}
+
+message ApbByteArraySetDataInit {
+    required bytes data = 1;
+    repeated uint32 dataStarts = 2 [packed = true];
+}
+
+message ApbByteArrayIntInc {
+    required int32 index = 1;
+    required sint32 inc = 2; //Use negative for decrement
+}
+
+message ApbByteArrayFloatInc {
+    required int32 index = 1;
+    required double inc = 2; //Use negative for decrement
+}
+
+message ApbGetArrayByteResp {
+    repeated bytes values = 1;
+}
+
+// Map Counter
+// PotionDB's implementation supports both ints and floats under this CRDT (but only a single type per CRDT instance)
+// Other implementations may implement this CRDT as multiple different CRDTs, under the same CRDT type (or internally use a suffix/prefix on the key, e.g.)
+
+message ApbMapCounterUpdate {
+    required DATA_type dataType = 1;
+    optional bool isDec = 2;    //If not set, inc is assumed.
+    optional ApbMapIntOp intOp = 3;
+    optional ApbMapDoubleOp doubleOp = 4;
+    optional ApbMapCounterInit init = 5;
+}
+
+message ApbMapIntOp {
+    optional ApbMapIntSingleIncOp inc = 1;
+    optional ApbMapIntIncAllOp incAll = 2;
+    optional ApbMapIntIncMultOp incMulti = 3;
+}
+
+message ApbMapDoubleOp {
+    optional ApbMapDoubleSingleIncOp inc = 1;
+    optional ApbMapDoubleIncAllOp incAll = 2;
+    optional ApbMapDoubleIncMultOp incMulti = 3;
+}
+
+message ApbMapIntSingleIncOp {
+    required sint32 key = 1;
+    required sint64 inc = 2;
+    optional bytes data = 3;
+}
+
+message ApbMapIntIncAllOp {
+    repeated sint32 keys = 1 [packed = true];
+    required sint64 inc = 2;
+    optional bytes data = 3;
+}
+
+message ApbMapIntIncMultOp {
+    repeated sint32 keys = 1 [packed = true];
+    repeated sint64 inc = 2 [packed = true];
+    repeated bytes data = 3; //Optional
+}
+
+message ApbMapDoubleSingleIncOp {
+    required sint32 key = 1;
+    required double inc = 2;
+    optional bytes data = 3;
+}
+
+message ApbMapDoubleIncAllOp {
+    repeated sint32 keys = 1 [packed = true];
+    required double inc = 2;
+    optional bytes data = 3;
+}
+
+message ApbMapDoubleIncMultOp {
+    repeated sint32 keys = 1 [packed = true];
+    repeated double inc = 2 [packed = true];
+    repeated bytes data = 3; //Optional
+}
+
+message ApbMapCounterInit {
+    required int32 size = 1;
+}
+
+message ApbGetMapCounterResp {  //Between intvalues and floatvalues, only one should be set.
+    required DATA_type dataType = 1;
+    repeated int32 keys = 2 [packed = true];
+    repeated int64 intvalues = 3 [packed = true];
+    repeated double floatvalues = 4 [packed = true];
+    repeated bytes data = 5; //Optional
+}
+
+/*message ApbMapCounterIntEntry {
+    required int32 key = 1;
+    required int64 value = 2;
+}
+
+message ApbMapCounterDoubleEntry {
+    required int32 key = 1;
+    required double value = 2;
+}*/
+
+/*enum DATA_SIZE_TYPE {
+    BITS_64 = 0;
+    BITS_32 = 1;
+    BITS_16 = 2;
+    BITS_8 = 3;
+}*/
+
+message ApbMultiUpdate {
+    repeated ApbUpdateOperation updates = 1;
+    required CRDT_type type = 2;
 }
 
 //--------------------------------------------------------------
@@ -573,25 +886,36 @@ message ApbUpdateOp {
     required ApbUpdateOperation operation = 2;
 }
 
-message ApbUpdateOperation {
-    optional ApbCounterUpdate counterop = 1;
-    optional ApbSetUpdate setop = 2;
-    optional ApbRegUpdate regop = 3;
-    optional ApbBoundCounterUpdate bcounterop = 4;
-    optional ApbMapUpdate mapop = 5;
-    optional ApbCrdtReset resetop = 6;
-    optional ApbFlagUpdate flagop = 7;
-    optional ApbTopKInit topkinitop = 10;
-    optional ApbMaxMinUpdate maxminop = 11;
-    optional ApbTopkRmvUpdate topkrmvop = 12;
-    optional ApbTopkUpdate topkop = 13;
-    optional ApbLeaderboardUpdate leaderboardop = 14;
-    optional ApbAverageUpdate avgop = 15;
-    optional ApbCounterFloatUpdate counterfloatop = 16;
-    optional ApbPairCounterUpdate paircounterop = 8;
-    optional ApbArrayCounterUpdate arraycounterop = 9;
-    optional ApbMultiArrayUpdate multiarrayop = 17;
-    optional ApbDateUpdate dateop = 18;
+//Note: one day we could improve this to use oneOf, as that is more clean and reduces the memory usage (network usage stays the same).
+//https://protobuf.dev/programming-guides/proto2/#using-oneof
+message ApbUpdateOperation { //Note: if this gets over 32 fields, consider splitting into multiple messages (up to 32 fields are encoded with a single field byte)
+    oneof op {
+        ApbCounterUpdate counterop = 1;
+        ApbSetUpdate setop = 2;
+        ApbRegUpdate regop = 3;
+        ApbBoundCounterUpdate bcounterop = 4;
+        ApbMapUpdate mapop = 5;
+        //ApbCrdtReset resetop = 6;
+        ApbFlagUpdate flagop = 7;
+        ApbTopKInit topkinitop = 8;
+        ApbMaxMinUpdate maxminop = 9;
+        ApbTopkRmvUpdate topkrmvop = 10;
+        ApbTopkUpdate topkop = 11;
+        ApbLeaderboardUpdate leaderboardop = 12;
+        ApbAverageUpdate avgop = 13;
+        ApbCounterFloatUpdate counterfloatop = 14;
+        ApbPairCounterUpdate paircounterop = 15;
+        ApbArrayCounterUpdate arraycounterop = 16;
+        ApbArrayFloatUpdate arrayfloatop = 17;
+        ApbMultiArrayUpdate multiarrayop = 18;
+        ApbDateUpdate dateop = 19;
+        ApbCompactArrayUpdate compactarrayop = 20;
+        ApbStringArrayUpdate stringarrayop = 21;
+        ApbByteArrayUpdate bytearrayop = 22;
+        ApbMapCounterUpdate mapcounterop = 23;
+        ApbMultiUpdate multiupdop = 30;
+    }
+    optional SPECIAL_UPD specialop = 6; //Used to signal if it is a reset or multiupd. This is handy for more efficient processing, as sometimes CRDTType is not enough.
 }
 
 // Objects to be updated
@@ -634,25 +958,31 @@ message ApbStartTransactionResp {
     optional uint32 errorcode = 3;
 }
 
-//Read Objects Response
+//Read Objects Response. Note: if this gets over 32 fields, consider splitting into multiple messages (up to 32 fields are encoded with a single field byte)
 message ApbReadObjectResp {
-    // one of the following:
-    optional ApbGetCounterResp counter = 1;
-    optional ApbGetSetResp set = 2;
-    optional ApbGetRegResp reg = 3;
-    optional ApbGetMVRegResp mvreg = 4;
-    optional ApbGetMapResp map = 6;
-    optional ApbGetFlagResp flag = 7;
-    optional ApbGetMaxMinResp maxmin = 12;
-    optional ApbGetTopkResp topk = 13;      //Also used for TopSum
-    optional ApbGetLeaderboardResp leadb = 14;
-    optional ApbGetAverageResp avg = 15;
-    optional ApbGetCounterFloatResp counterfloat = 16;
-    optional ApbGetPairCounterResp paircounter = 9;
-    optional ApbGetArrayCounterResp arraycounter = 10;
-    optional ApbGetMultiArrayResp multiarray = 17;
-    optional ApbGetDateResp date = 18;
-	optional ApbPartialReadResp partread = 8;	//Generic for non-full state reads from any CRDT
+    oneof resp {  // one of the following:
+         ApbGetCounterResp counter = 1;
+         ApbGetSetResp set = 2;
+         ApbGetRegResp reg = 3;
+         ApbGetMVRegResp mvreg = 4;
+         ApbGetMapResp map = 5;
+         ApbGetFlagResp flag = 6;
+         ApbGetMaxMinResp maxmin = 7;
+         ApbGetTopkResp topk = 8; //Also used for TopSum
+         ApbGetLeaderboardResp leadb = 9;
+         ApbGetAverageResp avg = 10;
+         ApbGetCounterFloatResp counterfloat = 11;
+         ApbGetPairCounterResp paircounter = 12;
+         ApbGetArrayCounterResp arraycounter = 13;
+         ApbGetArrayFloatResp arrayfloat = 14;
+         ApbGetMultiArrayResp multiarray = 15;
+         ApbGetDateResp date = 16;
+         ApbGetArrayCompResp compactarray = 17;
+         ApbGetArrayStringResp stringarray = 18;
+         ApbGetArrayByteResp bytearray = 19;
+         ApbGetMapCounterResp mapcounter = 20;
+         ApbPartialReadResp partread = 21; //Generic for non-full state reads from any CRDT
+    }
 }
 
 message ApbReadObjectsResp {
@@ -686,7 +1016,7 @@ message ApbConnectReplica {
 }
 
 message ApbConnectReplicaResp {
-    repeated int64 knownIDs = 1;
+    repeated int64 knownIDs = 1 [packed = true];
 }
 
 //Others
@@ -705,7 +1035,7 @@ message ApbTriggerInfo {
     required ApbBoundObject obj = 1;
     required int32 opType = 2;
     required int32 nArgs = 3;
-    required bytes args = 4;            //gob
+    required bytes args = 4; //gob
 }
 
 message ApbNewTriggerReply {}
@@ -720,36 +1050,36 @@ message ApbGetTriggersReply {
 //SQL
 
 enum ROW_Policy {  //Concurrency policy
-    AW = 1;
-    RW = 2;
-    LWW = 3;
-    STRONG = 4;
+    AW = 0;
+    RW = 1;
+    LWW = 2;
+    STRONG = 3;
 }
 
 enum COL_Policy {
-    LWW_C = 1;
-    MW = 2;
-    EW = 3;
-    DW = 4;
+    LWW_C = 0;
+    MW = 1;
+    EW = 2;
+    DW = 3;
 }
 
 enum SQL_Datatype {
-    COUNTER_SQL = 1;
-    INTEGER = 2;
-    BOOLEAN = 3;
-    VARCHAR = 4;
-    DATE = 5;
+    COUNTER_SQL = 0;
+    INTEGER = 1;
+    BOOLEAN = 2;
+    VARCHAR = 3;
+    DATE = 4;
 }
 
 enum SQL_Type {
-    CREATE_TABLE = 1;
-    CREATE_INDEX = 2;
-    CREATE_VIEW = 3;
-    INSERT = 4;
-    UPDATE = 5;
-    DELETE = 6;
-    DROP = 7;
-    QUERY = 8;
+    CREATE_TABLE = 0;
+    CREATE_INDEX = 1;
+    CREATE_VIEW = 2;
+    INSERT = 3;
+    UPDATE = 4;
+    DELETE = 5;
+    DROP = 6;
+    QUERY = 7;
 }
 
 message ApbStringSQL {required string sql = 1;}
@@ -799,65 +1129,97 @@ message ApbSQLForeignKey {
 
 message ApbSQLCheck {
     required COMP_type conditionType = 1;
-    required int32 value = 2;
+    required sint32 value = 2;
 }
 
 //Partial reading
 
-enum READ_type {
+enum READ_type {    //Free slots: 63+
     FULL = 0;
 	//Set
     LOOKUP = 1;
-    N_ELEMS = 10;
+    N_ELEMS = 2;
     //MW_REG
-    GET_SINGLE = 33;
+    GET_SINGLE = 3;
 	//Maps
-	GET_VALUE = 2;
-	HAS_KEY = 3;
-	GET_KEYS = 4;
-    GET_VALUES = 5;	//Return value for a given set of keys
+	GET_VALUE = 4;
+	HAS_KEY = 5;
+	GET_KEYS = 6;
+    GET_VALUES = 7; //Return value for a given set of keys
     GET_ALL_VALUES = 9; //Return value for all keys
-    GET_COND = 11;  //Returns values only if they meet a certain criteria
-    GET_ALL_COND = 12;
-    GET_EXCEPT = 13;
-    GET_EXCEPT_COND = 14;
-    GET_EXCEPT_SINGLE = 16;
-    GET_EXCEPT_SINGLE_COND = 17;
+    GET_COND = 8; //Returns values only if they meet a certain criteria
+    GET_ALL_COND = 10;
+    GET_EXCEPT = 11;
+    GET_EXCEPT_COND = 12;
+    GET_EXCEPT_SINGLE = 13;
+    GET_EXCEPT_SINGLE_COND = 14;
     GET_AGGREGATE = 15;
 	//TopK
-	GET_N = 6;
-    GET_ABOVE_VALUE = 7;
+	GET_N = 16;
+    GET_ABOVE_VALUE = 17;
+    TOP_AGGR = 18;
     //Avg
-    GET_FULL_AVG = 8;
+    GET_FULL_AVG = 19;
     //Process
-    PROCESS = 18;
+    PROCESS = 20;
     //PairCounter
-    PAIR_FIRST = 19;
-    PAIR_SECOND = 20;
+    PAIR_FIRST = 21;
+    PAIR_SECOND = 22;
     //ArrayCounter
-    COUNTER_SINGLE = 21;
-    COUNTER_SUB = 22;
-    COUNTER_EXCEPT = 23;
-    COUNTER_EXCEPT_RANGE = 24;
+    COUNTER_SINGLE = 23;
+    COUNTER_SUB = 24;
+    COUNTER_EXCEPT = 25;
+    COUNTER_EXCEPT_RANGE = 26;
+    COUNTER_RANGE = 27;
+    //ArrayFloat
+    FLOAT_SINGLE = 28;
+    FLOAT_SUB = 29;
+    FLOAT_EXCEPT = 30;
+    FLOAT_EXCEPT_RANGE = 31;
+    FLOAT_RANGE = 32;
     //MultiArray
-    MULTI_FULL = 25;
-    MULTI_SINGLE = 26;
-    MULTI_RANGE = 27;
-    MULTI_SUB = 28;
-    MULTI_COND = 29;
-    MULTI_DATA_COND = 30;
-    MULTI_CUSTOM = 31;
-    MULTI_DATA_INT = 32;
+    MULTI_FULL = 33;
+    MULTI_SINGLE = 34;
+    MULTI_RANGE = 35;
+    MULTI_SUB = 36;
+    MULTI_COND = 37;
+    MULTI_DATA_COND = 38;
+    MULTI_CUSTOM = 39;
+    MULTI_DATA_INT = 40;
+    MULTI_AGGR= 62;
     //Date
-    DATE_FULL = 40;
-    DATE_ONLY = 41;
-    DATE_TIME_ONLY = 42;
-    DATE_TIMESTAMP = 43;
+    DATE_FULL = 41;
+    DATE_ONLY = 42;
+    DATE_TIME_ONLY = 43;
+    DATE_TIMESTAMP = 44;
+    //CompactArray
+    ARRAY_COMPACT_POS = 45;
+    ARRAY_COMPACT_EXCEPT = 46;
+    ARRAY_COMPACT_RANGE = 47;
+    ARRAY_COMPACT_SUB = 48;
+    //StringArray
+    ARRAY_STRING_POS = 49;
+    ARRAY_STRING_EXCEPT = 50;
+    ARRAY_STRING_RANGE = 51;
+    ARRAY_STRING_SUB = 52;
+    //ByteArray
+    ARRAY_BYTE_POS = 53;
+    ARRAY_BYTE_EXCEPT = 54;
+    ARRAY_BYTE_RANGE = 55;
+    ARRAY_BYTE_SUB = 56;
+    //MapCounter
+    MAP_COUNTER_VALUE = 57;
+    MAP_COUNTER_HAS_KEY = 58;
+    MAP_COUNTER_KEYS = 59;
+    MAP_COUNTER_VALUES = 60;
+    MAP_COUNTER_COMP = 61;
 }
 
 enum COMP_type {EQ = 0; NEQ = 1; LEQ = 2; L = 3; H = 4; HEQ = 5;}
 
-enum AGGR_type {A_SUM = 0; A_AVG = 1; A_MAX = 2; A_MIN = 3;}
+enum AGGR_type {A_SUM = 0; A_AVG = 1; A_MAX = 2; A_MIN = 3; A_COUNT = 4;} //Count only supported by TopK as of now.
+
+enum CA_Type {CA_INT = 4; CA_FLOAT = 1; CA_DATA = 2; CA_STRING = 3; CA_ANY = 15;}
 
 //Allows both "full state reads" (ApbReadObjects), "partial reads" and "process reads"
 message ApbRead {
@@ -888,16 +1250,23 @@ message ApbPartialRead {
 }
 
 message ApbPartialReadArgs {
-	optional ApbSetPartialRead set = 1;
-	optional ApbMapPartialRead map = 2;
-    optional ApbTopkPartialRead topk = 3;
-    optional ApbAvgPartialRead avg = 4;
-    optional ApbProcessRead process = 5;
-    optional ApbPairCounterPartialRead paircounter = 6;
-    optional ApbArrayCounterPartialRead arraycounter = 7;
-    optional ApbMultiArrayPartialRead multiarray = 8;
-    optional ApbMVRegPartialRead mvreg = 9;
-    optional ApbDatePartialRead date = 10;
+    oneof args {
+         ApbSetPartialRead set = 1;
+         ApbMapPartialRead map = 2;
+         ApbTopkPartialRead topk = 3;
+         ApbAvgPartialRead avg = 4;
+         ApbProcessRead process = 5;
+         ApbPairCounterPartialRead paircounter = 6;
+         ApbArrayCounterPartialRead arraycounter = 7;
+         ApbArrayFloatPartialRead arrayfloat = 8;
+         ApbMultiArrayPartialRead multiarray = 9;
+         ApbMVRegPartialRead mvreg = 10;
+         ApbDatePartialRead date = 11;
+         ApbCompactArrayPartialRead compactarray = 12;
+         ApbStringArrayPartialRead stringarray = 13;
+         ApbByteArrayPartialRead bytearray = 14;
+         ApbMapCounterPartialRead mapcounter = 15;
+    }
 }
 
 //A special operation. It executes a group of reads (pre-reads), aggregates the results and 
@@ -915,23 +1284,26 @@ message ApbSetPartialRead {
 }
 
 message ApbMapPartialRead {
-	optional ApbMapGetValueRead getvalue = 1;
-	optional ApbMapHasKeyRead haskey = 2;
-	optional ApbMapGetKeysRead getkeys = 3;
-    optional ApbMapGetValuesRead getvalues = 4;
-    optional ApbMapGetAllValuesRead getallvalues = 5;
-    optional ApbMapCondRead condread = 6;
-    optional ApbMapAllCondRead condallread = 7;
-    optional ApbMapExceptRead exceptread = 8;
-    optional ApbMapExceptCondRead exceptcondread = 9;
-    optional ApbMapAggregateRead aggregateread = 10;
-    optional ApbMapExceptSingleRead exceptsingleread = 11;
-    optional ApbMapExceptCondSingleRead exceptcondsingleread = 12;
+    oneof read {
+         ApbMapGetValueRead getvalue = 1;
+         ApbMapHasKeyRead haskey = 2;
+         ApbMapGetKeysRead getkeys = 3;
+         ApbMapGetValuesRead getvalues = 4;
+         ApbMapGetAllValuesRead getallvalues = 5;
+         ApbMapCondRead condread = 6;
+         ApbMapAllCondRead condallread = 7;
+         ApbMapExceptRead exceptread = 8;
+         ApbMapExceptCondRead exceptcondread = 9;
+         ApbMapAggregateRead aggregateread = 10;
+         ApbMapExceptSingleRead exceptsingleread = 11;
+         ApbMapExceptCondSingleRead exceptcondsingleread = 12;
+    }
 }
 
 message ApbTopkPartialRead {
 	optional ApbTopkGetNRead getn = 1;
 	optional ApbTopkAboveValueRead getabovevalue = 2;
+    optional ApbTopKAggregateRead aggregateread = 3;
 }
 
 message ApbAvgPartialRead {optional ApbAvgFullRead getfull = 1;}
@@ -946,17 +1318,59 @@ message ApbArrayCounterPartialRead {
     optional ApbArrayCounterSubRead sub = 2;
     optional ApbArrayCounterExceptRead except = 3;
     optional ApbArrayCounterExceptRangeRead exceptRange = 4;
+    optional ApbArrayCounterRangeRead range = 5;
+}
+
+message ApbArrayFloatPartialRead {
+    optional ApbArrayFloatSingleRead single = 1;
+    optional ApbArrayFloatSubRead sub = 2;
+    optional ApbArrayFloatExceptRead except = 3;
+    optional ApbArrayFloatExceptRangeRead exceptRange = 4;
+    optional ApbArrayFloatRangeRead range = 5;
 }
 
 message ApbMultiArrayPartialRead {
     repeated MultiArrayType types = 1;
-    optional ApbMultiArrayFullRead full = 2;
-    optional ApbMultiArrayPosRead pos = 3;
-    optional ApbMultiArrayRangeRead range = 4;
-    optional ApbMultiArraySubRead sub = 5;
-    optional ApbMultiArrayCondRead cond = 6;
-    optional ApbMultiArrayDataCondRead datacond = 7;
-    optional ApbMultiArrayCustomRead custom = 8;
+    oneof read {
+         ApbMultiArrayFullRead full = 2;
+         ApbMultiArrayPosRead pos = 3;
+         ApbMultiArrayRangeRead range = 4;
+         ApbMultiArraySubRead sub = 5;
+         ApbMultiArrayCondRead cond = 6;
+         ApbMultiArrayDataCondRead datacond = 7;
+         ApbMultiArrayAggrRead dataaggr = 8;
+         ApbMultiArrayCustomRead custom = 9;
+    }
+}
+
+message ApbCompactArrayPartialRead {
+    optional ApbCompactArrayPosRead pos = 1;
+    optional ApbCompactArrayExceptRead except = 2;
+    optional ApbCompactArrayRangeRead range = 3;
+    optional ApbCompactArraySubRead sub = 4;
+}
+
+message ApbStringArrayPartialRead {
+    optional ApbStringArrayPosRead pos = 1;
+    optional ApbStringArrayExceptRead except = 2;
+    optional ApbStringArrayRangeRead range = 3;
+    optional ApbStringArraySubRead sub = 4;
+}
+
+message ApbByteArrayPartialRead {
+    optional ApbByteArrayPosRead pos = 1;
+    optional ApbByteArrayExceptRead except = 2;
+    optional ApbByteArrayRangeRead range = 3;
+    optional ApbByteArraySubRead sub = 4;
+}
+
+message ApbMapCounterPartialRead {
+    required DATA_type dataType = 1;
+    optional ApbMapCounterGetValueRead getvalue = 2;
+    optional ApbMapCounterHasKeyRead haskey = 3;
+    optional ApbMapCounterGetKeysRead getkeys = 4;
+    optional ApbMapCounterGetValuesRead getvalues = 5;
+    optional ApbMapCounterCompRead compread = 6;
 }
 
 //SET
@@ -979,7 +1393,7 @@ message ApbMapGetValuesRead {
 
 message ApbMapAggregateRead {
     required AGGR_type aggregationtype = 1;
-    repeated string keys = 2;   //Optional. If not present, then all keys are considered
+    repeated string keys = 2; //Optional. If not present, then all keys are considered
     optional ApbMapCondArgs condarg = 3;
     optional ApbMapEmbPartialArgs args = 4;
     optional string aggrKey = 5;
@@ -994,15 +1408,17 @@ message ApbMapExceptSingleRead {required bytes key = 1; optional ApbMapEmbPartia
 message ApbMapExceptCondSingleRead {required bytes key = 1; required ApbMapCondArgs condarg = 2;}
 message ApbMapCondArgs {
     optional string key = 1;    //Required for ApbMapCondRead
-    optional ApbCondIntCompare intcomp = 2;
-    optional ApbCondFloatCompare floatcomp = 3;
-    optional ApbCondBoolCompare boolcomp = 4;
-    optional ApbCondStringCompare stringcomp = 5;
-    optional ApbCondBytesCompare bytescomp = 6;
-    optional ApbCondMapCompare mapcomp = 7;
-    optional ApbCondGetNoCompare nocomp = 8;
-    optional ApbCondIntVarCompare intvarcomp = 9;
-    optional ApbCondFloatVarCompare floatvarcomp = 10;
+    oneof comp {
+        ApbCondIntCompare intcomp = 2;
+        ApbCondFloatCompare floatcomp = 3;
+        ApbCondBoolCompare boolcomp = 4;
+        ApbCondStringCompare stringcomp = 5;
+        ApbCondBytesCompare bytescomp = 6;
+        ApbCondMapCompare mapcomp = 7;
+        ApbCondGetNoCompare nocomp = 8;
+        ApbCondIntVarCompare intvarcomp = 9;
+        ApbCondFloatVarCompare floatvarcomp = 10;
+    }
 }
 
 message ApbCondIntCompare {required int64 value = 1; required COMP_type comp = 2;}
@@ -1024,7 +1440,13 @@ message ApbMapEmbPartialArgs {
 
 //TOPK
 message ApbTopkGetNRead {required int32 amount = 1;}
-message ApbTopkAboveValueRead {required int32 minValue = 1;}
+message ApbTopkAboveValueRead {required sint32 minValue = 1;}
+message ApbTopKAggregateRead {
+    required AGGR_type aggregationtype = 1;
+    optional sint32 minValue = 2;
+    optional sint32 maxValue = 3;
+    optional int32 bitmask = 4;
+}
 
 //AVG
 message ApbAvgFullRead {}
@@ -1035,20 +1457,28 @@ message ApbPairCounterSecondRead {}
 
 //ARRAYCOUNTER
 message ApbArrayCounterSingleRead {required int32 index = 1;}
-message ApbArrayCounterSubRead {repeated int32 indexes = 1;}
+message ApbArrayCounterSubRead {repeated int32 indexes = 1 [packed = true];}
 message ApbArrayCounterExceptRead {required int32 index = 1;}
-message ApbArrayCounterExceptRangeRead {repeated int32 indexes = 1; optional int32 nPositionsSkip = 2;}
+message ApbArrayCounterExceptRangeRead {repeated int32 indexes = 1 [packed = true]; optional int32 nPositionsSkip = 2;}
+message ApbArrayCounterRangeRead {required int32 from = 1; required int32 to = 2;}
+
+//ARRAYFLOAT
+message ApbArrayFloatSingleRead {required int32 index = 1;}
+message ApbArrayFloatSubRead {repeated int32 indexes = 1 [packed = true];}
+message ApbArrayFloatExceptRead {required int32 index = 1;}
+message ApbArrayFloatExceptRangeRead {repeated int32 indexes = 1 [packed = true]; optional int32 nPositionsSkip = 2;}
+message ApbArrayFloatRangeRead {required int32 from = 1; required int32 to = 2;}
 
 //MUTIARRAY
 message ApbMultiArrayFullRead {}
-message ApbMultiArrayPosRead {repeated int32 pos = 1;}
-message ApbMultiArrayRangeRead {repeated int32 start = 1; repeated int32 end = 2;}
+message ApbMultiArrayPosRead {repeated int32 pos = 1 [packed = true];}
+message ApbMultiArrayRangeRead {repeated int32 start = 1 [packed = true]; repeated int32 end = 2 [packed = true];}
 message ApbMultiArraySubRead {repeated IntSlice indexes = 1;}
 message ApbMultiArrayCondRead {
     required int32 comparePos = 1;
     required COMP_type comp = 2;
     required MultiArrayType compareType = 3;
-    optional int64 compareInt = 4;
+    optional sint64 compareInt = 4;
     optional double compareFloat = 5;   //Also used by average
     optional bytes compareData = 6;
 }
@@ -1056,17 +1486,26 @@ message ApbMultiArrayDataCondRead { //If comp is not set, then it's a simple rea
     required int32 comparePos = 1;
     optional COMP_type comp = 2;
     optional MultiArrayType compareType = 3;
-    optional int64 compareInt = 4;
+    optional sint64 compareInt = 4;
     optional double compareFloat = 5;   //Also used by average
     optional bytes compareData = 6;
 }
+
 message ApbMultiArrayCustomRead {
-    repeated int32 intIndexes = 1;
-    repeated int32 floatIndexes = 2;
-    repeated int32 dataIndexes = 3;
-    repeated int32 avgIndexes = 4;
+    repeated int32 intIndexes = 1 [packed = true];
+    repeated int32 floatIndexes = 2 [packed = true];
+    repeated int32 dataIndexes = 3 [packed = true];
+    repeated int32 avgIndexes = 4 [packed = true];
 }
-message IntSlice {repeated int32 values = 1;}
+
+message ApbMultiArrayAggrRead {
+    required AGGR_type aggrType = 1;
+    optional MultiArrayType compArrayType = 2;
+    optional int32 comparePos = 3;
+    optional COMP_type compType = 4;
+    optional bool byIndex = 5; //If not present, false is assumed.
+}
+message IntSlice {repeated int32 values = 1 [packed = true];}
 
 //MVREG
 message ApbMVRegPartialRead {optional ApbMVRegSingleRead single = 1;}
@@ -1075,19 +1514,64 @@ message ApbMVRegSingleRead{}
 //DATE
 message ApbDatePartialRead {    //No data is needed, only to know the type. So let's just include the enum to decide.
     required READ_type dataReadType = 1;
-} 
+}
+
+//COMPACTARRAY
+message ApbCompactArrayPosRead {
+    required int32 index = 1;
+    optional CA_Type dataType = 2; //If not present, then ANY is assumed.
+}
+message ApbCompactArrayExceptRead {required int32 index = 1;}
+message ApbCompactArrayRangeRead {required int32 from = 1; required int32 to = 2;} 
+message ApbCompactArraySubRead {repeated int32 indexes = 1 [packed = true];}
+
+//STRINGARRAY
+message ApbStringArrayPosRead {required int32 index = 1;}
+message ApbStringArrayExceptRead {required int32 index = 1;}
+message ApbStringArrayRangeRead {required int32 from = 1; required int32 to = 2;} 
+message ApbStringArraySubRead {repeated int32 indexes = 1 [packed = true];}
+
+//BYTEARRAY
+message ApbByteArrayPosRead {
+    required int32 index = 1; 
+    optional CA_Type dataType = 2; //If not present, then ANY is assumed.
+}
+message ApbByteArrayExceptRead {required int32 index = 1;}
+message ApbByteArrayRangeRead {required int32 from = 1; required int32 to = 2;}
+message ApbByteArraySubRead {repeated int32 indexes = 1 [packed = true];}
+
+//MAPCOUNTER
+message ApbMapCounterGetValueRead {required int32 key = 1;}
+message ApbMapCounterHasKeyRead {required int32 key = 1;}
+message ApbMapCounterGetKeysRead {}
+message ApbMapCounterGetValuesRead {repeated int32 keys = 1 [packed = true];}
+message ApbMapCounterCompRead {
+    required COMP_type comp = 1;
+    optional sint64 intValue = 2;
+    optional double doubleValue = 3;
+    optional bool readKeys = 4;
+    optional bool readValues = 5;
+    optional bool readData = 6;
+}
 
 //RESP
 message ApbPartialReadResp {
-	optional ApbSetPartialReadResp set = 1;
-	optional ApbMapPartialReadResp map = 2;
-    optional ApbTopkPartialReadResp topk = 3;
-    optional ApbAvgPartialReadResp avg = 4;
-    optional ApbPairCounterPartialReadResp paircounter = 5;
-    optional ApbArrayCounterPartialReadResp arraycounter = 6;   //Sub read uses the non-partial reply.
-    optional ApbMultiArrayPartialReadResp multiarray = 7;   //Note: Reads returning multiple arrays use non-partial reply.
-    optional ApbMVRegPartialReadResp mvreg = 8;
-    optional ApbDatePartialReadResp date = 9;
+    oneof reply {
+            ApbSetPartialReadResp set = 1;
+            ApbMapPartialReadResp map = 2;
+            ApbTopkPartialReadResp topk = 3;
+            ApbAvgPartialReadResp avg = 4;
+            ApbPairCounterPartialReadResp paircounter = 5;
+            ApbArrayCounterPartialReadResp arraycounter = 6; //Sub read uses the non-partial reply.
+            ApbArrayFloatPartialReadResp arrayfloat = 7; //Sub read uses the non-partial reply.
+            ApbMultiArrayPartialReadResp multiarray = 8; //Note: Reads returning multiple arrays use non-partial reply.
+            ApbMVRegPartialReadResp mvreg = 9;
+            ApbDatePartialReadResp date = 10;
+            ApbCompactArrayReadResp compactarray = 11;
+            ApbStringArrayReadResp stringarray = 12;
+            ApbByteArrayReadResp bytearray = 13;
+            ApbMapCounterReadResp mapcounter = 14;
+    }
 }
 
 message ApbSetPartialReadResp {
@@ -1104,7 +1588,10 @@ message ApbMapPartialReadResp {
 
 message ApbAvgPartialReadResp {optional ApbAvgGetFullReadResp getfull = 1;}
 
-message ApbTopkPartialReadResp {required ApbGetTopkResp pairs = 1;}
+message ApbTopkPartialReadResp {
+    optional ApbGetTopkResp pairs = 1;
+    optional ApbTopKAvgAggrResp aggr = 2;
+}
 
 message ApbSetLookupReadResp {required bool has = 1;}
 message ApbSetNElemsReadResp {required int32 count = 1;}
@@ -1123,24 +1610,28 @@ message ApbAvgGetFullReadResp {required int64 sum = 1; required int64 nAdds = 2;
 
 message ApbPairCounterPartialReadResp{optional sint32 first = 1; optional double second = 2;}
 
-message ApbArrayCounterPartialReadResp {required int64 value = 1;}
+message ApbArrayCounterPartialReadResp {required sint64 value = 1;}
+
+message ApbArrayFloatPartialReadResp {required double value = 1;}
 
 message ApbMultiArrayPartialReadResp {
     required MultiArrayType type = 1;
-    optional ApbMultiArrayIntResp ints = 2;
-    optional ApbMultiArrayFloatResp floats = 3;
-    optional ApbMultiArrayDataResp data = 4;
-    optional ApbMultiArrayAvgResp avgs = 5;
-    optional ApbMultiArraySingleResp single = 6;
-    optional ApbMultiArrayDataAndSingleResp dataAndSingle = 7;
+    oneof resp {
+        ApbMultiArrayIntResp ints = 2;
+        ApbMultiArrayFloatResp floats = 3;
+        ApbMultiArrayDataResp data = 4;
+        ApbMultiArrayAvgResp avgs = 5;
+        ApbMultiArraySingleResp single = 6;
+        ApbMultiArrayDataAndSingleResp dataAndSingle = 7;
+    }
 }
 
 message ApbMultiArrayIntResp {
-    repeated int64 intValues = 1;
+    repeated sint64 intValues = 1 [packed = true];
 }
 
 message ApbMultiArrayFloatResp {
-    repeated double floatValues = 1;
+    repeated double floatValues = 1 [packed = true];
 }
 
 message ApbMultiArrayDataResp {
@@ -1148,28 +1639,29 @@ message ApbMultiArrayDataResp {
 }
 
 message ApbMultiArrayAvgResp {
-    repeated int64 sums = 1;
-    repeated int64 counts = 2;
+    repeated sint64 sums = 1 [packed = true];
+    repeated sint64 counts = 2 [packed = true];
 }
 
 message ApbMultiArraySingleResp {
-    optional int64 intValue = 1;       
+    optional sint64 intValue = 1;       
     optional double floatValue = 2;
     optional bytes dataValue = 3;
-    optional int64 sumValue = 4;    //Keep both intValue and sumValue in case the read is of both int and avg.
-    optional int64 countValue = 5;
+    optional sint64 sumValue = 4;    //Keep both intValue and sumValue in case the read is of both int and avg.
+    optional sint64 countValue = 5;
 }
 
 message ApbMultiArrayDataAndSingleResp {
     repeated bytes dataValues = 1;
-    optional int64 intValue = 2;        //Also doubles as sumValue for avg 
+    optional sint64 intValue = 2;        //Also doubles as sumValue for avg 
     optional double floatValue = 3;
-    optional int64 countValue = 4;
+    optional sint64 countValue = 4;
 }
 
 message ApbMVRegPartialReadResp {optional ApbMVRegSingleResp single = 1;}
 message ApbMVRegSingleResp {required bytes value = 1;}
 
+//DATE
 message ApbDatePartialReadResp {
     optional ApbDateFullResp full = 1;
     optional ApbTimeResp time = 2;
@@ -1202,4 +1694,72 @@ message ApbDateOnlyResp {
 
 message ApbTimestampResp {
     required int64 timestamp = 1;
+}
+
+//COMPACTARRAY
+message ApbCompactArrayReadResp {   //EXCEPT, RANGE and SUB just return as full read
+    optional ApbCompactPosAnyResp anyValue = 1;
+    optional ApbCompactPosIntResp intValue = 2;
+    optional ApbCompactPosFloatResp floatValue = 3;
+    optional ApbCompactPosDataResp dataValue = 4;
+    optional ApbCompactPosStringResp stringValue = 5;
+}
+
+message ApbCompactPosAnyResp {required bytes value = 1;}
+message ApbCompactPosIntResp {required sint64 value = 1;}
+message ApbCompactPosFloatResp {required double value = 1;}
+message ApbCompactPosDataResp {required bytes value = 1;}
+message ApbCompactPosStringResp {required string value = 1;}
+
+//STRINGARRAY
+message ApbStringArrayReadResp {required string value = 1;}
+
+//BYTEARRAY
+message ApbByteArrayReadResp {  //EXCEPT, RANGE and SUB just return as full read
+    optional ApbBytePosAnyResp anyValue = 1;
+    optional ApbBytePosIntResp intValue = 2;
+    optional ApbBytePosFloatResp floatValue = 3;
+    optional ApbBytePosDataResp dataValue = 4;
+    optional ApbBytePosStringResp stringValue = 5;
+}
+
+message ApbBytePosAnyResp {required bytes value = 1;}
+message ApbBytePosIntResp {required sint64 value = 1;}
+message ApbBytePosFloatResp {required double value = 1;}
+message ApbBytePosDataResp {required bytes value = 1;}
+message ApbBytePosStringResp {required string value = 1;}
+
+//MAP COUNTER
+message ApbMapCounterReadResp {
+    required DATA_type dataType = 1;
+    optional ApbMapCounterSingleResp single = 2;
+    optional ApbMapCounterKeysResp keys = 3;
+    optional ApbMapCounterHasKeyResp haskey = 4;
+    optional ApbMapCounterKeysDataResp keysData = 5;
+    optional ApbMapCounterValuesDataResp valuesData = 6;
+}
+
+message ApbMapCounterSingleResp {
+    optional sint64 intvalue = 1;
+    optional double floatvalue = 2;
+    optional bytes data = 3;
+}
+
+message ApbMapCounterKeysResp {
+    repeated int32 keys = 1 [packed = true];
+}
+
+message ApbMapCounterHasKeyResp {
+    required bool has = 1;
+}
+
+message ApbMapCounterKeysDataResp {
+    repeated int32 keys = 1 [packed = true];
+    repeated bytes data = 2;
+}
+
+message ApbMapCounterValuesDataResp {
+    repeated int64 intvalues = 1 [packed = true];
+    repeated double floatvalues = 2 [packed = true];
+    repeated bytes data = 3;
 }

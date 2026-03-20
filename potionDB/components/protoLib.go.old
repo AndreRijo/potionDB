@@ -328,7 +328,7 @@ func createUpdateOps(updates []UpdateObjectParams) (protobufs []*proto.ApbUpdate
 
 func CreateStartTransactionResp(txnId TransactionId, ts clocksi.Timestamp) (protobuf *proto.ApbStartTransactionResp) {
 	protobuf = &proto.ApbStartTransactionResp{
-		Success:               pb.Bool(true),
+		Success:               shared.TRUE_POINTER,
 		TransactionDescriptor: createTxnDescriptorBytes(txnId, ts),
 	}
 	return
@@ -336,7 +336,7 @@ func CreateStartTransactionResp(txnId TransactionId, ts clocksi.Timestamp) (prot
 
 func CreateCommitOkResp(txnId TransactionId, ts clocksi.Timestamp) (protobuf *proto.ApbCommitResp) {
 	protobuf = &proto.ApbCommitResp{
-		Success:    pb.Bool(true),
+		Success:    shared.TRUE_POINTER,
 		CommitTime: createTxnDescriptorBytes(txnId, ts),
 	}
 	return
@@ -344,7 +344,7 @@ func CreateCommitOkResp(txnId TransactionId, ts clocksi.Timestamp) (protobuf *pr
 
 func CreateCommitFailedResp(errorCode uint32) (protobuf *proto.ApbCommitResp) {
 	protobuf = &proto.ApbCommitResp{
-		Success:   pb.Bool(false),
+		Success:   shared.FALSE_POINTER,
 		Errorcode: pb.Uint32(errorCode),
 	}
 	return
@@ -363,7 +363,7 @@ func CreateStaticReadResp(objectStates []crdt.State, txnId TransactionId, ts clo
 func CreateReadObjectsResp(objectStates []crdt.State) (protobuf *proto.ApbReadObjectsResp) {
 	readReplies := convertAntidoteStatesToProto(objectStates)
 	protobuf = &proto.ApbReadObjectsResp{
-		Success: pb.Bool(true),
+		Success: shared.TRUE_POINTER,
 		Objects: readReplies,
 	}
 	return
@@ -371,7 +371,7 @@ func CreateReadObjectsResp(objectStates []crdt.State) (protobuf *proto.ApbReadOb
 
 func CreateOperationResp() (protoBuf *proto.ApbOperationResp) {
 	protoBuf = &proto.ApbOperationResp{
-		Success: pb.Bool(true),
+		Success: shared.TRUE_POINTER,
 	}
 	return
 }
@@ -547,7 +547,7 @@ func createTopkReadResp(values []crdt.TopKScore) (protobuf *proto.ApbReadObjectR
 }
 
 func createAvgReadResp(value float64) (protobuf *proto.ApbReadObjectResp) {
-	return &proto.ApbReadObjectResp{Avg: &proto.ApbGetAverageResp{Avg: pb.Float64(value)}}
+	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Arraycounter{Avg: &proto.ApbGetAverageResp{Avg: pb.Float64(value)}}
 }
 
 func createMaxMinReadResp(value int64) (protobuf *proto.ApbReadObjectResp) {
@@ -723,11 +723,11 @@ func createUpdateOperation(updateArgs crdt.UpdateArguments, crdtType proto.CRDTT
 		switch convertedArgs := updateArgs.(type) {
 		case crdt.MaxAddValue:
 			protobuf = &proto.ApbUpdateOperation{Maxminop: &proto.ApbMaxMinUpdate{
-				Value: pb.Int64(convertedArgs.Value), IsMax: pb.Bool(true),
+				Value: pb.Int64(convertedArgs.Value), IsMax: shared.TRUE_POINTER,
 			}}
 		case crdt.MinAddValue:
 			protobuf = &proto.ApbUpdateOperation{Maxminop: &proto.ApbMaxMinUpdate{
-				Value: pb.Int64(convertedArgs.Value), IsMax: pb.Bool(false),
+				Value: pb.Int64(convertedArgs.Value), IsMax: shared.FALSE_POINTER,
 			}}
 		}
 	default:
@@ -1166,9 +1166,9 @@ func createProtoOpDownstream(upd *crdt.UpdateArguments) (protobuf *proto.ProtoOp
 func createProtoCounterDownstream(upd *crdt.UpdateArguments) (protobuf *proto.ProtoCounterDownstream) {
 	switch convertedUpd := (*upd).(type) {
 	case crdt.Increment:
-		return &proto.ProtoCounterDownstream{IsInc: pb.Bool(true), Change: &convertedUpd.Change}
+		return &proto.ProtoCounterDownstream{IsInc: shared.TRUE_POINTER, Change: &convertedUpd.Change}
 	case crdt.Decrement:
-		return &proto.ProtoCounterDownstream{IsInc: pb.Bool(false), Change: &convertedUpd.Change}
+		return &proto.ProtoCounterDownstream{IsInc: shared.FALSE_POINTER, Change: &convertedUpd.Change}
 	}
 	return nil
 }

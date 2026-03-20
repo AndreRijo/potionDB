@@ -60,7 +60,7 @@ func CreateS2SWrapperReplyProto(clientID int32, msgID proto.WrapperType, msg pb.
 	return protobuf
 }
 
-func CreateBCPermissionsReqProto(perms []map[crdt.KeyParams]int32, reqReplicaID int16) *proto.ProtoBCPermissionsReq {
+func CreateBCPermissionsReqProto(perms []map[crdt.KeyParams]int32, reqReplicaID uint16) *proto.ProtoBCPermissionsReq {
 	partProtos := make([]*proto.ProtoBCPermissionsPartReq, len(perms))
 	for partID, partPerms := range perms {
 		partProtos[partID] = CreateBCPermissionsPartReqProto(partPerms)
@@ -94,7 +94,7 @@ func ProtoBCPermissionsReqToTM(protobuf *proto.ProtoBCPermissionsReq) TMBCPermsA
 			perms[i][fromBoundObjectToKeyParams(pair.GetKeyParams())] = pair.GetValue()
 		}
 	}
-	return TMBCPermsArgs{Perms: perms, ReqReplicaID: int16(protobuf.GetReqReplicaID())}
+	return TMBCPermsArgs{Perms: perms, ReqReplicaID: uint16(protobuf.GetReqReplicaID())}
 }
 
 func CreateS2SSingleRead(readArgs crdt.ReadObjectParams) *proto.S2SSingleRead {
@@ -107,7 +107,7 @@ func CreateS2SSingleRead(readArgs crdt.ReadObjectParams) *proto.S2SSingleRead {
 func S2SSingleReadToAntidote(protobuf *proto.S2SSingleRead) (read crdt.ReadObjectParams) {
 	boundObj := protobuf.GetKeyParams()
 	keyP := crdt.MakeKeyParams(string(boundObj.GetKey()), boundObj.GetType(), string(boundObj.GetBucket()))
-	readArgs := *crdt.PartialReadOpToAntidoteRead(protobuf.GetPartRead(), keyP.CrdtType, protobuf.GetReadtype())
+	readArgs := crdt.PartialReadOpToAntidoteRead(protobuf.GetPartRead(), keyP.CrdtType, protobuf.GetReadtype())
 	return crdt.ReadObjectParams{KeyParams: keyP, ReadArgs: readArgs}
 }
 

@@ -1,6 +1,7 @@
 package crdt
 
 import (
+	"fmt"
 	"math"
 	"potionDB/crdt/clocksi"
 	"potionDB/crdt/proto"
@@ -9,7 +10,7 @@ import (
 )
 
 //Idea that doesn't work:
-//State: Incs, Decs, IncsR, DecsR map[int16]int64
+//State: Incs, Decs, IncsR, DecsR map[uint16]int64
 //Note that we have causal delivery. So it's okay if it's not grow-only.
 //We have two counters for each replica: incs; sets.
 //Incs[r] is an absolute value, updateable only by replica r.
@@ -51,7 +52,7 @@ import (
 //int64 setValue: (winning) value set by a set operation.
 //clocksi.Timestamp setClk: the clock of the winning set operation.
 //int64 setTs: the ts of the winning set operation.
-//int16 setReplicaID: the replicaID of the winning set operation.
+//uint16 setReplicaID: the replicaID of the winning set operation.
 //int64 incs: all incs + decs applied to this CRDT that have not been "reset" yet by a set.
 //Pfew. That was a long struggle to get this right :((((
 //Undo of this is... *shrugs*. Probably need to store the clocks of all operations.
@@ -63,25 +64,31 @@ type SetWDateCrdt struct {
 	setClk         clocksi.Timestamp //the clk of the winning set operation.
 	setValue       int64             //(winning) value set by a set operation.
 	setTs          int64             //the ts of the winning set operation.
-	setReplicaID   int16             //the replicaID of the winning set operation.
-	localReplicaID int16
+	setReplicaID   uint16            //the replicaID of the winning set operation.
+	localReplicaID uint16
 	inc            int64             //all incs + decs applied to this CRDT that have not been "reset" yet by a set.
 	currClk        clocksi.Timestamp //Keeps track of the highest clock seen, to know which clock to generate in Update.
 }
 
-type DateFullSetWArguments struct{ DateFullArguments }
-type DateOnlySetWArguments struct{ DateOnlyArguments }
-type TimeSetWArguments struct{ TimeArguments }
-type TimestampSetWArguments struct{ TimestampArguments }
+// type DateFullSetWArguments struct{ DateFullArguments }
+// type DateOnlySetWArguments struct{ DateOnlyArguments }
+// type TimeSetWArguments struct{ TimeArguments }
+// type TimestampSetWArguments struct{ TimestampArguments }
+type DateFullSetWArguments DateFullArguments
+type DateOnlySetWArguments DateOnlyArguments
+type TimeSetWArguments TimeArguments
+type TimestampSetWArguments TimestampArguments
 
-//Updates supported:
-//SetDateFull, SetDate, SetDateOnly, SetTime, IncDate, IncMS, SetMS
+// Updates supported:
+// SetDateFull, SetDate, SetDateOnly, SetTime, IncDate, IncMS, SetMS
+type SetMSSetW int64
+type IncMSSetW int64
 
 // Note: Keep in mind that Vcs may be the same for two operations in the same txn - this is OK as long as all comparisons take this into consideration.
 type DownstreamSetTsSetW struct {
 	Value     int64
 	Vc        clocksi.Timestamp //Vc of the replica at the time of execution. The position of replicaID is already updated with a new ts.
-	ReplicaID int16             //ReplicaID of the replica that issued the set operation. Used to distinguish concurrent sets with the same ts.
+	ReplicaID uint16            //ReplicaID of the replica that issued the set operation. Used to distinguish concurrent sets with the same ts.
 }
 
 type DownstreamIncTsSetW struct {
@@ -93,34 +100,43 @@ type SetTsSetWEffect struct {
 	OldClk       clocksi.Timestamp
 	OldValue     int64
 	OldTs        int64
-	OldReplicaID int16
+	OldReplicaID uint16
 }
 
 type IncTsSetWEffect struct {
 	Inc int64 //Value that was incremented; to undo, subtract this.
 }
 
-// States and ops are the same from SimpleDateCRDT; queries are embedded from SimpleDateCRDT.
+// States and most ops are the same from SimpleDateCRDT; queries are embedded from SimpleDateCRDT.
 
 func (crdt *SetWDateCrdt) GetCRDTType() proto.CRDTType { return proto.CRDTType_SETW_DATE }
+func (crdt *SetWDateCrdt) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
+
+// Ops
+func (args SetMSSetW) GetCRDTType() proto.CRDTType { return proto.CRDTType_SETW_DATE }
+func (args IncMSSetW) GetCRDTType() proto.CRDTType { return proto.CRDTType_SETW_DATE }
+func (args SetMSSetW) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
+func (args IncMSSetW) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 
 // Downstreams
 func (args DownstreamSetTsSetW) GetCRDTType() proto.CRDTType { return proto.CRDTType_SETW_DATE }
 func (args DownstreamIncTsSetW) GetCRDTType() proto.CRDTType { return proto.CRDTType_SETW_DATE }
+func (args DownstreamSetTsSetW) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
+func (args DownstreamIncTsSetW) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 func (args DownstreamSetTsSetW) MustReplicate() bool         { return true }
 func (args DownstreamIncTsSetW) MustReplicate() bool         { return true }
 
-func (crdt *SetWDateCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
+func (crdt *SetWDateCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	return &SetWDateCrdt{
-		CRDTVM: (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete),
+		CRDTVM: (&genericInversibleCRDT{}).initialize(crdt),
 		setClk: clocksi.MinimumTs, setValue: GregorianToTs(1, 1, 1), setTs: math.MinInt64, setReplicaID: math.MaxInt16,
-		localReplicaID: replicaID, inc: 0, currClk: (*startTs).Copy(),
+		localReplicaID: replicaID, inc: 0, currClk: clocksi.NewSliceTimestamp(),
 	}
 }
 
-// Used to initialize when building a CRDT from a remote snapshot
-func (crdt *SetWDateCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID int16) (sameCRDT *SetWDateCrdt) {
-	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete)
+// Used to initialize when building a CRDT from a remote snapshot. Not used in this CRDT (FromProtoState does its own initialization)
+func (crdt *SetWDateCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *SetWDateCrdt) {
+	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
 
@@ -128,7 +144,7 @@ func (crdt *SetWDateCrdt) IsBigCRDT() bool { return false }
 
 func (crdt *SetWDateCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
 	ms := crdt.setValue + crdt.inc
-	if updsNotYetApplied != nil && len(updsNotYetApplied) > 0 {
+	if len(updsNotYetApplied) > 0 {
 		ms = crdt.getTsWithUpdsNotYetApplied(updsNotYetApplied)
 	}
 	return dateReadHelper(args, ms)
@@ -140,7 +156,7 @@ func (crdt *SetWDateCrdt) getTsWithUpdsNotYetApplied(updsNotYetApplied []UpdateA
 	for _, upd := range updsNotYetApplied {
 		ms := upd.(DateUpd).ToMS()
 		switch upd.(type) {
-		case SetDateFull, SetMS:
+		case SetDateFull, SetMSSetW:
 			updMs = ms
 		case SetDate:
 			updMs = updMs%1000 + ms //Keep the original ms.
@@ -148,7 +164,7 @@ func (crdt *SetWDateCrdt) getTsWithUpdsNotYetApplied(updsNotYetApplied []UpdateA
 			updMs = updMs%msPerDay + ms //Keep the original hour+min+sec+ms.
 		case SetTime:
 			updMs = (updMs/msPerDay)*msPerDay + ms //Keep the original day+month+year, but set the time to the new one.
-		case IncDate, IncMS:
+		case IncDate, IncMSSetW:
 			updMs += ms
 		}
 	}
@@ -161,17 +177,31 @@ func (crdt *SetWDateCrdt) Update(args UpdateArguments) (downstreamArgs Downstrea
 		switch args.(type) {
 		case SetDate, SetDateOnly, SetDateFull: //We want the direct difference, and issue an increment representing it
 			return DownstreamSetTsSetW{Value: ms, Vc: nextVc, ReplicaID: crdt.localReplicaID}
-		case IncDate, IncMS:
+		case IncDate, IncMSSetW:
 			return DownstreamIncTsSetW{Inc: ms, Vc: nextVc}
 		case SetTime:
 			currMsDay := HourMinSecToMs(ExtractHourMinSec(ms))
 			return DownstreamSetTsIncW{Value: ms + currMsDay, Vc: nextVc, ReplicaID: crdt.localReplicaID}
 		}
+	} else if multiUpd, ok := args.(MultiUpd); ok {
+		multiDowns := make(MultiUpd, len(multiUpd))
+		for i, innerUpd := range multiUpd {
+			multiDowns[i] = crdt.Update(innerUpd)
+		}
+		return multiDowns
+	} else {
+		fmt.Printf("[SetWDateCrdt][Update]Unknown update type: %v (%T)\n", args, args)
 	}
 	return
 }
 
 func (crdt *SetWDateCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs DownstreamArguments) (otherDownstreamArgs DownstreamArguments) {
+	if multiUpd, ok := downstreamArgs.(MultiUpd); ok {
+		for _, upd := range multiUpd {
+			crdt.Downstream(updTs, upd.(DownstreamArguments))
+		}
+		return nil
+	}
 	crdt.addToHistory(&updTs, &downstreamArgs, crdt.applyDownstream(downstreamArgs))
 	return nil
 }
@@ -182,6 +212,8 @@ func (crdt *SetWDateCrdt) applyDownstream(downstreamArgs DownstreamArguments) (e
 		effect = crdt.applyIncTs(typedArgs.Inc, typedArgs.Vc)
 	case DownstreamSetTsSetW:
 		effect = crdt.applySetTs(typedArgs.Value, typedArgs.ReplicaID, typedArgs.Vc)
+	default:
+		fmt.Printf("[SetWDate][Downstream]Unsupported downstream type %v (%T)\n", downstreamArgs, downstreamArgs)
 	}
 	return
 }
@@ -198,7 +230,7 @@ func (crdt *SetWDateCrdt) applyIncTs(opInc int64, opVc clocksi.Timestamp) (effec
 	return &effectValue
 }
 
-func (crdt *SetWDateCrdt) applySetTs(opSet int64, opReplicaID int16, opVc clocksi.Timestamp) (effect *Effect) {
+func (crdt *SetWDateCrdt) applySetTs(opSet int64, opReplicaID uint16, opVc clocksi.Timestamp) (effect *Effect) {
 	compResult := opVc.Compare(crdt.setClk)
 	var effectValue Effect
 	if compResult == clocksi.HigherTs || compResult == clocksi.EqualTs || compResult == clocksi.ConcurrentTs && opReplicaID <= crdt.setReplicaID {
@@ -250,37 +282,53 @@ func (crdt *SetWDateCrdt) undoEffect(effect *Effect) {
 
 func (crdt *SetWDateCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
 
-//Protobuf functions - most are already defined in simpleDateCrdt. Only need to define downstream and ProtoState.
+///Protobuf functions - most are already defined in simpleDateCrdt. Only need to define downstream, ProtoState and Inc/SetMS.
+
+func (crdtOp SetMSSetW) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
+	return SetMSIncW(protobuf.GetDateop().GetSetMS().GetMs())
+}
+
+func (crdtOp SetMSSetW) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Dateop{Dateop: &proto.ApbDateUpdate{Upd: &proto.ApbDateUpdate_SetMS{SetMS: &proto.ApbSetMS{Ms: pb.Int64(int64(crdtOp))}}}}}
+}
+
+func (crdtOp IncMSSetW) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
+	return IncMSIncW(protobuf.GetDateop().GetIncMS().GetInc())
+}
+
+func (crdtOp IncMSSetW) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Dateop{Dateop: &proto.ApbDateUpdate{Upd: &proto.ApbDateUpdate_IncMS{IncMS: &proto.ApbIncMS{Inc: pb.Int64(int64(crdtOp))}}}}}
+}
 
 func (downOp DownstreamIncTsSetW) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
 	downProto := protobuf.GetSetWDateOp().GetSetWInc()
-	return DownstreamIncTsSetW{Inc: downProto.GetInc(), Vc: clocksi.ClockSiTimestamp{}.FromBytes(downProto.GetVc())}
+	return DownstreamIncTsSetW{Inc: downProto.GetInc(), Vc: clocksi.SliceTimestamp{}.FromBytes(downProto.GetVc())}
 }
 
 func (downOp DownstreamIncTsSetW) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	return &proto.ProtoOpDownstream{SetWDateOp: &proto.ProtoSetWDateDownstream{SetWInc: &proto.ProtoSetWIncDownstream{Inc: &downOp.Inc, Vc: downOp.Vc.ToBytes()}}}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_SetWDateOp{SetWDateOp: &proto.ProtoSetWDateDownstream{SetWInc: &proto.ProtoSetWIncDownstream{Inc: &downOp.Inc, Vc: downOp.Vc.ToBytes()}}}}
 }
 
 func (downOp DownstreamSetTsSetW) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
 	downProto := protobuf.GetSetWDateOp().GetSetWSet()
-	return DownstreamSetTsSetW{Value: downProto.GetValue(), Vc: clocksi.ClockSiTimestamp{}.FromBytes(downProto.GetVc()), ReplicaID: int16(downProto.GetReplicaID())}
+	return DownstreamSetTsSetW{Value: downProto.GetValue(), Vc: clocksi.SliceTimestamp{}.FromBytes(downProto.GetVc()), ReplicaID: uint16(downProto.GetReplicaID())}
 }
 
 func (downOp DownstreamSetTsSetW) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	return &proto.ProtoOpDownstream{SetWDateOp: &proto.ProtoSetWDateDownstream{SetWSet: &proto.ProtoSetWSetDownstream{Value: &downOp.Value, Vc: downOp.Vc.ToBytes(), ReplicaID: pb.Int32(int32(downOp.ReplicaID))}}}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_SetWDateOp{SetWDateOp: &proto.ProtoSetWDateDownstream{SetWSet: &proto.ProtoSetWSetDownstream{Value: &downOp.Value, Vc: downOp.Vc.ToBytes(), ReplicaID: pb.Int32(int32(downOp.ReplicaID))}}}}
 }
 
 func (crdt *SetWDateCrdt) ToProtoState() (state *proto.ProtoState) {
-	return &proto.ProtoState{SetWDate: &proto.ProtoSetWDateState{
+	return &proto.ProtoState{State: &proto.ProtoState_SetWDate{SetWDate: &proto.ProtoSetWDateState{
 		SetClk: crdt.setClk.ToBytes(), SetValue: pb.Int64(crdt.setValue), SetTs: pb.Int64(crdt.setTs),
-		SetReplicaID: pb.Int32(int32(crdt.setReplicaID)), Inc: pb.Int64(crdt.inc), CurrClk: crdt.currClk.ToBytes()}}
+		SetReplicaID: pb.Int32(int32(crdt.setReplicaID)), Inc: pb.Int64(crdt.inc), CurrClk: crdt.currClk.ToBytes()}}}
 }
 
-func (crdt *SetWDateCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID int16) (sameCRDT *SetWDateCrdt) {
+func (crdt *SetWDateCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (sameCRDT *SetWDateCrdt) {
 	protoState := proto.GetSetWDate()
-	crdt.setClk, crdt.setValue, crdt.setTs = clocksi.ClockSiTimestamp{}.FromBytes(protoState.GetSetClk()), protoState.GetSetValue(), protoState.GetSetTs()
-	crdt.setReplicaID, crdt.localReplicaID, crdt.inc = int16(protoState.GetSetReplicaID()), replicaID, protoState.GetInc()
-	crdt.currClk = clocksi.ClockSiTimestamp{}.FromBytes(protoState.GetCurrClk())
+	crdt.setClk, crdt.setValue, crdt.setTs = clocksi.SliceTimestamp{}.FromBytes(protoState.GetSetClk()), protoState.GetSetValue(), protoState.GetSetTs()
+	crdt.setReplicaID, crdt.localReplicaID, crdt.inc = uint16(protoState.GetSetReplicaID()), replicaID, protoState.GetInc()
+	crdt.currClk = clocksi.SliceTimestamp{}.FromBytes(protoState.GetCurrClk())
 	return crdt
 }
 

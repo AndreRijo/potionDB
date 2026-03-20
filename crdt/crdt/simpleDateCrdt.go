@@ -1,8 +1,10 @@
 package crdt
 
 import (
+	"fmt"
 	"potionDB/crdt/clocksi"
 	"potionDB/crdt/proto"
+	"potionDB/shared/shared"
 
 	pb "google.golang.org/protobuf/proto"
 )
@@ -54,6 +56,12 @@ type DateOnlyArguments struct{}
 type TimeArguments struct{}
 type TimestampArguments struct{} //Returns the internal ms. 0 value is Julian day 0, which is 24th November 4714 BC in the Gregorian calendar.
 
+type DateType int8
+
+const (
+	SimpleDate, SetWDate, IncWDate, SetOnlyDate DateType = 0, 1, 2, 3
+)
+
 type SetDate struct {
 	Year   int16
 	Month  int8
@@ -61,6 +69,7 @@ type SetDate struct {
 	Hour   int8
 	Minute int8
 	Second int8
+	DateType
 }
 
 type SetDateFull struct {
@@ -71,12 +80,14 @@ type SetDateFull struct {
 	Hour        int8
 	Minute      int8
 	Second      int8
+	DateType
 }
 
 type SetDateOnly struct {
 	Year  int16
 	Month int8
 	Day   int8
+	DateType
 }
 
 type SetTime struct {
@@ -84,9 +95,10 @@ type SetTime struct {
 	Hour        int8
 	Minute      int8
 	Second      int8
+	DateType
 }
 
-type SetMS int64 //This is not only the millisecond part, but rather the whole date represented as a single int64.
+type SetMSSimple int64 //This is not only the millisecond part, but rather the whole date represented as a single int64.
 
 type IncDate struct { //Supports receiving negative numbers
 	Year   int16
@@ -95,9 +107,36 @@ type IncDate struct { //Supports receiving negative numbers
 	Hour   int8
 	Minute int8
 	Second int8
+	DateType
 }
 
-type IncMS int64 //Use negative numbers to decrement
+type IncDateFull struct {
+	Millisecond int16
+	Year        int16
+	Month       int8
+	Day         int8
+	Hour        int8
+	Minute      int8
+	Second      int8
+	DateType
+}
+
+type IncDateOnly struct {
+	Year  int16
+	Month int8
+	Day   int8
+	DateType
+}
+
+type IncTime struct {
+	Millisecond int16
+	Hour        int8
+	Minute      int8
+	Second      int8
+	DateType
+}
+
+type IncMSSimple int64 //Use negative numbers to decrement
 
 type SetInitialDate struct {
 	Year         int16
@@ -107,6 +146,7 @@ type SetInitialDate struct {
 	Minute       int8
 	Second       int8
 	Milliseconds int16
+	DateType
 }
 
 type DateUpd interface {
@@ -255,50 +295,76 @@ func TimestampToGregorian(timestamp uint64) (year, month, day int) {
 //No guarantees are made regarding dates originated from negative dateTs.
 
 func (crdt *SimpleDateCrdt) GetCRDTType() proto.CRDTType { return proto.CRDTType_SIMPLE_DATE }
+func (crdt *SimpleDateCrdt) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 
 // Ops
-func (args SetDate) GetCRDTType() proto.CRDTType        { return proto.CRDTType_SIMPLE_DATE }
-func (args SetDateFull) GetCRDTType() proto.CRDTType    { return proto.CRDTType_SIMPLE_DATE }
-func (args SetDateOnly) GetCRDTType() proto.CRDTType    { return proto.CRDTType_SIMPLE_DATE }
-func (args SetTime) GetCRDTType() proto.CRDTType        { return proto.CRDTType_SIMPLE_DATE }
-func (args SetMS) GetCRDTType() proto.CRDTType          { return proto.CRDTType_SIMPLE_DATE }
-func (args IncDate) GetCRDTType() proto.CRDTType        { return proto.CRDTType_SIMPLE_DATE }
-func (args IncMS) GetCRDTType() proto.CRDTType          { return proto.CRDTType_SIMPLE_DATE }
-func (args SetInitialDate) GetCRDTType() proto.CRDTType { return proto.CRDTType_SIMPLE_DATE }
+func (args SetDate) GetCRDTType() proto.CRDTType        { return DateTypeToCRDTType(args.DateType) }
+func (args SetDateFull) GetCRDTType() proto.CRDTType    { return DateTypeToCRDTType(args.DateType) }
+func (args SetDateOnly) GetCRDTType() proto.CRDTType    { return DateTypeToCRDTType(args.DateType) }
+func (args SetTime) GetCRDTType() proto.CRDTType        { return DateTypeToCRDTType(args.DateType) }
+func (args SetMSSimple) GetCRDTType() proto.CRDTType    { return proto.CRDTType_SIMPLE_DATE }
+func (args IncDate) GetCRDTType() proto.CRDTType        { return DateTypeToCRDTType(args.DateType) }
+func (args IncDateFull) GetCRDTType() proto.CRDTType    { return DateTypeToCRDTType(args.DateType) }
+func (args IncDateOnly) GetCRDTType() proto.CRDTType    { return DateTypeToCRDTType(args.DateType) }
+func (args IncTime) GetCRDTType() proto.CRDTType        { return DateTypeToCRDTType(args.DateType) }
+func (args IncMSSimple) GetCRDTType() proto.CRDTType    { return proto.CRDTType_SIMPLE_DATE }
+func (args SetInitialDate) GetCRDTType() proto.CRDTType { return DateTypeToCRDTType(args.DateType) }
+func (args SetDate) GetDATAType() proto.DATAType        { return proto.DATAType_DEFAULT }
+func (args SetDateFull) GetDATAType() proto.DATAType    { return proto.DATAType_DEFAULT }
+func (args SetDateOnly) GetDATAType() proto.DATAType    { return proto.DATAType_DEFAULT }
+func (args SetTime) GetDATAType() proto.DATAType        { return proto.DATAType_DEFAULT }
+func (args SetMSSimple) GetDATAType() proto.DATAType    { return proto.DATAType_DEFAULT }
+func (args IncDate) GetDATAType() proto.DATAType        { return proto.DATAType_DEFAULT }
+func (args IncDateFull) GetDATAType() proto.DATAType    { return proto.DATAType_DEFAULT }
+func (args IncDateOnly) GetDATAType() proto.DATAType    { return proto.DATAType_DEFAULT }
+func (args IncTime) GetDATAType() proto.DATAType        { return proto.DATAType_DEFAULT }
+func (args IncMSSimple) GetDATAType() proto.DATAType    { return proto.DATAType_DEFAULT }
+func (args SetInitialDate) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 
 // Downstreams
 func (args DownstreamIncMS) GetCRDTType() proto.CRDTType          { return proto.CRDTType_SIMPLE_DATE }
 func (args DownstreamSetInitialDate) GetCRDTType() proto.CRDTType { return proto.CRDTType_SIMPLE_DATE }
+func (args DownstreamIncMS) GetDATAType() proto.DATAType          { return proto.DATAType_DEFAULT }
+func (args DownstreamSetInitialDate) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 func (args DownstreamIncMS) MustReplicate() bool                  { return true }
 func (args DownstreamSetInitialDate) MustReplicate() bool         { return true }
 
 // States
 func (state DateState) GetCRDTType() proto.CRDTType      { return proto.CRDTType_SIMPLE_DATE }
 func (state DateState) GetREADType() proto.READType      { return proto.READType_FULL }
+func (state DateState) GetDATAType() proto.DATAType      { return proto.DATAType_DEFAULT }
 func (state DateFullState) GetCRDTType() proto.CRDTType  { return proto.CRDTType_SIMPLE_DATE }
-func (state DateFullState) GetREADType() proto.READType  { return proto.READType_FULL }
+func (state DateFullState) GetREADType() proto.READType  { return proto.READType_DATE_FULL }
+func (state DateFullState) GetDATAType() proto.DATAType  { return proto.DATAType_DEFAULT }
 func (state DateOnlyState) GetCRDTType() proto.CRDTType  { return proto.CRDTType_SIMPLE_DATE }
-func (state DateOnlyState) GetREADType() proto.READType  { return proto.READType_FULL }
+func (state DateOnlyState) GetREADType() proto.READType  { return proto.READType_DATE_ONLY }
+func (state DateOnlyState) GetDATAType() proto.DATAType  { return proto.DATAType_DEFAULT }
 func (state TimeState) GetCRDTType() proto.CRDTType      { return proto.CRDTType_SIMPLE_DATE }
-func (state TimeState) GetREADType() proto.READType      { return proto.READType_FULL }
+func (state TimeState) GetREADType() proto.READType      { return proto.READType_DATE_TIME_ONLY }
+func (state TimeState) GetDATAType() proto.DATAType      { return proto.DATAType_DEFAULT }
 func (state TimestampState) GetCRDTType() proto.CRDTType { return proto.CRDTType_SIMPLE_DATE }
 func (state TimestampState) GetREADType() proto.READType { return proto.READType_DATE_TIMESTAMP }
+func (state TimestampState) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 
 // Queries
 func (args DateFullArguments) GetCRDTType() proto.CRDTType  { return proto.CRDTType_SIMPLE_DATE }
 func (args DateFullArguments) GetREADType() proto.READType  { return proto.READType_DATE_FULL }
+func (args DateFullArguments) GetDATAType() proto.DATAType  { return proto.DATAType_DEFAULT }
 func (args DateFullArguments) HasInnerReads() bool          { return false }
 func (args DateFullArguments) HasVariables() bool           { return false }
 func (args DateOnlyArguments) GetCRDTType() proto.CRDTType  { return proto.CRDTType_SIMPLE_DATE }
 func (args DateOnlyArguments) GetREADType() proto.READType  { return proto.READType_DATE_ONLY }
+func (args DateOnlyArguments) GetDATAType() proto.DATAType  { return proto.DATAType_DEFAULT }
 func (args DateOnlyArguments) HasInnerReads() bool          { return false }
 func (args DateOnlyArguments) HasVariables() bool           { return false }
 func (args TimeArguments) GetCRDTType() proto.CRDTType      { return proto.CRDTType_SIMPLE_DATE }
 func (args TimeArguments) GetREADType() proto.READType      { return proto.READType_DATE_TIME_ONLY }
+func (args TimeArguments) GetDATAType() proto.DATAType      { return proto.DATAType_DEFAULT }
 func (args TimeArguments) HasInnerReads() bool              { return false }
 func (args TimeArguments) HasVariables() bool               { return false }
 func (args TimestampArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_SIMPLE_DATE }
 func (args TimestampArguments) GetREADType() proto.READType { return proto.READType_DATE_TIMESTAMP }
+func (args TimestampArguments) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 func (args TimestampArguments) HasInnerReads() bool         { return false }
 func (args TimestampArguments) HasVariables() bool          { return false }
 
@@ -317,21 +383,32 @@ func (args SetTime) ToMS() int64 {
 func (args IncDate) ToMS() int64 {
 	return HourMinSecToMs(args.Hour, args.Minute, args.Second) + GregorianToTs(int(args.Year), int(args.Month), int(args.Day))
 }
-func (args IncMS) ToMS() int64 { return int64(args) }
+func (args IncMSSimple) ToMS() int64 { return int64(args) }
 func (args SetInitialDate) ToMS() int64 {
 	return HourMinSecToMs(args.Hour, args.Minute, args.Second) + GregorianToTs(int(args.Year), int(args.Month), int(args.Day)) + int64(args.Milliseconds)
 }
 
-func (crdt *SimpleDateCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
+func DateTypeToCRDTType(dateType DateType) proto.CRDTType {
+	if dateType == SimpleDate {
+		return proto.CRDTType_SIMPLE_DATE
+	} else if dateType == SetWDate {
+		return proto.CRDTType_SETW_DATE
+	} else if dateType == IncWDate {
+		return proto.CRDTType_INCW_DATE
+	}
+	return proto.CRDTType_SET_ONLY_DATE
+}
+
+func (crdt *SimpleDateCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	return &SimpleDateCrdt{
-		CRDTVM: (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete),
+		CRDTVM: (&genericInversibleCRDT{}).initialize(crdt),
 		dateTs: GregorianToTs(1, 1, 1),
 	}
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *SimpleDateCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID int16) (sameCRDT *SimpleDateCrdt) {
-	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete)
+func (crdt *SimpleDateCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *SimpleDateCrdt) {
+	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
 
@@ -339,7 +416,7 @@ func (crdt *SimpleDateCrdt) IsBigCRDT() bool { return false }
 
 func (crdt *SimpleDateCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
 	ms := crdt.dateTs
-	if updsNotYetApplied != nil && len(updsNotYetApplied) > 0 {
+	if len(updsNotYetApplied) > 0 {
 		ms = crdt.getTsWithUpdsNotYetApplied(updsNotYetApplied)
 	}
 	return dateReadHelper(args, ms)
@@ -384,7 +461,7 @@ func (crdt *SimpleDateCrdt) getTsWithUpdsNotYetApplied(updsNotYetApplied []Updat
 	for _, upd := range updsNotYetApplied {
 		ms := upd.(DateUpd).ToMS()
 		switch upd.(type) {
-		case SetDateFull, SetMS, SetInitialDate:
+		case SetDateFull, SetMSSimple, SetInitialDate:
 			updMs = ms
 		case SetDate:
 			updMs = updMs%1000 + ms //Keep the original ms.
@@ -392,7 +469,7 @@ func (crdt *SimpleDateCrdt) getTsWithUpdsNotYetApplied(updsNotYetApplied []Updat
 			updMs = updMs%msPerDay + ms //Keep the original hour+min+sec+ms.
 		case SetTime:
 			updMs = (updMs/msPerDay)*msPerDay + ms //Keep the original day+month+year, but set the time to the new one.
-		case IncDate, IncMS:
+		case IncDate, IncMSSimple:
 			updMs += ms
 		}
 	}
@@ -403,9 +480,9 @@ func (crdt *SimpleDateCrdt) Update(args UpdateArguments) (downstreamArgs Downstr
 	if dateUpd, ok := args.(DateUpd); ok {
 		ms := dateUpd.ToMS()
 		switch args.(type) {
-		case SetDate, SetDateOnly, SetDateFull, SetMS: //We want the direct difference, and issue an increment representing it
+		case SetDate, SetDateOnly, SetDateFull, SetMSSimple: //We want the direct difference, and issue an increment representing it
 			return DownstreamIncMS(ms - crdt.dateTs)
-		case IncDate, IncMS:
+		case IncDate, IncMSSimple:
 			return DownstreamIncMS(ms)
 		case SetTime: //Special case: Find the current hour, min, ss and ms and then do the difference.
 			currH, currM, currS, currMS := (crdt.dateTs/3600000)%24, (crdt.dateTs/60000)%60, (crdt.dateTs/1000)%60, crdt.dateTs%1000
@@ -414,11 +491,25 @@ func (crdt *SimpleDateCrdt) Update(args UpdateArguments) (downstreamArgs Downstr
 		case SetInitialDate:
 			return DownstreamSetInitialDate(ms)
 		}
+	} else if multiUpd, ok := args.(MultiUpd); ok {
+		multiDowns := make(MultiUpd, len(multiUpd))
+		for i, innerUpd := range multiUpd {
+			multiDowns[i] = crdt.Update(innerUpd)
+		}
+		return multiDowns
+	} else {
+		fmt.Printf("[SimpleDateCrdt][Update]Unknown update type: %v (%T)\n", args, args)
 	}
 	return
 }
 
 func (crdt *SimpleDateCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs DownstreamArguments) (otherDownstreamArgs DownstreamArguments) {
+	if multiUpd, ok := downstreamArgs.(MultiUpd); ok {
+		for _, upd := range multiUpd {
+			crdt.Downstream(updTs, upd.(DownstreamArguments))
+		}
+		return nil
+	}
 	crdt.addToHistory(&updTs, &downstreamArgs, crdt.applyDownstream(downstreamArgs))
 	return nil
 }
@@ -429,6 +520,8 @@ func (crdt *SimpleDateCrdt) applyDownstream(downstreamArgs DownstreamArguments) 
 		effect = crdt.applyInc(int64(typedArgs))
 	case DownstreamSetInitialDate:
 		effect = crdt.applyInitializer(int64(typedArgs))
+	default:
+		fmt.Printf("[SimpleDate][Downstream]Unsupported downstream type %v (%T)\n", downstreamArgs, downstreamArgs)
 	}
 	return
 }
@@ -535,10 +628,10 @@ func (crdtOp SetDate) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op U
 }
 
 func (crdtOp SetDate) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	return &proto.ApbUpdateOperation{Dateop: &proto.ApbDateUpdate{Set: &proto.ApbDateSet{
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Dateop{Dateop: &proto.ApbDateUpdate{Upd: &proto.ApbDateUpdate_Set{Set: &proto.ApbDateSet{
 		Year: pb.Int32(int32(crdtOp.Year)), Month: pb.Int32(int32(crdtOp.Month)), Day: pb.Int32(int32(crdtOp.Day)),
 		Hour: pb.Int32(int32(crdtOp.Hour)), Minute: pb.Int32(int32(crdtOp.Minute)), Second: pb.Int32(int32(crdtOp.Second)),
-	}}}
+	}}}}}
 }
 
 func (crdtOp SetDateFull) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -549,10 +642,10 @@ func (crdtOp SetDateFull) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (
 }
 
 func (crdtOp SetDateFull) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	return &proto.ApbUpdateOperation{Dateop: &proto.ApbDateUpdate{Set: &proto.ApbDateSet{
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Dateop{Dateop: &proto.ApbDateUpdate{Upd: &proto.ApbDateUpdate_Set{Set: &proto.ApbDateSet{
 		Year: pb.Int32(int32(crdtOp.Year)), Month: pb.Int32(int32(crdtOp.Month)), Day: pb.Int32(int32(crdtOp.Day)),
 		Hour: pb.Int32(int32(crdtOp.Hour)), Minute: pb.Int32(int32(crdtOp.Minute)), Second: pb.Int32(int32(crdtOp.Second)), Millisecond: pb.Int32(int32(crdtOp.Millisecond)),
-	}}}
+	}}}}}
 }
 
 func (crdtOp SetDateOnly) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -562,9 +655,8 @@ func (crdtOp SetDateOnly) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (
 }
 
 func (crdtOp SetDateOnly) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	return &proto.ApbUpdateOperation{Dateop: &proto.ApbDateUpdate{DateSet: &proto.ApbDateOnlySet{
-		Year: pb.Int32(int32(crdtOp.Year)), Month: pb.Int32(int32(crdtOp.Month)), Day: pb.Int32(int32(crdtOp.Day)),
-	}}}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Dateop{Dateop: &proto.ApbDateUpdate{Upd: &proto.ApbDateUpdate_DateSet{DateSet: &proto.ApbDateOnlySet{
+		Year: pb.Int32(int32(crdtOp.Year)), Month: pb.Int32(int32(crdtOp.Month)), Day: pb.Int32(int32(crdtOp.Day))}}}}}
 }
 
 func (crdtOp SetTime) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -574,17 +666,16 @@ func (crdtOp SetTime) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op U
 }
 
 func (crdtOp SetTime) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	return &proto.ApbUpdateOperation{Dateop: &proto.ApbDateUpdate{TimeSet: &proto.ApbTimeOnlySet{
-		Hour: pb.Int32(int32(crdtOp.Hour)), Minute: pb.Int32(int32(crdtOp.Minute)), Second: pb.Int32(int32(crdtOp.Second)),
-	}}}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Dateop{Dateop: &proto.ApbDateUpdate{Upd: &proto.ApbDateUpdate_TimeSet{TimeSet: &proto.ApbTimeOnlySet{
+		Hour: pb.Int32(int32(crdtOp.Hour)), Minute: pb.Int32(int32(crdtOp.Minute)), Second: pb.Int32(int32(crdtOp.Second))}}}}}
 }
 
-func (crdtOp SetMS) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
-	return SetMS(protobuf.GetDateop().GetSetMS().GetMs())
+func (crdtOp SetMSSimple) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
+	return SetMSSimple(protobuf.GetDateop().GetSetMS().GetMs())
 }
 
-func (crdtOp SetMS) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	return &proto.ApbUpdateOperation{Dateop: &proto.ApbDateUpdate{SetMS: &proto.ApbSetMS{Ms: pb.Int64(int64(crdtOp))}}}
+func (crdtOp SetMSSimple) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Dateop{Dateop: &proto.ApbDateUpdate{Upd: &proto.ApbDateUpdate_SetMS{SetMS: &proto.ApbSetMS{Ms: pb.Int64(int64(crdtOp))}}}}}
 }
 
 func (crdtOp IncDate) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -595,18 +686,55 @@ func (crdtOp IncDate) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op U
 }
 
 func (crdtOp IncDate) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	return &proto.ApbUpdateOperation{Dateop: &proto.ApbDateUpdate{Inc: &proto.ApbDateInc{
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Dateop{Dateop: &proto.ApbDateUpdate{Upd: &proto.ApbDateUpdate_Inc{Inc: &proto.ApbDateInc{
 		Year: pb.Int32(int32(crdtOp.Year)), Month: pb.Int32(int32(crdtOp.Month)), Day: pb.Int32(int32(crdtOp.Day)),
 		Hour: pb.Int32(int32(crdtOp.Hour)), Minute: pb.Int32(int32(crdtOp.Minute)), Second: pb.Int32(int32(crdtOp.Second)),
-	}}}
+	}}}}}
 }
 
-func (crdtOp IncMS) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
-	return IncMS(protobuf.GetDateop().GetIncMS().GetInc())
+func (crdtOp IncDateFull) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
+	dateProto := protobuf.GetDateop().GetInc()
+	crdtOp.Year, crdtOp.Month, crdtOp.Day = int16(dateProto.GetYear()), int8(dateProto.GetMonth()), int8(dateProto.GetDay())
+	crdtOp.Hour, crdtOp.Minute, crdtOp.Second, crdtOp.Millisecond = int8(dateProto.GetHour()), int8(dateProto.GetMinute()), int8(dateProto.GetSecond()), int16(dateProto.GetMillisecond())
+	return crdtOp
 }
 
-func (crdtOp IncMS) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	return &proto.ApbUpdateOperation{Dateop: &proto.ApbDateUpdate{IncMS: &proto.ApbIncMS{Inc: pb.Int64(int64(crdtOp))}}}
+func (crdtOp IncDateFull) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Dateop{Dateop: &proto.ApbDateUpdate{Upd: &proto.ApbDateUpdate_Inc{Inc: &proto.ApbDateInc{
+		Year: pb.Int32(int32(crdtOp.Year)), Month: pb.Int32(int32(crdtOp.Month)), Day: pb.Int32(int32(crdtOp.Day)),
+		Hour: pb.Int32(int32(crdtOp.Hour)), Minute: pb.Int32(int32(crdtOp.Minute)), Second: pb.Int32(int32(crdtOp.Second)),
+		Millisecond: pb.Int32(int32(crdtOp.Millisecond)),
+	}}}}}
+}
+
+func (crdtOp IncDateOnly) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
+	dateProto := protobuf.GetDateop().GetDateInc()
+	crdtOp.Year, crdtOp.Month, crdtOp.Day = int16(dateProto.GetYear()), int8(dateProto.GetMonth()), int8(dateProto.GetDay())
+	return crdtOp
+}
+
+func (crdtOp IncDateOnly) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Dateop{Dateop: &proto.ApbDateUpdate{Upd: &proto.ApbDateUpdate_DateInc{DateInc: &proto.ApbDateOnlyInc{
+		Year: pb.Int32(int32(crdtOp.Year)), Month: pb.Int32(int32(crdtOp.Month)), Day: pb.Int32(int32(crdtOp.Day))}}}}}
+}
+
+func (crdtOp IncTime) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
+	timeProto := protobuf.GetDateop().GetTimeInc()
+	crdtOp.Hour, crdtOp.Minute, crdtOp.Second, crdtOp.Millisecond = int8(timeProto.GetHour()), int8(timeProto.GetMinute()), int8(timeProto.GetSecond()), int16(timeProto.GetMillisecond())
+	return crdtOp
+}
+
+func (crdtOp IncTime) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Dateop{Dateop: &proto.ApbDateUpdate{Upd: &proto.ApbDateUpdate_TimeInc{TimeInc: &proto.ApbTimeOnlyInc{
+		Hour: pb.Int32(int32(crdtOp.Hour)), Minute: pb.Int32(int32(crdtOp.Minute)), Second: pb.Int32(int32(crdtOp.Second)), Millisecond: pb.Int32(int32(crdtOp.Millisecond))}}}}}
+}
+
+func (crdtOp IncMSSimple) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
+	return IncMSSimple(protobuf.GetDateop().GetIncMS().GetInc())
+}
+
+func (crdtOp IncMSSimple) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Dateop{Dateop: &proto.ApbDateUpdate{Upd: &proto.ApbDateUpdate_IncMS{IncMS: &proto.ApbIncMS{Inc: pb.Int64(int64(crdtOp))}}}}}
 }
 
 func (crdtOp SetInitialDate) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -617,10 +745,10 @@ func (crdtOp SetInitialDate) FromUpdateObject(protobuf *proto.ApbUpdateOperation
 }
 
 func (crdtOp SetInitialDate) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	return &proto.ApbUpdateOperation{Dateop: &proto.ApbDateUpdate{Initialize: &proto.ApbDateInitialize{
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Dateop{Dateop: &proto.ApbDateUpdate{Upd: &proto.ApbDateUpdate_Initialize{Initialize: &proto.ApbDateInitialize{
 		Year: pb.Int32(int32(crdtOp.Year)), Month: pb.Int32(int32(crdtOp.Month)), Day: pb.Int32(int32(crdtOp.Day)),
 		Hour: pb.Int32(int32(crdtOp.Hour)), Minute: pb.Int32(int32(crdtOp.Minute)), Second: pb.Int32(int32(crdtOp.Second)),
-	}}}
+	}}}}}
 }
 
 func (crdtState DateState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
@@ -630,10 +758,10 @@ func (crdtState DateState) FromReadResp(protobuf *proto.ApbReadObjectResp) (stat
 }
 
 func (crdtState DateState) ToReadResp() *proto.ApbReadObjectResp {
-	return &proto.ApbReadObjectResp{Date: &proto.ApbGetDateResp{
+	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Date{Date: &proto.ApbGetDateResp{
 		Year: pb.Int32(int32(crdtState.Year)), Month: pb.Int32(int32(crdtState.Month)), Day: pb.Int32(int32(crdtState.Day)),
 		Hour: pb.Int32(int32(crdtState.Hour)), Minute: pb.Int32(int32(crdtState.Minute)), Second: pb.Int32(int32(crdtState.Second)),
-	}}
+	}}}
 }
 
 func (crdtState DateFullState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
@@ -643,10 +771,10 @@ func (crdtState DateFullState) FromReadResp(protobuf *proto.ApbReadObjectResp) (
 }
 
 func (crdtState DateFullState) ToReadResp() *proto.ApbReadObjectResp {
-	return &proto.ApbReadObjectResp{Partread: &proto.ApbPartialReadResp{Date: &proto.ApbDatePartialReadResp{Full: &proto.ApbDateFullResp{
+	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Date{Date: &proto.ApbDatePartialReadResp{Full: &proto.ApbDateFullResp{
 		Year: pb.Int32(int32(crdtState.Year)), Month: pb.Int32(int32(crdtState.Month)), Day: pb.Int32(int32(crdtState.Day)),
 		Hour: pb.Int32(int32(crdtState.Hour)), Minute: pb.Int32(int32(crdtState.Minute)), Second: pb.Int32(int32(crdtState.Second)), Millisecond: pb.Int32(int32(crdtState.Millisecond)),
-	}}}}
+	}}}}}}
 }
 
 func (crdtState TimeState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
@@ -655,8 +783,8 @@ func (crdtState TimeState) FromReadResp(protobuf *proto.ApbReadObjectResp) (stat
 }
 
 func (crdtState TimeState) ToReadResp() *proto.ApbReadObjectResp {
-	return &proto.ApbReadObjectResp{Partread: &proto.ApbPartialReadResp{Date: &proto.ApbDatePartialReadResp{Time: &proto.ApbTimeResp{
-		Hour: pb.Int32(int32(crdtState.Hour)), Minute: pb.Int32(int32(crdtState.Minute)), Second: pb.Int32(int32(crdtState.Second)), Millisecond: pb.Int32(int32(crdtState.Millisecond))}}}}
+	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Date{Date: &proto.ApbDatePartialReadResp{Time: &proto.ApbTimeResp{
+		Hour: pb.Int32(int32(crdtState.Hour)), Minute: pb.Int32(int32(crdtState.Minute)), Second: pb.Int32(int32(crdtState.Second)), Millisecond: pb.Int32(int32(crdtState.Millisecond))}}}}}}
 }
 
 func (crdtState DateOnlyState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
@@ -666,8 +794,8 @@ func (crdtState DateOnlyState) FromReadResp(protobuf *proto.ApbReadObjectResp) (
 }
 
 func (crdtState DateOnlyState) ToReadResp() *proto.ApbReadObjectResp {
-	return &proto.ApbReadObjectResp{Partread: &proto.ApbPartialReadResp{Date: &proto.ApbDatePartialReadResp{DateOnly: &proto.ApbDateOnlyResp{
-		Year: pb.Int32(int32(crdtState.Year)), Month: pb.Int32(int32(crdtState.Month)), Day: pb.Int32(int32(crdtState.Day))}}}}
+	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Date{Date: &proto.ApbDatePartialReadResp{
+		DateOnly: &proto.ApbDateOnlyResp{Year: pb.Int32(int32(crdtState.Year)), Month: pb.Int32(int32(crdtState.Month)), Day: pb.Int32(int32(crdtState.Day))}}}}}}
 }
 
 func (crdtState TimestampState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
@@ -677,7 +805,7 @@ func (crdtState TimestampState) FromReadResp(protobuf *proto.ApbReadObjectResp) 
 }
 
 func (crdtState TimestampState) ToReadResp() *proto.ApbReadObjectResp {
-	return &proto.ApbReadObjectResp{Partread: &proto.ApbPartialReadResp{Date: &proto.ApbDatePartialReadResp{Timestamp: &proto.ApbTimestampResp{Timestamp: pb.Int64(int64(crdtState))}}}}
+	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Date{Date: &proto.ApbDatePartialReadResp{Timestamp: &proto.ApbTimestampResp{Timestamp: pb.Int64(int64(crdtState))}}}}}}
 }
 
 func (args DateFullArguments) FromPartialRead(protobuf *proto.ApbPartialReadArgs) (readArgs ReadArguments) {
@@ -685,7 +813,7 @@ func (args DateFullArguments) FromPartialRead(protobuf *proto.ApbPartialReadArgs
 }
 
 func (args DateFullArguments) ToPartialRead() (protobuf *proto.ApbPartialReadArgs) {
-	return &proto.ApbPartialReadArgs{Date: &proto.ApbDatePartialRead{DataReadType: proto.READType_DATE_FULL.Enum()}}
+	return &proto.ApbPartialReadArgs{Args: &proto.ApbPartialReadArgs_Date{Date: &proto.ApbDatePartialRead{DataReadType: proto.READType_DATE_FULL.Enum()}}}
 }
 
 func (args DateOnlyArguments) FromPartialRead(protobuf *proto.ApbPartialReadArgs) (readArgs ReadArguments) {
@@ -693,7 +821,7 @@ func (args DateOnlyArguments) FromPartialRead(protobuf *proto.ApbPartialReadArgs
 }
 
 func (args DateOnlyArguments) ToPartialRead() (protobuf *proto.ApbPartialReadArgs) {
-	return &proto.ApbPartialReadArgs{Date: &proto.ApbDatePartialRead{DataReadType: proto.READType_DATE_ONLY.Enum()}}
+	return &proto.ApbPartialReadArgs{Args: &proto.ApbPartialReadArgs_Date{Date: &proto.ApbDatePartialRead{DataReadType: proto.READType_DATE_ONLY.Enum()}}}
 }
 
 func (args TimeArguments) FromPartialRead(protobuf *proto.ApbPartialReadArgs) (readArgs ReadArguments) {
@@ -701,7 +829,7 @@ func (args TimeArguments) FromPartialRead(protobuf *proto.ApbPartialReadArgs) (r
 }
 
 func (args TimeArguments) ToPartialRead() (protobuf *proto.ApbPartialReadArgs) {
-	return &proto.ApbPartialReadArgs{Date: &proto.ApbDatePartialRead{DataReadType: proto.READType_DATE_TIME_ONLY.Enum()}}
+	return &proto.ApbPartialReadArgs{Args: &proto.ApbPartialReadArgs_Date{Date: &proto.ApbDatePartialRead{DataReadType: proto.READType_DATE_TIME_ONLY.Enum()}}}
 }
 
 func (args TimestampArguments) FromPartialRead(protobuf *proto.ApbPartialReadArgs) (readArgs ReadArguments) {
@@ -709,7 +837,7 @@ func (args TimestampArguments) FromPartialRead(protobuf *proto.ApbPartialReadArg
 }
 
 func (args TimestampArguments) ToPartialRead() (protobuf *proto.ApbPartialReadArgs) {
-	return &proto.ApbPartialReadArgs{Date: &proto.ApbDatePartialRead{DataReadType: proto.READType_DATE_TIMESTAMP.Enum()}}
+	return &proto.ApbPartialReadArgs{Args: &proto.ApbPartialReadArgs_Date{Date: &proto.ApbDatePartialRead{DataReadType: proto.READType_DATE_TIMESTAMP.Enum()}}}
 }
 
 func (downOp DownstreamIncMS) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
@@ -717,7 +845,7 @@ func (downOp DownstreamIncMS) FromReplicatorObj(protobuf *proto.ProtoOpDownstrea
 }
 
 func (downOp DownstreamIncMS) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	return &proto.ProtoOpDownstream{SimpleDateOp: &proto.ProtoSimpleDateDownstream{IsInitialSet: pb.Bool(false), Inc: pb.Int64(int64(downOp))}}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_SimpleDateOp{SimpleDateOp: &proto.ProtoSimpleDateDownstream{IsInitialSet: shared.FALSE_POINTER, Inc: pb.Int64(int64(downOp))}}}
 }
 
 func (downOp DownstreamSetInitialDate) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
@@ -725,14 +853,14 @@ func (downOp DownstreamSetInitialDate) FromReplicatorObj(protobuf *proto.ProtoOp
 }
 
 func (downOp DownstreamSetInitialDate) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	return &proto.ProtoOpDownstream{SimpleDateOp: &proto.ProtoSimpleDateDownstream{IsInitialSet: pb.Bool(true), Inc: pb.Int64(int64(downOp))}}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_SimpleDateOp{SimpleDateOp: &proto.ProtoSimpleDateDownstream{IsInitialSet: shared.TRUE_POINTER, Inc: pb.Int64(int64(downOp))}}}
 }
 
 func (crdt *SimpleDateCrdt) ToProtoState() (protobuf *proto.ProtoState) {
-	return &proto.ProtoState{SimpleDate: &proto.ProtoSimpleDateState{DateTs: pb.Int64(crdt.dateTs)}}
+	return &proto.ProtoState{State: &proto.ProtoState_SimpleDate{SimpleDate: &proto.ProtoSimpleDateState{DateTs: pb.Int64(crdt.dateTs)}}}
 }
 
-func (crdt *SimpleDateCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID int16) (newCRDT CRDT) {
+func (crdt *SimpleDateCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	return (&SimpleDateCrdt{dateTs: proto.GetSimpleDate().GetDateTs()}).initializeFromSnapshot(ts, replicaID)
 }
 

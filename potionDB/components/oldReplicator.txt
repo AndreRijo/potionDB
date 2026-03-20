@@ -1,0 +1,1049 @@
+package components
+
+//TODO: As of now, there's no filtering of buckets in the Materializer when replying to a RequestBucket.
+//I.e., crdts of all buckets are returned.
+//TODO: Think if, for joining replicas, there's any need for asking missing ops.
+//Note: If new replicas join while a lot of transactions are happening, the materializer may take wrong decisions.
+//This is due to the fact that clockSi, when comparing clocks, assumes both clocks have the same entries.
+//Also note that initialDummyTs isn't updated when new replicas are added via Join.
+
+//TODO: In this version of PotionDB, Join no longer needs the list of buckets - it can use the one from RemoteID.
+//However, this is a temporary solution for requesting remote objects
+
+//TODO: Replicator's algorithm could be improved.
+//Now, we could ask TM for the safe clock, and then ask Log to only send operations until that safe clock.
+//This works as every partition will have, at least, until that safe clock.
+
+import (
+	fmt "fmt"
+	"time"
+
+	"potionDB/crdt/clocksi"
+	"potionDB/crdt/crdt"
+	"potionDB/crdt/proto"
+	"potionDB/potionDB/utilities"
+	"potionDB/shared/shared"
+
+	"github.com/AndreRijo/go-tools/src/tools"
+)
+
+type Replicator struct {
+	tm              *TransactionManager //to send request to downstream transactions
+	localPartitions []Logger
+	//remoteReps      []chan ReplicatorRequest
+	txnCache [][]PairClockUpdates //First index: partitionID
+	//currTxnCache     []tools.SliceWithHideable[PairClockUpdates]   //First index: partitionID. Contains the oldest slice of txns obtained from each log.
+	overflowTxnCache []tools.SliceWithHideable[[]PairClockUpdates] //Contains the non-oldest slices of txns obtained from each log.
+	lastLogClk       []clocksi.Timestamp                           //The last received stable clk from each partition, in order to what clock to request from each partition.
+	maxCommonClk     clocksi.Timestamp                             //The highest clk common to all replicas.
+	//lastSentClk clocksi.Timestamp
+	//receiveReplChan chan ReplicatorRequest
+	remoteConn *RemoteGroup
+	started    bool
+	replicaID  uint16
+	buckets    []string
+	JoinInfo
+	allReplicaIDs  []uint16          //Stores the replicaIDs of all replicas
+	initialDummyTs clocksi.Timestamp //The initial TS used in txnCache to signal that all txns are to be replicated.
+	//receiveHold    map[uint16]TMRemoteTxn //Holds the current transaction being received for each replicaID.
+	partsChan chan StableClkUpdatesPair
+
+	//New things added
+	remoteTxnSlice     tools.SliceWithCounter[RemoteTxn]                                                  //Re-usable buffer.
+	logBuffersToReturn tools.SliceWithCounter[tools.Pair[int, tools.SliceWithHideable[PairClockUpdates]]] //Buffers to return to the logger, when it is convenient.
+}
+
+type JoinInfo struct {
+	holdMsgs       []ReplicatorMsg
+	waitFor        int
+	holdReplyJoins []*ReplyJoin
+	nHoldJoins     int
+	allDone        bool
+}
+
+type ReplicatorMsg interface {
+	getSenderID() uint16
+}
+
+/*
+type ReplicatorTxn struct {
+	Clk      clocksi.Timestamp
+	Upds     map[int64][]crdt.UpdateObjectParams
+	SenderID uint16
+	TxnID    int32 //This is filled by remoteConnection.go. When receiving txns, this is used to identify when a different txn is being received.
+}
+
+type ReplicatorGroupTxn struct {
+	Txns     []RemoteTxnSlice
+	SenderID uint16
+	TxnID    int32 //This is filled by remoteConnection.go. When receiving txns, this is used to identify when a different txn is being received.
+}
+
+type RemoteTxnSlice struct {
+	Txns []RemoteTxn
+	clocksi.Timestamp
+}*/
+
+/*
+type NewReplicatorRequest struct {
+	clocksi.Timestamp
+	Upds        []crdt.UpdateObjectParams
+	SenderID    uint16
+	PartitionID int64
+	TxnID       int32 //This is filled by remoteConnection.go. When receiving txns, this is used to identify when a different txn is being received.
+}*/
+
+type StableClock struct {
+	SenderID uint16
+	Ts       int64
+}
+
+type RemoteTxn struct {
+	SenderID uint16
+	Clk      clocksi.Timestamp
+	Upds     map[int][]crdt.UpdateObjectParams
+	TxnID    int32 //This is filled by remoteConnection.go. Used to identify the transactions
+}
+
+type RemoteTxnGroup struct {
+	SenderID uint16
+	Txns     []RemoteTxn
+	MinTxnID int32 //This is filled by remoteConnection.go. Used to identify the transactions
+	MaxTxnID int32 //This is filled by remoteConnection.go. Used to identify the transactions
+}
+
+type RemoteID struct {
+	SenderID uint16
+	Buckets  []string
+	IP       string
+}
+
+type RemoteTrigger struct {
+	AutoUpdate
+	IsGeneric bool
+}
+
+// All join-related requests include a field to identify in the remoteGroup which connection the reply should be sent to.
+type Join struct {
+	SenderID   uint16
+	ReplyID    uint16
+	CommonBkts []string
+	ReqIP      string
+}
+
+type ReplyJoin struct {
+	SenderID   uint16
+	ReplyID    uint16
+	Clks       []clocksi.Timestamp
+	CommonBkts []string
+	ReqIP      string
+}
+
+type RequestBucket struct {
+	SenderID uint16
+	ReplyID  uint16
+	Buckets  []string
+	ReqIP    string
+}
+
+type ReplyBucket struct {
+	SenderID   uint16
+	PartStates [][]*proto.ProtoCRDT
+	Clk        clocksi.Timestamp
+}
+
+type ReplyEmpty struct{}
+
+const (
+	//tsSendDelay time.Duration = 2000 //milliseconds
+	tsSendDelay time.Duration = 10000
+	//tsSendDelay         time.Duration = 500
+	cacheInitialSize    = 100
+	toSendInitialSize   = 10
+	joinHoldInitialSize = 100
+	DO_JOIN             = "doJoin"
+	minTxnsToGroup      = 15   //Only groups txns for sending if it's sending at least 15 txns
+	maxTxnsPerGroup     = 1000 //To avoid creating groups too big that take a long time to transfer
+)
+
+var (
+	doesJoin        bool
+	localPotionIP   string
+	localRabbitMQIP string
+)
+
+/*
+func (req NewReplicatorRequest) getSenderID() uint16 {
+	return req.SenderID
+}
+
+func (req ReplicatorTxn) getSenderID() uint16 {
+	return req.SenderID
+}
+
+func (req ReplicatorGroupTxn) getSenderID() uint16 {
+	return req.SenderID
+}*/
+
+func (req StableClock) getSenderID() uint16 {
+	return req.SenderID
+}
+
+func (req RemoteTxn) getSenderID() uint16 {
+	return req.SenderID
+}
+
+func (req RemoteTxnGroup) getSenderID() uint16 {
+	return req.SenderID
+}
+
+func (req RemoteID) getSenderID() uint16 {
+	return req.SenderID
+}
+
+// Sender ID is irrelevant. It's just here to implement the ReplicatorMsg interface.
+func (req RemoteTrigger) getSenderID() uint16 {
+	return 0
+}
+
+func (req Join) getSenderID() uint16 {
+	return req.SenderID
+}
+
+func (req ReplyJoin) getSenderID() uint16 {
+	return req.SenderID
+}
+
+func (req RequestBucket) getSenderID() uint16 {
+	return req.SenderID
+}
+
+func (req ReplyBucket) getSenderID() uint16 {
+	return req.SenderID
+}
+
+func (req ReplyEmpty) getSenderID() uint16 {
+	return 0
+}
+
+func (repl *Replicator) Reset() {
+	if !shared.IsReplDisabled {
+		repl.txnCache, repl.lastLogClk = make([][]PairClockUpdates, nGoRoutines), make([]clocksi.Timestamp, nGoRoutines)
+		dummyTs := clocksi.NewSliceTimestamp()
+		for id := 0; id < int(nGoRoutines); id++ {
+			cacheEntry := make([]PairClockUpdates, 1, cacheInitialSize)
+			//All txns have a clock higher than this, so the first request is the equivalent of "requesting all commited txns"
+			cacheEntry[0] = PairClockUpdates{clk: dummyTs}
+			repl.txnCache[id] = cacheEntry
+		}
+		fmt.Println("[REPLICATOR]Reset complete.")
+	}
+}
+
+func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, buckets []string, replicaID uint16) {
+	if !shared.IsReplDisabled {
+		if !repl.started {
+			repl.tm = tm
+			repl.started = true
+			repl.localPartitions = loggers
+			//bucketsToListen := make([]string, 1)
+			//bucketsToListen[0] = "*"
+			bucketsToListen := buckets
+
+			//remoteConn, err := CreateRemoteGroupStruct(bucketsToListen, replicaID)
+			//TODO: Not ignore err
+			//ignore(err)
+			//repl.remoteConn = remoteConn
+			remoteConn := CreateRemoteGroupStruct(bucketsToListen, replicaID)
+			repl.remoteConn = remoteConn
+			repl.buckets = bucketsToListen
+			//repl.initialDummyTs = clocksi.NewClockSiTimestampFromId(replicaID)
+			repl.initialDummyTs = clocksi.NewSliceTimestamp()
+			repl.replicaID = replicaID
+			repl.partsChan = make(chan StableClkUpdatesPair, nGoRoutines)
+			//repl.receiveHold = make(map[uint16]TMRemoteTxn)
+
+			//Also skips the joining algorithm if there's no replica to join
+			if doesJoin && len(remoteConn.conns) > 0 {
+				fmt.Println("[REPLICATOR]Join mode")
+				repl.JoinInfo = JoinInfo{holdMsgs: make([]ReplicatorMsg, 0, joinHoldInitialSize), allDone: false, nHoldJoins: 0}
+				repl.joinGroup()
+			} else {
+				//Wait for replicaIDs of existing replicas
+				repl.JoinInfo.waitFor = int(remoteConn.nReplicas)
+				crdt.NReplicas = int32(remoteConn.nReplicas + 1)
+				fmt.Printf("[REPLICATOR]Not doing join, will wait for replicaID of existing replicas. IDs to receive: %d, number of replicas (including self): %d\n",
+					repl.JoinInfo.waitFor, crdt.NReplicas)
+				remoteConn.sendReplicaID(bucketsToListen, localPotionIP)
+				go repl.receiveRemoteTxns()
+				//go repl.replicateCycle()
+				//If there's no other replica, we can start right away
+				if len(remoteConn.conns) == 0 {
+					fmt.Println("[REPLICATOR] PotionDB in single server mode.")
+					repl.initialDummyTs = repl.initialDummyTs.Update()
+					repl.allDone = true
+					go repl.replicateCycle()
+					go repl.tm.SendRemoteMsg(TMStart{}) //Different thread to avoid blocking
+				}
+			}
+		}
+	} else {
+		fmt.Println("[REPLICATOR] Warning - replicator is disabled. PotionDB started in single server mode.")
+		go tm.SendRemoteMsg(TMStart{})
+	}
+}
+
+func (repl *Replicator) replicateCycle() {
+	repl.txnCache, repl.lastLogClk = make([][]PairClockUpdates, nGoRoutines), make([]clocksi.Timestamp, nGoRoutines)
+	/*for id := 0; id < int(nGoRoutines); id++ {
+		cacheEntry := make([]PairClockUpdates, 1, cacheInitialSize)
+		//All txns have a clock higher than this, so the first request is the equivalent of "requesting all commited txns"
+		cacheEntry[0] = PairClockUpdates{clk: repl.initialDummyTs}
+		repl.txnCache[id] = cacheEntry
+	}*/
+	for id := 0; id < int(nGoRoutines); id++ {
+		repl.txnCache[id] = make([]PairClockUpdates, 0, cacheInitialSize)
+		repl.lastLogClk[id] = repl.initialDummyTs
+	}
+
+	replSinceLastGC := false //Keeps track if there was any new txns since the last call to cleanState()
+	count, start, finish, toSleep := time.Duration(0), int64(0), int64(0), time.Duration(0)
+	var startFull time.Time
+	previousLen := 0
+	//fmt.Printf("[REPLICATOR]Starting replicator cycle at %s\n", time.Now().Format("15:04:05.000"))
+	for {
+		startFull = time.Now()
+		start = startFull.UnixNano()
+		utilities.FancyDebugPrint(utilities.REPL_PRINT, repl.replicaID, "starting replicateCycle")
+
+		//fmt.Printf("[REPLICATOR]Waiting for getNewTxns() at %s\n", time.Now().Format("15:04:05.000")) //TODO: CHeck if this is happening
+		repl.getNewTxns()
+		//fmt.Printf("[REPLICATOR]Got new txns to replicate at %s. Number of partitions: %d\n", time.Now().Format("15:04:05.000"), len(repl.localPartitions))
+
+		count++
+		toSend := repl.prepareDataToSend()
+		if len(toSend) > 0 {
+			replSinceLastGC = true
+			//fmt.Printf("[REPLICATOR]Sending ops at %s. Started processing at %s. Number of remote txns: %d\n",
+			//time.Now().Format("2006-01-02 15:04:05.000"), startFull.Format("2006-01-02 15:04:05.000"), len(toSend))
+			fmt.Println("[REPLICATOR]Sending ops.", "Number of remote txns:", len(toSend), "at", time.Now().Format("15:04:05.000"))
+			repl.sendTxns(toSend)
+			//end := time.Now()
+			//fmt.Printf("[REPLICATOR]Finished sending ops at %s. Started at: %s. Total time taken: %d (ms)\n",
+			//end.Format("2006-01-02 15:04:05.000"), startFull.Format("2006-01-02 15:04:05.000"), (end.UnixNano()-start)/1000000)
+		}
+		utilities.FancyDebugPrint(utilities.REPL_PRINT, repl.replicaID, "finishing replicateCycle")
+
+		if replSinceLastGC {
+			repl.cleanState()
+			replSinceLastGC = false
+		}
+		finish = time.Now().UnixNano()
+		toSleep = tsSendDelay - time.Duration((finish-start)/1000000)
+		if toSleep > 10 {
+			time.Sleep(toSleep * time.Millisecond)
+		}
+		if len(toSend) == 0 && (previousLen > 0 || count*tsSendDelay%60000 == 0) {
+			fmt.Println("[REPLICATOR]No ops to send.")
+		}
+		//if len(toSend) == 0 {
+		//	fmt.Println("[REPLICATOR]No ops to send.")
+		//} else {
+		//	fmt.Println("[REPLICATOR]Sent ops. Number of remote txns:", len(toSend))
+		//}
+		previousLen = len(toSend)
+	}
+}
+
+func (repl *Replicator) cleanState() {
+	for id, partCache := range repl.txnCache {
+		repl.txnCache[id] = make([]PairClockUpdates, len(partCache), tools.Max(len(partCache), cacheInitialSize))
+		copy(repl.txnCache[id], partCache)
+	}
+}
+
+//This change was integrated directly into the redesigned Replicator.
+/*func (repl *Replicator) getNewTxnsNew() {
+	//Request for new txns that are not yet present in the txnCache. LastLogClk indicates the latest txn known to the Replicator from each partition.
+	for id, part := range repl.localPartitions {
+		part.SendLoggerRequest(LoggerRequest{LogRequestArgs: LogTxnArgs{lastClock: repl.lastLogClk[id], ReplyChan: repl.partsChan}})
+	}
+
+	repl.maxCommonClk = clocksi.HighestTs
+	//Receive replies and cache and also determines the latest common (to all partitions) clk
+	for id := uint64(0); id < nGoRoutines; id++ {
+		reply := <-repl.partsChan
+		if len(reply.upds) > 0 { //This may happen if the partition didn't receive any updates
+			partCache := repl.currTxnCache[int(reply.partID)]
+			if partCache.Len() > 0 { //Put in overflow, we still have leftovers from last time.
+				repl.overflowTxnCache[int(reply.partID)].Append(reply.upds)
+			} else {
+				repl.currTxnCache[int(reply.partID)] = tools.ToSliceWithHideable(reply.upds)
+			}
+		}
+		repl.lastLogClk[int(reply.partID)] = reply.stableClock
+		if reply.stableClock.IsLower(repl.maxCommonClk) {
+			repl.maxCommonClk = reply.stableClock
+		}
+	}
+}*/
+
+func (repl *Replicator) getNewTxns() {
+	//Request for new txns that are not yet present in the txnCache. LastLogClk indicates the latest txn known to the Replicator from each partition.
+	for id, part := range repl.localPartitions {
+		part.SendLoggerRequest(LoggerRequest{LogRequestArgs: LogTxnArgs{lastClock: repl.lastLogClk[id], ReplyChan: repl.partsChan}})
+	}
+
+	repl.maxCommonClk = clocksi.HighestTs
+	//Receive replies and cache and also determines the latest common (to all partitions) clk
+	//fmt.Printf("[REPLICATOR][GetNewTxns]\n")
+	for id := uint64(0); id < nGoRoutines; id++ {
+		reply := <-repl.partsChan
+		cacheEntry := repl.txnCache[int(reply.partID)]
+		//fmt.Printf("Part %d: %d updates.\t", reply.partID, len(reply.upds))
+		cacheEntry = append(cacheEntry, reply.upds...)
+		reply.upds = nil //For GC purposes
+		repl.lastLogClk[int(reply.partID)] = reply.stableClock
+		repl.txnCache[int(reply.partID)] = cacheEntry
+		if reply.stableClock.IsLower(repl.maxCommonClk) {
+			repl.maxCommonClk = reply.stableClock
+		}
+	}
+	//fmt.Println()
+}
+
+//This change was integrated directly into the redesigned Replicator.
+/*
+func (repl *Replicator) prepareDataToSendNew() (toSend []RemoteTxn) {
+	//Helper variables for the cycle
+	var currClk clocksi.Timestamp
+	var partCache tools.SliceWithHideable[PairClockUpdates]
+	var firstEntryClk clocksi.Timestamp
+	var clkCompare, maxClkComp clocksi.TsResult
+	var partID int
+
+	nParts := int(nGoRoutines)
+	partsForThisClk := tools.NewSliceWithCounter[int](nParts) //Keeps track of the partitions involved in the current txn.
+	repl.remoteTxnSlice.Clear()
+	done, nPartsDone := false, 0
+	partsDone := tools.NewBitSet(int(nGoRoutines))
+	nIterations := 0 //Every once in a while, we'll check if some partitions are already done or not. This avoids some non-necessary clk comparisons, buffers resets and similar.
+
+	//Before starting, check if any partition does not have txns to replicate. We'll mark them as done.
+	for id, partC := range repl.currTxnCache {
+		if partC.IsEmpty() || partC.Get(0).clk.IsHigher(repl.maxCommonClk) { //This partition has no txns to replicate, or all txns have a clk higher than the maximum common clk.
+			partsDone.Set(id)
+			nPartsDone++
+		}
+	}
+	if nPartsDone == nParts { //Nothing to replicate: most likely we didn't get any txns.
+		return
+	}
+
+	for !done { //We have guarantee that there's always at least one txn to replicate until we break out of the cycle.
+		currClk = clocksi.HighestTs
+		for id := 0; id < nParts; id++ { //1st phase: find the minimum common clock, and collect partitions involved.
+			if partsDone.GetBit(id) { //This partition has no txns left to replicate, or all txns have a clk higher than the maximum common clk.
+				continue
+			}
+			partCache = repl.currTxnCache[id]
+			firstEntryClk = partCache.Head().clk
+			clkCompare = firstEntryClk.Compare(currClk)
+			if clkCompare == clocksi.LowerTs { //Reset
+				partsForThisClk.Clear()
+				partsForThisClk.AddToEnd(id)
+				currClk = firstEntryClk
+			} else if clkCompare == clocksi.EqualTs { //Add this partition
+				partsForThisClk.AddToEnd(id)
+			} //else: ignore, this partition does not belong to this txn
+		}
+
+		maxClkComp = currClk.Compare(repl.maxCommonClk)
+		if maxClkComp == clocksi.EqualTs || maxClkComp == clocksi.LowerTs { //We can include this txn.
+			txnUpdates := make(map[int][]crdt.UpdateObjectParams, partsForThisClk.Len())
+			for i := 0; i < partsForThisClk.Len(); i++ { //2nd phase: prepare txn.
+				partID = partsForThisClk.Get(i)
+				partCache = repl.currTxnCache[partID]
+				txnUpdates[partID] = partCache.GetAndHideHead().upds
+				if partCache.IsEmpty() {
+					next := repl.overflowTxnCache[partID].GetAndHideHead()
+					if next == nil {
+						partsDone.Set(partID)
+						nPartsDone++
+						repl.overflowTxnCache[partID].DeepClear()
+						if nPartsDone == nParts {
+							done = true
+						}
+					} else {
+						repl.currTxnCache[partID] = tools.ToSliceWithHideable(next)
+					}
+					repl.logBuffersToReturn.Append(tools.Pair[int, tools.SliceWithHideable[PairClockUpdates]]{First: partID, Second: partCache})
+				} else {
+					repl.currTxnCache[partID] = partCache
+				}
+			}
+
+			partsForThisClk.Clear() //Clear the partitions for the next iteration
+			repl.remoteTxnSlice.Append(RemoteTxn{Clk: currClk, Upds: txnUpdates, SenderID: repl.replicaID})
+			nIterations++
+			if nIterations%1000 == 0 { //We check if some more partitions are already done (i.e., their next clk is too high).
+				for i := 0; i < nParts; i++ {
+					if !partsDone.GetBit(i) && !repl.currTxnCache[i].Get(0).clk.Copy().IsLowerOrEqual(repl.maxCommonClk) {
+						partsDone.Set(i)
+						nPartsDone++
+					}
+				}
+			}
+		} else { //Curr txn clk is already too high, we ignore it and stop the cycle.
+			done = true
+		}
+	}
+	return repl.remoteTxnSlice.ToSlice()
+}*/
+
+func (repl *Replicator) prepareDataToSend() (toSend []RemoteTxn) {
+	//Helper variables for the cycle
+	var currClk clocksi.Timestamp
+	var partCache []PairClockUpdates
+	var firstEntry PairClockUpdates
+	var clkCompare clocksi.TsResult
+	var partID int
+
+	//We know the maximum common clock so... we need to keep all txns that are <= it.
+	//The problem is... we need to group the txns by clock, right?
+	//How to navigate the cache in an efficient way? I suppose that was what the stableClk was for :(
+	//Possible solutions:
+	//1st - iterate the whole array, to determine the min clock. Then, iterate again to gather the txns.
+	//2nd - iterate and try to gather; when a lower clock is found, delete (or postpone?) the current cache.
+	//Option 1 seems better to avoid creating and deleting stuff. Let's try to cache the partitions that are involved.
+
+	partsForThisClk := tools.NewSliceWithCounter[int](int(nGoRoutines)) //Keeps track of the partitions involved in the current txn.
+	toSend = make([]RemoteTxn, 0, toSendInitialSize)
+	done := false
+	nSkip := 0 //Debug info
+	//fmt.Printf("[REPLICATOR][PrepareDataToSend]Starting to prepare data to send. MaxCommonClk: %s\n", repl.maxCommonClk.ToSortedString())
+	for !done { //TODO: Think if we can find a txn > maxStableClk. If so, we can't replicate that.
+		currClk = clocksi.HighestTs
+		for id := 0; id < len(repl.localPartitions); id++ { //1st phase: find the minimum common clock, and collect partitions involved
+			if len(repl.txnCache[id]) == 0 { //This partition has no txns left to replicate (e.g. can happen that a partition receives no updates)
+				//fmt.Printf("[REPLICATOR][PrepareDataToSend]Partition %d has no txns left to replicate.\n", id)
+				nSkip++
+				continue
+			}
+			partCache = repl.txnCache[id]
+			firstEntry = partCache[0]
+			clkCompare = firstEntry.clk.Compare(currClk)
+			if clkCompare == clocksi.LowerTs { //Reset
+				//fmt.Printf("[REPLICATOR][PrepareDataToSend]Found a lower clock. Previous: %s, Current: %s\n", currClk.ToSortedString(), firstEntry.clk.ToSortedString())
+				partsForThisClk.Clear()
+				partsForThisClk.AddToEnd(id)
+				currClk = firstEntry.clk
+			} else if clkCompare == clocksi.EqualTs { //Add this partition
+				//fmt.Printf("[REPLICATOR][PrepareDataToSend]Found an equal clock. Current: %s\n", currClk.ToSortedString())
+				partsForThisClk.AddToEnd(id)
+			} else { //else: ignore, this partition does not belong to this txn
+				//fmt.Printf("[REPLICATOR][PrepareDataToSend]Ignored clock, as it is not lower or equal. Result: %v. NewClk: %s. CurrClk: %s\n",
+				//	clkCompare, firstEntry.clk.ToSortedString(), currClk.ToSortedString())
+			}
+		}
+
+		if partsForThisClk.Len() == 0 { //Nothing left to replicate (can happen e.g. when no new txn was received.)
+			//fmt.Printf("[REPLICATOR][PrepareDataToSend]Nothing further to replicate, stopping iteration. Len of toSend: %d\n", len(toSend))
+			return
+		}
+
+		maxClkComp := currClk.Compare(repl.maxCommonClk)
+		if maxClkComp != clocksi.EqualTs && maxClkComp != clocksi.LowerTs { //Higher or concurrent to maxClk, can't include this one
+			return
+		}
+
+		txnUpdates := make(map[int][]crdt.UpdateObjectParams, partsForThisClk.Len())
+		for i := 0; i < partsForThisClk.Len(); i++ { //2nd phase: prepare txn.
+			partID = partsForThisClk.Get(i)
+			partCache = repl.txnCache[partID]
+			txnUpdates[partID] = partCache[0].upds
+			repl.txnCache[partID] = partCache[1:] //Hide the entry corresponding to this txn.
+		}
+		partsForThisClk.Clear() //Clear the partitions for the next iteration
+
+		toSend = append(toSend, RemoteTxn{Clk: currClk, Upds: txnUpdates, SenderID: repl.replicaID})
+
+		//if currClk.IsEqual(repl.maxCommonClk) { //Can stop iterating
+		if maxClkComp == clocksi.EqualTs { //Can stop iterating
+			//fmt.Printf("[REPLICATOR][PrepareDataToSend]CurrClk is equal to maxCommonClk, stopping iteration. CurrClk: %s, MaxCommonClk: %s\n",
+			//	currClk.ToSortedString(), repl.maxCommonClk.ToSortedString())
+			done = true
+		} else {
+			//fmt.Printf("[REPLICATOR][PrepareDataToSend]CurrClk is not equal to maxCommonClk, continue iteration. CurrClk: %s, MaxCommonClk: %s\n",
+			//	currClk.ToSortedString(), repl.maxCommonClk.ToSortedString())
+			/*currClk = currClk.Update()                //Update the clock to the next one
+			if currClk.IsEqual(repl.initialDummyTs) { //If this is the initial dummy TS, we can stop iterating
+				done = true
+			}*/
+		}
+	}
+
+	return
+}
+
+func (repl *Replicator) returnBuffersToLog() {
+	copySlice := repl.logBuffersToReturn.Copy()
+	repl.logBuffersToReturn.Clear()
+	for i := 0; i < len(repl.overflowTxnCache); i++ {
+		repl.overflowTxnCache[i].ShiftElementsLeft() //This is very cheap (quick), as it is a slice of slices - and the (inside) slices will be very few.
+	}
+	go repl.returnBuffersToLogHelper(copySlice.ToSlice())
+}
+
+func (repl *Replicator) returnBuffersToLogHelper(buffers []tools.Pair[int, tools.SliceWithHideable[PairClockUpdates]]) {
+	for _, buffer := range buffers {
+		buffer.Second.DeepClear()
+		repl.localPartitions[buffer.First].SendLoggerRequest(LoggerRequest{LogRequestArgs: LogBufferReturnArgs{Buf: buffer.Second.ToFullSlice()}})
+	}
+}
+
+func (repl *Replicator) sendTxns(toSend []RemoteTxn) {
+	if len(toSend) >= minTxnsToGroup {
+		repl.sendGroupTxns(toSend)
+	} else {
+		repl.SendTxnsIndividually(toSend)
+	}
+
+	//repl.sendIndividualTxns(toSend)
+	//Send clock to ensure all replicas receive the latest clock.
+	//This is also used to know that the last transaction sent has ended.
+	repl.remoteConn.SendStableClk(toSend[len(toSend)-1].Clk.GetPos(clocksi.GetSortedPosOfId(repl.replicaID)))
+}
+
+func (repl *Replicator) SendTxnsIndividually(toSend []RemoteTxn) {
+	//startTime := time.Now()
+	//fmt.Printf("[REPLICATOR]Sending txns individually (size: %d)\n", len(toSend))
+	repl.remoteConn.SendTxnsIndividually(toSend)
+	/*endTime := time.Now()
+	fmt.Printf("[REPLICATOR]Took %d ms to send %d txns to rabbitMQ. Started at: %s. Finished at. %s. Total time taken: %d (ms).\n",
+		(endTime.UnixNano()-startTime.UnixNano())/1000000, len(toSend),
+		startTime.Format("2006-01-02 15:04:05.000"), endTime.Format("2006-01-02 15:04:05.000"), (endTime.UnixNano()-startTime.UnixNano())/1000000)*/
+	utilities.FancyDebugPrint(utilities.REPL_PRINT, repl.replicaID, "finished sendTxns")
+}
+
+func (repl *Replicator) sendGroupTxns(toSend []RemoteTxn) {
+	//fmt.Printf("[REPLICATOR]Sending txns in group (size: %d). Min: %d, max: %d\n", len(toSend), minTxnsToGroup, maxTxnsPerGroup)
+	end := 0
+	for len(toSend) > 0 {
+		end = utilities.MinInt(len(toSend), maxTxnsPerGroup)
+		//start, end = currOffset, utilities.MinInt(len(toSend)-currOffset, maxTxnsPerGroup)+currOffset //for txns variable
+		currTxns := toSend[:end]
+		firstClk := currTxns[0].Clk
+		if !currTxns[len(currTxns)-1].Clk.IsEqualExceptForSelf(firstClk, repl.replicaID) { //The last txn depends on txn(s) of other replicas. We search for the cutoff point.
+			for i, txn := range currTxns {
+				if !txn.Clk.IsEqualExceptForSelf(firstClk, repl.replicaID) {
+					//fmt.Printf("[REPLICATOR]Clk of other replica changed. This happened at index %d. Clks. %s, %s\n", i, firstClk.ToSortedString(), txn.Clk.ToSortedString())
+					end = i
+					currTxns = currTxns[:i]
+					//This txn depends on some txn of another replica, thus better not put in this group
+					break
+				}
+			}
+		}
+
+		if end < minTxnsToGroup/2 {
+			//Send individually, too few transactions.
+			//fmt.Printf("[REPLICATOR]Sending individual in groupTxns. End: %d, min/2: %d, nTxns: %d\n", end, minTxnsToGroup, len(currTxns))
+			repl.remoteConn.SendTxnsIndividually(currTxns)
+		} else {
+			//Send the slice
+			//fmt.Printf("[REPLICATOR]Sending group in groupTxns. Size: %d\n", len(currTxns))
+			repl.remoteConn.SendGroupTxn(currTxns)
+		}
+		toSend = toSend[end:] //Hide positions that were already sent
+	}
+}
+
+/*func (repl *Replicator) sendTxns(toSend []RemoteTxn) {
+	//Separate each txn into partitions
+	//TODO: Batch of transactions for the same partition? Not simple due to clock updates.
+	//startTime := time.Now().UnixNano()
+	//TODO: It seems like in some situations multiple stable clocks are sent in a row. I should look into this.
+	count := 0
+	for _, txn := range toSend {
+		for partId, upds := range txn.Upds {
+			count++
+			repl.remoteConn.SendPartTxn(&NewReplicatorRequest{PartitionID: int64(partId), SenderID: repl.replicaID, Timestamp: txn.Timestamp, Upds: upds})
+		}
+	}
+	//Send clock to ensure all replicas receive the latest clock
+	repl.remoteConn.SendStableClk(toSend[len(toSend)-1].Timestamp.GetPos(repl.replicaID))
+	count++
+	//endTime := time.Now().UnixNano()
+	//fmt.Printf("[REPLICATOR]Took %d ms to send txns to rabbitMQ. Total msgs sent: %d.\n", (endTime-startTime)/1000000, count)
+	utilities.FancyDebugPrint(utilities.REPL_PRINT, repl.replicaID, "finished sendTxns")
+}*/
+
+/*
+func (repl *Replicator) groupTxns(txns []RemoteTxn) {
+	if len(txns) < minTxnsToGroup {
+		return
+	}
+	start, end := 0, utilities.MinInt(len(txns), maxTxnsPerGroup) //for txns variable
+	currTxns := txns[start:end]
+	currOffset := 0
+	firstClk := currTxns[0].Timestamp
+	for i, txn := range currTxns[1:] {
+		if !txn.IsEqualExceptForSelf(firstClk, repl.replicaID) {
+			//This txn depends on some txn of another replica, thus better not put in this group
+			currOffset = i
+			break
+		}
+	}
+	if currOffset < minTxnsToGroup/2 {
+		//Send individually
+	} else {
+		//Make a group
+		txnGroup := RemoteTxnGroup{txns: currTxns}
+	}
+}
+*/
+
+func (repl *Replicator) receiveRemoteTxns() {
+	fmt.Println("[REPL]Ready to receive requests from RabbitMQ.")
+	for {
+		//fmt.Println("[REPL]Iterating receiveRemoteTxns. Ts:", time.Now().String())
+		utilities.FancyInfoPrint(utilities.REPL_PRINT, repl.replicaID, "iterating receiveRemoteTxns")
+		remoteReq := repl.remoteConn.GetNextRemoteRequest()
+		//fmt.Println("[REPL]Received something from RabbitMQ, handling request.")
+		repl.handleRemoteRequest(remoteReq)
+		//fmt.Println("[REPL]Finish interating receiveRemoteTxns. Ts:", time.Now().String())
+	}
+}
+
+// TODO: Maybe one day have a direct communication channel between TM and ReplicatorGroup?
+func (repl *Replicator) handleRemoteRequest(remoteReq ReplicatorMsg) {
+	switch typedReq := remoteReq.(type) {
+	case *StableClock:
+		/*hold := repl.receiveHold[typedReq.SenderID]
+		if hold.Clk != nil {
+			fmt.Println("[REPL]Sending TMRemoteTxn to TM due to clock. Ts:", time.Now().String())
+			repl.tm.SendRemoteMsg(hold)
+			fmt.Println("[REPL]Finished sending TMRemoteTxn to TM due to clock. Ts:", time.Now().String())
+			repl.receiveHold[typedReq.SenderID] = TMRemoteTxn{}
+		}*/
+		//fmt.Printf("[REPL]Forwarding TMRemoteClk to TM. Time: %s. Clk: %d. ReplicaID: %d\n", time.Now().String(), typedReq.Ts, typedReq.SenderID)
+		repl.tm.SendRemoteMsg(TMRemoteClk{ReplicaID: typedReq.SenderID, StableTs: typedReq.Ts})
+		//fmt.Println("[REPL]Finished sending TMRemoteClk to TM. Ts:", time.Now().String())
+	case *RemoteTxn:
+		//repl.tm.SendRemoteMsg(TMRemoteTxn{ReplicaID: typedReq.SenderID, Clk: typedReq.Clk, Upds: typedReq.Upds})
+		//fmt.Printf("[REPL]Forwarding RemoteTxn to TM. Time: %s. NTxns: %d. Clk: %s\n", time.Now().String(), len(typedReq.Upds), typedReq.Clk.ToSortedString())
+		repl.tm.SendRemoteMsg(*typedReq)
+	case *RemoteTxnGroup:
+		//fmt.Printf("[REPL]Forwarding RemoteTxnGroup to TM. Time: %s. NGroups: %d.\n", time.Now().String(), len(typedReq.Txns))
+		repl.tm.SendRemoteMsg(*typedReq)
+	/*	case *NewReplicatorRequest:
+		hold := repl.receiveHold[typedReq.SenderID]
+		if typedReq.Timestamp.IsEqual(hold.Clk) {
+			hold.Upds[typedReq.PartitionID] = typedReq.Upds
+		} else {
+			//New transaction, previous transaction is complete.
+			//If the previous txn wasn't given yet to the TM, do so now.
+			if hold.Clk != nil {
+				fmt.Println("[REPL]Sending TMRemoteTxn to TM. Ts:", time.Now().String())
+				repl.tm.SendRemoteMsg(hold)
+				fmt.Println("[REPL]Finished sending TMRemoteTxn to TM. Ts:", time.Now().String())
+			}
+			newHold := TMRemoteTxn{
+				ReplicaID: typedReq.SenderID,
+				Clk:       typedReq.Timestamp,
+				Upds:      make([][]crdt.UpdateObjectParams, len(repl.localPartitions)),
+			}
+			newHold.Upds[typedReq.PartitionID] = typedReq.Upds
+			repl.receiveHold[typedReq.SenderID] = newHold
+		}
+	*/
+	case *RemoteID:
+		repl.waitFor--
+		fmt.Println("[REPL]ID received from RabbitMQ: ", typedReq)
+		//repl.receiveHold[typedReq.SenderID] = TMRemoteTxn{}
+		repl.tm.SendRemoteMsg(TMReplicaID{ReplicaID: typedReq.SenderID, IP: typedReq.IP, Buckets: typedReq.Buckets})
+		if repl.waitFor == 0 {
+			repl.initialDummyTs = repl.initialDummyTs.Update()
+			repl.allDone = true
+			fmt.Println("[REPL]All IDs received, sending signal to TM at", time.Now().Format("15:04:05.000"))
+			go repl.replicateCycle()
+			repl.tm.SendRemoteMsg(TMStart{})
+		}
+	case *RemoteTrigger:
+		repl.tm.SendRemoteMsg(TMRemoteTrigger{AutoUpdate: typedReq.AutoUpdate, IsGeneric: typedReq.IsGeneric})
+	case *Join:
+		//fmt.Printf("[REPL]HandleJoin: new goroutine")
+		go repl.handleJoin(typedReq)
+		crdt.NReplicas++
+	case *RequestBucket:
+		//fmt.Printf("[REPL]HandleRequestBucket: new goroutine")
+		go repl.handleRequestBucket(typedReq)
+	case *ReplyJoin:
+		fmt.Println("[REPL]Unexpected ReplyJoin", *typedReq)
+	case *ReplyBucket:
+		fmt.Println("[REPL]Unexpected ReplyBucket", *typedReq)
+	case *ReplyEmpty:
+		fmt.Println("[REPL]Unexpected ReplyEmpty")
+	default:
+		utilities.FancyErrPrint(utilities.REPL_PRINT, repl.replicaID, "failed to process remoteConnection message - unknown msg type.")
+		utilities.FancyErrPrint(utilities.REPL_PRINT, repl.replicaID, typedReq)
+		fmt.Printf("%T\n", typedReq)
+	}
+
+	//time.Sleep(5000 * time.Millisecond)
+	utilities.FancyInfoPrint(utilities.REPL_PRINT, repl.replicaID, "receiveRemoteTxns finished processing request")
+}
+
+/***** JOINING EXISTING SERVERS LOGIC *****/
+
+/***** Existing server logic *****/
+
+func (repl *Replicator) handleJoin(req *Join) {
+	joinChan := make(chan TimestampPartIdPair, len(repl.localPartitions))
+	repl.tm.mat.SendRequestToAllChannels(MaterializerRequest{MatCommitedClkArgs{ReplyChan: joinChan}})
+	replyJoin := ReplyJoin{SenderID: repl.replicaID, CommonBkts: req.CommonBkts,
+		Clks: make([]clocksi.Timestamp, len(repl.localPartitions)), ReqIP: localRabbitMQIP}
+
+	sendTo := repl.remoteConn.AddReplica(req.ReqIP, repl.buckets, req.SenderID)
+	for range repl.localPartitions {
+		reply := <-joinChan
+		replyJoin.Clks[reply.partID] = reply.Timestamp
+	}
+	repl.tm.SendRemoteMsg(TMReplicaID{ReplicaID: req.SenderID})
+	repl.remoteConn.SendReplyJoin(replyJoin, sendTo)
+}
+
+func (repl *Replicator) handleRequestBucket(req *RequestBucket) {
+	bktMap := make(map[string]struct{}, len(req.Buckets))
+	for _, bkt := range req.Buckets {
+		bktMap[bkt] = struct{}{}
+	}
+	tmRequest := TMGetSnapshot{Buckets: bktMap, ReplyChan: make(chan TMGetSnapshotReply)}
+	repl.tm.SendRemoteMsg(tmRequest)
+	snapshotReply := <-tmRequest.ReplyChan
+	replyBucket := ReplyBucket{SenderID: repl.replicaID, PartStates: snapshotReply.PartStates, Clk: snapshotReply.Timestamp}
+	repl.remoteConn.SendReplyBucket(replyBucket, req.ReqIP)
+}
+
+/***** New server logic *****/
+
+func (repl *Replicator) handleReplyJoin(req *ReplyJoin) {
+	fmt.Println("Handling replyJoin")
+	repl.holdReplyJoins[repl.nHoldJoins] = req
+	repl.waitFor--
+	repl.nHoldJoins++
+	repl.tm.SendRemoteMsg(TMReplicaID{ReplicaID: req.SenderID})
+	if repl.waitFor == 0 {
+		//Got all the replies, so we can now ask for the buckets
+		repl.askBuckets()
+	}
+}
+
+func (repl *Replicator) handleReplyBucket(req *ReplyBucket) {
+	//Need to count how many were received in order to, at the end, return to the "normal replicator state"
+	repl.tm.SendRemoteMsg(TMApplySnapshot{Timestamp: req.Clk, PartStates: req.PartStates})
+	repl.waitFor--
+	if repl.waitFor == 0 {
+		repl.allDone = true
+	}
+}
+
+func (repl *Replicator) handleReplyEmpty() {
+	repl.waitFor--
+	if repl.waitFor == 0 && repl.nHoldJoins == 0 {
+		//Everyone replied empty. Thus, no need to ask for buckets
+		repl.allDone = true
+		fmt.Println("ReplyEmpty, setting all done to true")
+	} else if repl.waitFor == 0 {
+		fmt.Println("Hold joins:", len(repl.holdReplyJoins), repl.holdReplyJoins)
+		//At least one of the replies wasn't empty, thus we should ask for buckets
+		repl.askBuckets()
+	}
+	fmt.Println("ReplyEmpty")
+}
+
+func (repl *Replicator) createConnAndReplyEmpty(req *Join) {
+	sendTo := repl.remoteConn.AddReplica(req.ReqIP, repl.buckets, req.SenderID)
+	repl.remoteConn.SendReplyEmpty(sendTo)
+}
+
+func (repl *Replicator) joinGroup() {
+	fmt.Println("joinGroup")
+	go repl.queueRemoteRequests()
+	repl.waitFor = len(repl.remoteConn.conns)
+	crdt.NReplicas = int32(repl.waitFor + 1)
+	repl.holdReplyJoins = make([]*ReplyJoin, repl.waitFor)
+	fmt.Println("Requesting remoteGroup to send join")
+	repl.remoteConn.SendJoin(repl.buckets, repl.replicaID)
+}
+
+// While the replica is in joining process, this method is used to queue any non-join related msg to a queue.
+// Join msgs are processed differently depending on its type.
+func (repl *Replicator) queueRemoteRequests() {
+	var msg ReplicatorMsg
+	for !repl.allDone {
+		msg = repl.remoteConn.GetNextRemoteRequest()
+		switch typedMsg := msg.(type) {
+		case *ReplyJoin:
+			fmt.Println("[REPL]ReplyJoin")
+			repl.handleReplyJoin(typedMsg)
+		case *ReplyBucket:
+			fmt.Println("[REPL]ReplyBucket")
+			repl.handleReplyBucket(typedMsg)
+		case *Join:
+			fmt.Println("[REPL]Join")
+			//fmt.Println(typedMsg.ReplyID)
+			//repl.remoteConn.SendReplyEmpty(typedMsg.ReplyID)
+			repl.createConnAndReplyEmpty(typedMsg)
+		case *ReplyEmpty:
+			fmt.Println("[REPL]ReplyEmpty")
+			//Another replica that is also joining
+			repl.handleReplyEmpty()
+		default:
+			fmt.Println("[REPL]Default")
+			repl.holdMsgs = append(repl.holdMsgs, msg)
+		}
+	}
+	fmt.Println("Leaving queueRemoteRequests")
+	repl.tm.SendRemoteMsg(TMStart{})
+	//Handle messages on hold
+	for _, holdReq := range repl.holdMsgs {
+		repl.handleRemoteRequest(holdReq)
+	}
+	repl.JoinInfo = JoinInfo{}
+	go repl.receiveRemoteTxns()
+	go repl.replicateCycle()
+}
+
+func (repl *Replicator) askBuckets() {
+	//For each bucket, choose the replica with highest clock.
+	//If there's no clock for a bucket, then we can assume that bucket has no content yet anywhere.
+	bestBktClks := make(map[string]clocksi.Timestamp)
+	askTo := make(map[string]string) //bucket -> ip
+	repl.holdReplyJoins = repl.holdReplyJoins[0:repl.nHoldJoins]
+	for _, replyJoin := range repl.holdReplyJoins {
+		for i, clk := range replyJoin.Clks {
+			bkt := replyJoin.CommonBkts[i]
+			if clk.IsHigher(bestBktClks[bkt]) {
+				bestBktClks[bkt] = clk
+				askTo[bkt] = replyJoin.ReqIP
+			}
+		}
+	}
+	//"Invert" askTo, i.e., get the mapping of replica -> bkts.
+	replicaToBkt := make(map[string][]string)
+	for bkt, replica := range askTo {
+		replicaToBkt[replica] = append(replicaToBkt[replica], bkt)
+	}
+	repl.waitFor = len(replicaToBkt)
+	ownIP := localRabbitMQIP
+	//Finally, send requestBkt msgs
+	for askReplicaIP, buckets := range replicaToBkt {
+		repl.remoteConn.SendRequestBucket(RequestBucket{Buckets: buckets, SenderID: repl.replicaID, ReqIP: ownIP}, askReplicaIP)
+	}
+}
+
+/*func (repl *Replicator) getNewTxns() {
+	utilities.FancyDebugPrint(utilities.REPL_PRINT, repl.replicaID, "starting getNewTxns()")
+	//replyChans := make([]chan StableClkUpdatesPair, len(repl.localPartitions))
+	//atLeastOneUpd := false
+
+	//start := time.Now()
+	//Send request for txns
+	for id, part := range repl.localPartitions {
+		partEntry := repl.txnCache[id]
+		//replyChans[id] = make(chan StableClkUpdatesPair, 1)
+		lastClk := partEntry[len(partEntry)-1].clk
+		part.SendLoggerRequest(LoggerRequest{LogRequestArgs: LogTxnArgs{lastClock: lastClk, ReplyChan: repl.partsChan}})
+		//fmt.Printf("[REPLICATOR]Sent request to obtain transactions from partition %d at %s\n", id, time.Now().Format("15:04:05.000"))
+	}
+	utilities.FancyDebugPrint(utilities.REPL_PRINT, repl.replicaID, "getNewTxns() second part")
+
+	//Receive replies and cache them
+	//for id, replyChan := range replyChans {
+	for i := uint64(0); i < nGoRoutines; i++ {
+		//reply := <-replyChan
+		//fmt.Printf("[REPLICATOR]Waiting for reply from partition %d at %s\n", i, time.Now().Format("15:04:05.000"))
+		reply := <-repl.partsChan
+		cacheEntry := repl.txnCache[int(reply.partID)]
+		//Remove last entry which is the previous, old, stable clock
+		if len(cacheEntry) > 0 {
+			cacheEntry = cacheEntry[:len(cacheEntry)-1]
+		}
+		//if len(reply.upds) > 0 {
+		//	fmt.Printf("Received txns to replicate from log %d. Number of entries: %d\n", id, len(reply.upds))
+		//}
+		cacheEntry = append(cacheEntry, reply.upds...)
+		reply.upds = nil //TODO: Maybe need to go through all positions and set them to nil? :(
+		//if len(reply.upds) > 0 {
+		//	atLeastOneUpd = true
+		//}
+		repl.txnCache[int(reply.partID)] = append(cacheEntry, PairClockUpdates{clk: reply.stableClock, upds: []crdt.UpdateObjectParams{}})
+	}
+	//fmt.Printf("[REPLICATOR]Received reply from all partitions at %s\n", time.Now().Format("15:04:05.000"))
+	//end := time.Now()
+	//if atLeastOneUpd {
+	//	fmt.Printf("[REPLICATOR][GetNewTxns()]Asked for txns to replicate at %s, got reply at %s.\n", start.Format("2006-01-02 15:04:05.000"), end.Format("2006-01-02 15:04:05.000"))
+	//}
+	utilities.FancyDebugPrint(utilities.REPL_PRINT, repl.replicaID, "getNewTxns() finish")
+}*/
+
+/*func (repl *Replicator) prepareDataToSend() (toSend []RemoteTxn) { //TODO: I suspect this is sending also the dummy clock, which is not needed.
+	//start := time.Now()
+	utilities.FancyDebugPrint(utilities.REPL_PRINT, repl.replicaID, "starting prepareDataToSend")
+	toSend = make([]RemoteTxn, 0, toSendInitialSize)
+	foundStableClk := false
+	for !foundStableClk {
+		minClk := repl.txnCache[0][0].clk //Using first entry of first partition as initial value
+		var txnUpdates map[int][]crdt.UpdateObjectParams = make(map[int][]crdt.UpdateObjectParams, nGoRoutines)
+		//utilities.FancyDebugPrint(utilities.REPL_PRINT, repl.replicaID, "nPartitions:", len(repl.localPartitions))
+		for id := 0; id < len(repl.localPartitions); id++ {
+			partCache := repl.txnCache[id]
+
+			//utilities.FancyDebugPrint(utilities.REPL_PRINT, repl.replicaID, "non empty cache entry:", *partCache[0].clk, *partCache[0].upds)
+			firstEntry := partCache[0]
+			clkCompare := (firstEntry.clk).Compare(minClk)
+			if clkCompare == clocksi.LowerTs {
+				//Clock update, this partition has no further transactions. If no smaller clk is found, then this must be the last iteration
+				if len(firstEntry.upds) == 0 {
+					foundStableClk = true
+					//Cleaning buffer
+					partCache = make([]PairClockUpdates, 1, cacheInitialSize)
+					partCache[0] = firstEntry
+					repl.txnCache[id] = partCache
+				} else {
+					foundStableClk = false
+				}
+				minClk = firstEntry.clk
+				txnUpdates = nil
+				txnUpdates = make(map[int][]crdt.UpdateObjectParams, nGoRoutines)
+				txnUpdates[id] = firstEntry.upds
+			} else if clkCompare == clocksi.EqualTs {
+				txnUpdates[id] = firstEntry.upds
+				if len(firstEntry.upds) == 0 {
+					foundStableClk = true
+					//Cleaning buffer
+					partCache = make([]PairClockUpdates, 1, cacheInitialSize)
+					partCache[0] = firstEntry
+					repl.txnCache[id] = partCache
+				}
+			}
+		}
+		if !foundStableClk {
+			//Safe to include the actual txn's clock in the list to send. We can remove entry from cache
+			utilities.FancyDebugPrint(utilities.REPL_PRINT, repl.replicaID, "appending upds. Upds:", txnUpdates)
+			toSend = append(toSend, RemoteTxn{Clk: minClk, Upds: txnUpdates, SenderID: repl.replicaID})
+			utilities.FancyDebugPrint(utilities.REPL_PRINT, repl.replicaID, "upds to send:", txnUpdates)
+			for id := range txnUpdates {
+				repl.txnCache[id] = repl.txnCache[id][1:]
+			}
+		}
+	}
+	//end := time.Now()
+	//if len(toSend) > 0 {
+	//	fmt.Printf("[REPLICATOR][PrepareDataToSend]Started processing data to send at %s. Finished at %s.\n", start.Format("2006-01-02 15:04:05.000"), end.Format("2006-01-02 15:04:05.000"))
+	//}
+	utilities.FancyDebugPrint(utilities.REPL_PRINT, repl.replicaID, "finished prepareDataToSend")
+	return
+}*/

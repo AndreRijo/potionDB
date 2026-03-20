@@ -12,6 +12,7 @@ import (
 	"potionDB/crdt/crdt"
 	"potionDB/crdt/proto"
 	tools "potionDB/potionDB/utilities"
+	"potionDB/shared/shared"
 
 	//pb "github.com/golang/protobuf/proto"
 	pb "google.golang.org/protobuf/proto"
@@ -102,7 +103,7 @@ func (ci CodingInfo) DecInitialize() CodingInfo {
 func SendProto(code byte, protobf pb.Message, writer io.Writer) {
 	err := SendProtoNoCheck(code, protobf, writer)
 	tools.CheckErr("Sending protobuf err:", err)
-	//fmt.Println("Protobuf sent succesfully!\n")
+	//fmt.Printf("Protobuf code %d sent succesfully!\n", code)
 }
 
 /*func SendProtoMarshal(code byte, marshalProto []byte, writer io.Writer) error {
@@ -390,7 +391,7 @@ func CreateServerConn() (protobuf *proto.ApbServerConn) {
 	return &proto.ApbServerConn{}
 }
 
-func CreateServerConnReplicaID(replicaID int16, buckets []string, serverIP string) *proto.ApbServerConnReplicaID {
+func CreateServerConnReplicaID(replicaID uint16, buckets []string, serverIP string) *proto.ApbServerConnReplicaID {
 	return &proto.ApbServerConnReplicaID{ReplicaID: pb.Int32(int32(replicaID)), MyBuckets: buckets, MyIP: &serverIP}
 }
 
@@ -402,7 +403,7 @@ func CreateMultiClientConn(nClients int) (protobuf *proto.ApbMultiClientConnect)
 
 func CreateStartTransactionResp(txnId TransactionId, ts clocksi.Timestamp) (protobuf *proto.ApbStartTransactionResp) {
 	protobuf = &proto.ApbStartTransactionResp{
-		Success:               pb.Bool(true),
+		Success:               shared.TRUE_POINTER,
 		TransactionDescriptor: createTxnDescriptorBytes(txnId, ts),
 	}
 	return
@@ -410,7 +411,7 @@ func CreateStartTransactionResp(txnId TransactionId, ts clocksi.Timestamp) (prot
 
 func CreateCommitOkResp(txnId TransactionId, ts clocksi.Timestamp) (protobuf *proto.ApbCommitResp) {
 	protobuf = &proto.ApbCommitResp{
-		Success:    pb.Bool(true),
+		Success:    shared.TRUE_POINTER,
 		CommitTime: createTxnDescriptorBytes(txnId, ts),
 	}
 	return
@@ -418,7 +419,7 @@ func CreateCommitOkResp(txnId TransactionId, ts clocksi.Timestamp) (protobuf *pr
 
 func CreateCommitFailedResp(errorCode uint32) (protobuf *proto.ApbCommitResp) {
 	protobuf = &proto.ApbCommitResp{
-		Success:   pb.Bool(false),
+		Success:   shared.FALSE_POINTER,
 		Errorcode: pb.Uint32(errorCode),
 	}
 	return
@@ -437,7 +438,7 @@ func CreateStaticReadResp(objectStates []crdt.State, txnId TransactionId, ts clo
 func CreateReadObjectsResp(objectStates []crdt.State) (protobuf *proto.ApbReadObjectsResp) {
 	readReplies := convertAntidoteStatesToProto(objectStates)
 	protobuf = &proto.ApbReadObjectsResp{
-		Success: pb.Bool(true),
+		Success: shared.TRUE_POINTER,
 		Objects: readReplies,
 	}
 	return
@@ -445,7 +446,7 @@ func CreateReadObjectsResp(objectStates []crdt.State) (protobuf *proto.ApbReadOb
 
 func CreateOperationResp() (protobuf *proto.ApbOperationResp) {
 	protobuf = &proto.ApbOperationResp{
-		Success: pb.Bool(true),
+		Success: shared.TRUE_POINTER,
 	}
 	return
 }
@@ -485,9 +486,9 @@ func CreateMultiClientConnReply() (protobuf *proto.ApbMultiClientConnectResp) {
 func DecodeTxnDescriptor(bytes []byte) (txnId TransactionId, ts clocksi.Timestamp) {
 	if len(bytes) == 0 {
 		//FromBytes of clocksi can handle nil arrays
-		txnId, ts = TransactionId(rand.Uint64()), clocksi.ClockSiTimestamp{}.FromBytes(bytes)
+		txnId, ts = TransactionId(rand.Uint64()), clocksi.SliceTimestamp{}.FromBytes(bytes)
 	} else {
-		txnId, ts = TransactionId(binary.BigEndian.Uint64(bytes[0:8])), clocksi.ClockSiTimestamp{}.FromBytes(bytes[8:])
+		txnId, ts = TransactionId(binary.BigEndian.Uint64(bytes[0:8])), clocksi.SliceTimestamp{}.FromBytes(bytes[8:])
 	}
 	return
 }
@@ -519,7 +520,7 @@ func ProtoReadToAntidoteObjects(fullReads []*proto.ApbBoundObject, partialReads 
 		boundObj = currObj.GetObject()
 		objs[i+len(fullReads)] = crdt.ReadObjectParams{
 			KeyParams: crdt.MakeKeyParams(string(boundObj.GetKey()), boundObj.GetType(), string(boundObj.GetBucket())),
-			ReadArgs:  *crdt.PartialReadOpToAntidoteRead(currObj.GetArgs(), boundObj.GetType(), currObj.GetReadtype()),
+			ReadArgs:  crdt.PartialReadOpToAntidoteRead(currObj.GetArgs(), boundObj.GetType(), currObj.GetReadtype()),
 		}
 	}
 	return
@@ -651,7 +652,7 @@ func createBoundObjectsArray(readParams []crdt.ReadObjectParams) (protobufs []*p
 }
 
 func createBoundObject(key string, crdtType proto.CRDTType, bucket string) (protobuf *proto.ApbBoundObject) {
-	return &proto.ApbBoundObject{Key: []byte(key), Type: &crdtType, Bucket: []byte(bucket)}
+	return &proto.ApbBoundObject{Key: []byte(key), Type: crdtType.Enum(), Bucket: []byte(bucket)}
 }
 
 func createTxnDescriptorBytes(txnId TransactionId, ts clocksi.Timestamp) (bytes []byte) {

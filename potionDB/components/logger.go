@@ -7,6 +7,8 @@ import (
 	"potionDB/crdt/clocksi"
 	"potionDB/crdt/crdt"
 	"potionDB/shared/shared"
+
+	"github.com/AndreRijo/go-tools/src/tools"
 )
 
 /*****Logging interface*****/
@@ -47,6 +49,11 @@ type LogClkArgs struct {
 
 type LogClkTimeoutArgs struct{}
 
+// Note: the returned buffer must already be clean (i.e., empty)
+type LogBufferReturnArgs struct {
+	Buf []PairClockUpdates
+}
+
 type StableClkUpdatesPair struct {
 	upds        []PairClockUpdates
 	stableClock clocksi.Timestamp
@@ -66,6 +73,7 @@ const (
 	TxnLogRequest        LogRequestType = 1
 	ClkLogRequest        LogRequestType = 2
 	LogClkTimeoutRequest LogRequestType = 3
+	ReturnBufLogRequest  LogRequestType = 4
 )
 
 func (args LogCommitArgs) GetRequestType() (requestType LogRequestType) {
@@ -84,26 +92,30 @@ func (args LogClkTimeoutArgs) GetRequestType() (requestType LogRequestType) {
 	return LogClkTimeoutRequest
 }
 
+func (args LogBufferReturnArgs) GetRequestType() (requestType LogRequestType) {
+	return ReturnBufLogRequest
+}
+
 /*****In-Memory Logger implementation*****/
 
 type MemLogger struct {
-	started       bool
-	log           []PairClockUpdates
-	lastSharedPos int
-	currentTxnPos int
+	started bool
+	//log           []PairClockUpdates //TODO: Should use SliceWithCounter.
+	//nextLogBuf    []PairClockUpdates //Idea: we recycle log buffers to avoid allocation/GC overload. This variable keeps a log buffer returned from Replicator that is safe to be re-used.
+	log        tools.SliceWithCounter[PairClockUpdates]
+	nextLogBuf tools.SliceWithCounter[PairClockUpdates] //Idea: we recycle log buffers to avoid allocation/GC overload. This variable keeps a log buffer returned from Replicator that is safe to be re-used.
+	//logLock       sync.Mutex
 	//matChan       chan LoggerRequest
 	//replChan      chan LoggerRequest
+	//lastSharedPos int
+	//currentTxnPos int
 	logChan chan LoggerRequest
 	partId  uint64
 	mat     *Materializer //Used to send the safeClk request
-	//Protects log. While we want to process materializer/replicator requests concurrently
-	//(in order to avoid each one waiting for the other and, thus, block forever), we want
-	//to isolate access to the log.
-	//logLock sync.Mutex
-	//matReplyChan  chan clocksi.Timestamp
 
 	replReplyChan chan StableClkUpdatesPair
-	timer         *time.Timer
+	//timer          *time.Timer
+	matTimeoutChan chan bool //Check matTimeoutHelper() for details
 }
 
 type PairClockUpdates struct {
@@ -117,34 +129,13 @@ const (
 )
 
 func (logger *MemLogger) SendLoggerRequest(request LoggerRequest) {
-	/*timer := time.NewTimer(7 * time.Second)
-	select {
-	case logger.logChan <- request:
-		timer.Stop()
-	case <-timer.C:
-		fmt.Printf("[LOG%d]Timeout while sending request of type %v to logger %d.\n", logger.partId, request.GetRequestType(), logger.partId)
-	}*/
 	logger.logChan <- request
 }
-
-/*
-func (logger *MemLogger) SendLoggerRequest(request LoggerRequest) {
-	switch request.GetRequestType() {
-	case CommitLogRequest:
-		logger.matChan <- request
-	case TxnLogRequest:
-		logger.replChan <- request
-	}
-}
-*/
 
 // Starts goroutine that listens to requests
 func (logger *MemLogger) Initialize(mat *Materializer, partId uint64) {
 	if !logger.started {
-		logger.log = make([]PairClockUpdates, initLogCapacity)
-		logger.lastSharedPos, logger.currentTxnPos = 0, 0
-		//logger.matChan = make(chan LoggerRequest, 1)
-		//logger.replChan = make(chan LoggerRequest, 1)
+		logger.log = tools.NewSliceWithCounter[PairClockUpdates](initLogCapacity)
 		logger.logChan = make(chan LoggerRequest, 500)
 		//logger.logChan = make(chan LoggerRequest, 10000)
 		logger.started = true
@@ -152,40 +143,20 @@ func (logger *MemLogger) Initialize(mat *Materializer, partId uint64) {
 		logger.mat = mat
 		//logger.matReplyChan = make(chan clocksi.Timestamp, 5) //Mat may reply late. If so, we will ignore previous reply.
 		go logger.handleRequests()
-		//go logger.handleMatRequests()
-		//go logger.handleReplicatorRequests()
+		//go logger.forceClean()
+		go logger.matTimeoutHelper()
 	}
 }
 
 func (logger *MemLogger) Reset() {
 	//logger.log = make([]PairClockUpdates, 0, initLogCapacity)
-	logger.log = make([]PairClockUpdates, initLogCapacity)
-	logger.lastSharedPos, logger.currentTxnPos = 0, 0
+	//logger.lastSharedPos, logger.currentTxnPos = 0, 0
+	logger.log = tools.NewSliceWithCounter[PairClockUpdates](initLogCapacity)
 	fmt.Printf("[LOG %d]Reset complete.\n", logger.partId)
 }
 
 func (logger *MemLogger) handleRequests() {
-	//var timer *time.Timer
 	for {
-		/*timer = time.NewTimer(7 * time.Second)
-		select {
-		case req := <-logger.logChan:
-			timer.Stop()
-			switch req.GetRequestType() {
-			case TxnLogRequest:
-				logger.handleTxnLogRequest(req.LogRequestArgs.(LogTxnArgs))
-			case CommitLogRequest:
-				logger.handleCommitLogRequest(req.LogRequestArgs.(LogCommitArgs))
-			case ClkLogRequest:
-				logger.handleMatClkRequest(req.LogRequestArgs.(LogClkArgs))
-			case LogClkTimeoutRequest:
-				logger.handleClkTimeoutRequest()
-			default:
-				fmt.Println("[LOG]Unexpected request:", req)
-			}
-		case <-timer.C:
-			fmt.Printf("[LOG%d]No request received in the last 7s. Current time: %v.\n", logger.partId, time.Now().Format("15:04:05.000"))
-		}*/
 		req := <-logger.logChan
 		//fmt.Printf("[LOG%d]Got request %d at %s.\n", logger.partId, req.GetRequestType(), time.Now().Format("15:04:05.000"))
 		switch req.GetRequestType() {
@@ -197,44 +168,27 @@ func (logger *MemLogger) handleRequests() {
 			logger.handleMatClkRequest(req.LogRequestArgs.(LogClkArgs))
 		case LogClkTimeoutRequest:
 			logger.handleClkTimeoutRequest()
+		case ReturnBufLogRequest:
+			logger.handleBufferReturnRequest(req.LogRequestArgs.(LogBufferReturnArgs))
 		default:
-			fmt.Println("[LOG]Unexpected request:", req)
+			fmt.Printf("[LOG%d]Unexpected request: %+v\n", logger.partId, req)
 		}
 	}
 }
 
-/*
-func (logger *MemLogger) handleMatRequests() {
-	for {
-		if shared.IsLogDisabled {
-			<-logger.matChan
-		} else {
-			request := <-logger.matChan
-			logger.handleCommitLogRequest(request.LogRequestArgs.(LogCommitArgs))
-		}
-	}
-}*/
-
-/*func (logger *MemLogger) handleReplicatorRequests() {
-	for {
-		request := <-logger.replChan
-		logger.handleTxnLogRequest(request.LogRequestArgs.(LogTxnArgs))
-	}
-}*/
-
 func (logger *MemLogger) handleCommitLogRequest(request LogCommitArgs) {
-	//logger.logLock.Lock()
 	if shared.IsLogDisabled {
 		return
 	}
-	if logger.currentTxnPos == cap(logger.log) {
+	//fmt.Printf("[LOG%d]Appending txn to log with clk %s and %d upds.\n", logger.partId, request.TxnClk.ToString(), len(request.Upds))
+	logger.log.Append(PairClockUpdates{clk: request.TxnClk, upds: request.Upds})
+	/*if logger.currentTxnPos == cap(logger.log) {
 		logger.log = append(logger.log, PairClockUpdates{clk: request.TxnClk, upds: request.Upds})
 		logger.log = logger.log[:cap(logger.log)]
 	} else {
 		logger.log[logger.currentTxnPos] = PairClockUpdates{clk: request.TxnClk, upds: request.Upds}
 	}
-	logger.currentTxnPos++
-	//logger.logLock.Unlock()
+	logger.currentTxnPos++*/
 }
 
 /*
@@ -247,64 +201,99 @@ In order to avoid deadlocks with channels (as we have MAT -> LOG and LOG -> MAT 
 */
 func (logger *MemLogger) handleTxnLogRequest(request LogTxnArgs) {
 	if shared.IsLogDisabled {
-		request.ReplyChan <- StableClkUpdatesPair{stableClock: clocksi.NewClockSiTimestampFromId(0), upds: []PairClockUpdates{}, partID: logger.partId}
+		request.ReplyChan <- StableClkUpdatesPair{stableClock: clocksi.NewSliceTimestamp(), upds: []PairClockUpdates{}, partID: logger.partId}
 		return
 	}
-	/*if logger.currentTxnPos > 0 {
-		request.ReplyChan <- StableClkUpdatesPair{stableClock: logger.log[logger.currentTxnPos-1].clk.Copy(), upds: nil, partID: logger.partId}
-		return
-	}
-	request.ReplyChan <- StableClkUpdatesPair{stableClock: clocksi.DummyTs.Copy(), upds: nil, partID: logger.partId}
-	return*/
 	logger.replReplyChan = request.ReplyChan
-	logger.timer = time.NewTimer(500 * time.Millisecond)
-	go func() { //TODO: Possible goroutine leak... Would be nice to improve on this. Maybe should make an always ongoing goroutine for doing this task?
-		//To avoid concurrency issues, we send a request to... the log.
-		<-logger.timer.C
-		logger.logChan <- LoggerRequest{LogClkTimeoutArgs{}}
-	}()
 	//fmt.Printf("[LOG%d]Received txn log request. Sending safe clock request to MAT. Current time: %v\n", logger.partId, time.Now().Format("15:04:05.000"))
 	//Send on a different goroutine to prevent log from blocking if materializer's channel is full.
 	go logger.mat.SendRequestToChannel(MaterializerRequest{MatRequestArgs: MatSafeClkArgs{}}, uint64(logger.partId))
 }
 
 func (logger *MemLogger) handleMatClkRequest(request LogClkArgs) {
-	logger.timer.Stop()
+	//logger.timer.Stop()
 	if logger.replReplyChan == nil {
 		//fmt.Printf("[LOG%d]Received clk from MAT, but the timeout already fired and replied. Thus, ignoring MAT reply. Current time: %v\n", logger.partId, time.Now().Format("15:04:05.000"))
 		return
 	}
-	var txns []PairClockUpdates
+	/*var txns []PairClockUpdates
 	if logger.lastSharedPos == logger.currentTxnPos {
 		txns = nil
 	} else {
 		txns = logger.log[logger.lastSharedPos:logger.currentTxnPos]
-		logger.lastSharedPos = logger.currentTxnPos
-		if !keepWholeLog {
-			logger.lastSharedPos, logger.currentTxnPos = 0, 0
-		}
+		logger.log, logger.lastSharedPos, logger.currentTxnPos = make([]PairClockUpdates, len(logger.log)), 0, 0
+		//We create a new log as we cannot re-use the positions we have shared with the Replicator - we don't know when Replicator will be done with copying them.
+		//So, unless we want to wait for Replicator to be done copying (bad idea as we would need to sync with all partitions in practice), better do like this
+		//At least this way the data will get automatically GC'ed.
 	}
-	//fmt.Printf("[LOG%d]Received clk from MAT. Sending last clock of log to repl. Current time: %v\n", logger.partId, time.Now().Format("15:04:05.000"))
-	logger.replReplyChan <- StableClkUpdatesPair{stableClock: request.Clk, upds: txns, partID: logger.partId}
-	logger.replReplyChan = nil
+	//fmt.Printf("[LOG%d]Received clk from MAT. Sending last clock of log to repl. NTxns: %d. Current time: %v\n", logger.partId, len(txns), time.Now().Format("15:04:05.000"))
+	//fmt.Printf("Log%d to Repl: %d txns.\t", logger.partId, len(txns))
+	//logger.replReplyChan <- StableClkUpdatesPair{stableClock: request.Clk, upds: txns, partID: logger.partId}
+	//logger.replReplyChan = nil*/
+
+	logger.replyReplHelper(request.Clk)
 }
 
 func (logger *MemLogger) handleClkTimeoutRequest() {
-	if logger.replReplyChan == nil || logger.lastSharedPos == logger.currentTxnPos {
-		//fmt.Printf("[LOG%d]Timer fired. Is ReplReplyChan nil? %v. Is lastSharedPost == currentTxnPos? %v. Current time: %v.\n",
+	//if logger.replReplyChan == nil || logger.lastSharedPos == logger.currentTxnPos {
+	if logger.replReplyChan == nil || logger.log.IsEmpty() {
+		//fmt.Printf("[LOG%d]Timer fired. Is ReplReplyChan nil? %v. Is lastSharedPos == currentTxnPos? %v. Current time: %v.\n",
 		//logger.partId, logger.replReplyChan == nil, logger.lastSharedPos == logger.currentTxnPos, time.Now().Format("15:04:05.000"))
-		return //If the former, we already received the reply from MAT and replied to Repl. If the later, we have to keep waiting for MAT :()
+		return //If the former, we already received the reply from MAT and replied to Repl. If the later, we have to keep waiting for MAT :( (as there are no txns, so we need mat to give us a clk to know what's safe))
 	}
 
-	txns := logger.log[logger.lastSharedPos:logger.currentTxnPos]
-	logger.lastSharedPos = logger.currentTxnPos
-	if !keepWholeLog {
-		logger.lastSharedPos, logger.currentTxnPos = 0, 0
-	}
+	logger.replyReplHelper(logger.log.Get(logger.log.Len() - 1).clk.Copy())
+
+	/*txns := logger.log[logger.lastSharedPos:logger.currentTxnPos]
+	logger.log, logger.lastSharedPos, logger.currentTxnPos = make([]PairClockUpdates, len(logger.log)), 0, 0
+	//Check comments on handleMatClkRequest.
 
 	//fmt.Printf("[LOG%d]Timer fired. Sending last clock of log to repl. Current time: %v.\n", logger.partId, time.Now().Format("15:04:05.000"))
 	logger.replReplyChan <- StableClkUpdatesPair{stableClock: txns[len(txns)-1].clk.Copy(), upds: txns, partID: logger.partId}
+	logger.replReplyChan = nil*/
+}
+
+func (logger *MemLogger) replyReplHelper(stableClk clocksi.Timestamp) {
+	txns := logger.log.ToSlice()
+	//fmt.Printf("[LOG%d]Replying to repl with stable clock %s and %d txns.\n", logger.partId, stableClk.ToString(), len(txns))
+	logger.replReplyChan <- StableClkUpdatesPair{stableClock: stableClk, upds: txns, partID: logger.partId}
 	logger.replReplyChan = nil
+	if logger.nextLogBuf.Cap() > 0 { //We can re-use this buffer
+		logger.log = logger.nextLogBuf
+		logger.nextLogBuf = tools.SliceWithCounter[PairClockUpdates]{}
+	} else {
+		logger.log = tools.NewSliceWithCounter[PairClockUpdates](tools.Max(len(txns), initLogCapacity))
+	}
+}
+
+// This routines waits for handleTxnLogRequest() to be fired. It prepares a timeout in case Materializer is busy.
+func (logger *MemLogger) matTimeoutHelper() {
+	for {
+		<-logger.matTimeoutChan //Wait for a message to arrive.
+		select {
+		case <-logger.matTimeoutChan: //If we receive this, it means the timeout did not fire. Good! Nothing to do.
+		case <-time.After(500 * time.Millisecond): //If we receive this, it means the timeout fired.
+			logger.logChan <- LoggerRequest{LogClkTimeoutArgs{}}
+		}
+	}
+}
+
+func (logger *MemLogger) handleBufferReturnRequest(request LogBufferReturnArgs) {
+	if logger.nextLogBuf.Cap() > cap(request.Buf) { //In case we already have a buffer, we keep the longest one.
+		logger.nextLogBuf = tools.ToSliceWithCounter(request.Buf[:cap(request.Buf)]) //Unlock full capacity.
+	} //else: just ignore. Later GC will get rid of it.
+}
+
+// NOTE: THIS IS TEMPORARY. THIS WILL LEAD TO TROUBLE, AS IT MAY REMOVE ENTRIES THAT REPL MAY STILL REQUEST OR IS STILL USING.
+func (logger *MemLogger) forceClean() {
+	for {
+		time.Sleep(140 * time.Second)
+		/*for i := range logger.log {
+			logger.log[i] = PairClockUpdates{}
+		}*/
+		logger.log.DeepClear()
+		fmt.Printf("[LOG %d]Forced log clear.\n", logger.partId)
+	}
 }
 
 /*

@@ -69,7 +69,7 @@ func ReadFromNetwork(nBytes int, conn net.Conn) (sizeBuf []byte) {
 }
 
 // Prints a msg to stdout with a prefix of who generated the message and the indication that it is a debug message
-func FancyDebugPrint(src string, replicaID int16, msgs ...interface{}) {
+func FancyDebugPrint(src string, replicaID uint16, msgs ...interface{}) {
 	if !allOutputDisabled {
 		if _, has := disabledDebugs[src]; !has {
 			fancyPrint(DEBUG, src, replicaID, msgs)
@@ -78,7 +78,7 @@ func FancyDebugPrint(src string, replicaID int16, msgs ...interface{}) {
 }
 
 // Prints a msg to stdout with a prefix of who generated the message and the indication that it is an info message
-func FancyInfoPrint(src string, replicaID int16, msgs ...interface{}) {
+func FancyInfoPrint(src string, replicaID uint16, msgs ...interface{}) {
 	if !allOutputDisabled {
 		if _, has := disabledInfos[src]; !has {
 			fancyPrint(INFO, src, replicaID, msgs)
@@ -87,7 +87,7 @@ func FancyInfoPrint(src string, replicaID int16, msgs ...interface{}) {
 }
 
 // Prints a msg to stdout with a prefix of who generated the message and the indication that it is a warning message
-func FancyWarnPrint(src string, replicaID int16, msgs ...interface{}) {
+func FancyWarnPrint(src string, replicaID uint16, msgs ...interface{}) {
 	if !allOutputDisabled {
 		if _, has := disabledWarnings[src]; !has {
 			fancyPrint(WARNING, src, replicaID, msgs)
@@ -96,13 +96,13 @@ func FancyWarnPrint(src string, replicaID int16, msgs ...interface{}) {
 }
 
 // Prints a msg to stdout with a prefix of who generated the message and the indication that it is an error message
-func FancyErrPrint(src string, replicaID int16, msgs ...interface{}) {
+func FancyErrPrint(src string, replicaID uint16, msgs ...interface{}) {
 	//if !allOutputDisabled {
 	fancyPrint(ERROR, src, replicaID, msgs)
 	//}
 }
 
-func fancyPrint(typeMsg string, src string, replicaID int16, msgs []interface{}) {
+func fancyPrint(typeMsg string, src string, replicaID uint16, msgs []interface{}) {
 	var builder strings.Builder
 	builder.WriteString(src)
 	builder.WriteString(" ")

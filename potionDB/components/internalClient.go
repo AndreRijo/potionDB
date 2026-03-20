@@ -19,7 +19,7 @@ type InternalClient struct {
 }
 
 func (ic InternalClient) Initialize(tm *TransactionManager) InternalClient {
-	ic.tmChan = tm.CreateClientHandler()
+	ic.tmChan = tm.CreateClientHandler(TM_INTERNAL_CLIENT)
 	return ic
 }
 
@@ -91,12 +91,34 @@ func (ic InternalClient) CreateUpdBuf(size int) []crdt.UpdateObjectParams {
 	return make([]crdt.UpdateObjectParams, 0, size)
 }
 
+func (ic InternalClient) DoNonBlockingInitialDataUpdate(updBuf []crdt.UpdateObjectParams) {
+	replyChan := make(chan bool, 1)
+	ic.tmChan <- ic.createTMRequest(TMInitialDataArgs{UpdateParams: updBuf, ReplyChan: replyChan})
+	go func() { <-replyChan }() //Avoids blocking, but still reads channel.
+}
+
+// Note: Blocking, it waits until Materializer fully applies the update.
+func (ic InternalClient) DoSingleInitialDataUpdate(keyParams crdt.KeyParams, upd crdt.UpdateArguments) {
+	ic.DoInitialDataUpdate([]crdt.UpdateObjectParams{{KeyParams: keyParams, UpdateArgs: upd}})
+}
+
+// Note: Blocking, it waits until Materializer fully applies the update.
+func (ic InternalClient) DoInitialDataUpdate(updBuf []crdt.UpdateObjectParams) {
+	replyChan := make(chan bool, 1)
+	//fmt.Printf("[IC]Requesting initial data update with %d updates...\n", len(updBuf))
+	ic.tmChan <- ic.createTMRequest(TMInitialDataArgs{UpdateParams: updBuf, ReplyChan: replyChan})
+	//fmt.Printf("[IC]Awaiting for TM to reply to data update with %d updates...\n", len(updBuf))
+	<-replyChan //Awaits until the materializer's partitions finish applying the transaction
+	//fmt.Printf("[IC]Finished initial data update with %d updates.\n", len(updBuf))
+	//Update is now fully applied in every involved partition.
+}
+
 func (ic InternalClient) DoSingleUpdate(keyParams crdt.KeyParams, upd crdt.UpdateArguments) {
 	ic.DoUpdate([]crdt.UpdateObjectParams{{KeyParams: keyParams, UpdateArgs: upd}})
 }
 
 func (ic InternalClient) DoUpdate(updBuf []crdt.UpdateObjectParams) {
-	replyChan := make(chan TMStaticUpdateReply)
+	replyChan := make(chan TMStaticUpdateReply, 1)
 	ic.tmChan <- ic.createTMRequest(TMStaticUpdateArgs{UpdateParams: updBuf, ReplyChan: replyChan})
 	<-replyChan //Awaits until the materializer's partitions confirm the transaction
 	//At this point the update is done
@@ -130,6 +152,14 @@ func (ic InternalClient) AddRead(keyParams crdt.KeyParams, read crdt.ReadArgumen
 func (ic InternalClient) DoGetCRDTs(keys []crdt.KeyParams) []crdt.CRDT {
 	replyChan := make(chan []crdt.CRDT, 1)
 	ic.tmChan <- ic.createTMRequest(TMGetCRDTArgs{KeyParams: keys, ReplyChan: replyChan})
+	return <-replyChan
+}
+
+// Note: PotionDB already has automatic GC. This should not be called unless you know what you are doing, and you need precise memory management.
+// This operation blocks until GC finishes executing.
+func (ic InternalClient) RequestManualGC() (didClean bool) {
+	replyChan := make(chan bool, 1)
+	ic.tmChan <- ic.createTMRequest(TMManualGCArgs{ReplyChan: replyChan})
 	return <-replyChan
 }
 
@@ -301,6 +331,6 @@ func (ic InternalClient) createTMRequest(args TMRequestArgs) (request Transactio
 	return TransactionManagerRequest{
 		Args:          args,
 		TransactionId: TransactionId(rand.Uint64()),
-		Timestamp:     clocksi.NewClockSiTimestamp(), //This way the TM will use the latest clock available
+		Timestamp:     clocksi.NewSliceTimestamp(), //This way the TM will use the latest clock available
 	}
 }

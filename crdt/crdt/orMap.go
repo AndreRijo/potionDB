@@ -4,6 +4,7 @@ import (
 	"fmt"
 	rand "math/rand"
 	"time"
+	"unsafe"
 
 	"potionDB/crdt/clocksi"
 	"potionDB/crdt/proto"
@@ -95,75 +96,79 @@ type ORMapRemoveAllEffect struct {
 }
 
 func (crdt *ORMapCrdt) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
+func (crdt *ORMapCrdt) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 
 // Upds
-func (args MapAdd) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
-
-func (args MapRemove) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
-
-func (args MapAddAll) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
-
+func (args MapAdd) GetCRDTType() proto.CRDTType       { return proto.CRDTType_ORMAP }
+func (args MapRemove) GetCRDTType() proto.CRDTType    { return proto.CRDTType_ORMAP }
+func (args MapAddAll) GetCRDTType() proto.CRDTType    { return proto.CRDTType_ORMAP }
 func (args MapRemoveAll) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
+func (args MapAdd) GetDATAType() proto.DATAType       { return proto.DATAType_DEFAULT }
+func (args MapRemove) GetDATAType() proto.DATAType    { return proto.DATAType_DEFAULT }
+func (args MapAddAll) GetDATAType() proto.DATAType    { return proto.DATAType_DEFAULT }
+func (args MapRemoveAll) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 
 // Downstreams
-func (args DownstreamORMapAddAll) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
-
+func (args DownstreamORMapAddAll) GetCRDTType() proto.CRDTType    { return proto.CRDTType_ORMAP }
 func (args DownstreamORMapRemoveAll) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
+func (args DownstreamORMapAddAll) GetDATAType() proto.DATAType    { return proto.DATAType_DEFAULT }
+func (args DownstreamORMapRemoveAll) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 
 func (args DownstreamORMapAddAll) MustReplicate() bool { return true }
 
 func (args DownstreamORMapRemoveAll) MustReplicate() bool { return true }
 
 // States
-func (args MapEntryState) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
-
-func (args MapEntryState) GetREADType() proto.READType { return proto.READType_FULL }
-
+func (args MapEntryState) GetCRDTType() proto.CRDTType    { return proto.CRDTType_ORMAP }
+func (args MapEntryState) GetDATAType() proto.DATAType    { return proto.DATAType_DEFAULT }
+func (args MapEntryState) GetREADType() proto.READType    { return proto.READType_FULL }
 func (args MapGetValueState) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
-
+func (args MapGetValueState) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 func (args MapGetValueState) GetREADType() proto.READType { return proto.READType_GET_VALUE }
-
-func (args MapHasKeyState) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
-
-func (args MapHasKeyState) GetREADType() proto.READType { return proto.READType_HAS_KEY }
-
-func (args MapKeysState) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
-
-func (args MapKeysState) GetREADType() proto.READType { return proto.READType_GET_KEYS }
+func (args MapHasKeyState) GetCRDTType() proto.CRDTType   { return proto.CRDTType_ORMAP }
+func (args MapHasKeyState) GetDATAType() proto.DATAType   { return proto.DATAType_DEFAULT }
+func (args MapHasKeyState) GetREADType() proto.READType   { return proto.READType_HAS_KEY }
+func (args MapKeysState) GetCRDTType() proto.CRDTType     { return proto.CRDTType_ORMAP }
+func (args MapKeysState) GetDATAType() proto.DATAType     { return proto.DATAType_DEFAULT }
+func (args MapKeysState) GetREADType() proto.READType     { return proto.READType_GET_KEYS }
 
 // Queries
 func (args HasKeyArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
+func (args HasKeyArguments) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 func (args HasKeyArguments) GetREADType() proto.READType { return proto.READType_HAS_KEY }
 func (args HasKeyArguments) HasInnerReads() bool         { return false }
 func (args HasKeyArguments) HasVariables() bool          { return false }
 
 func (args GetKeysArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
+func (args GetKeysArguments) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 func (args GetKeysArguments) GetREADType() proto.READType { return proto.READType_GET_KEYS }
 func (args GetKeysArguments) HasInnerReads() bool         { return false }
 func (args GetKeysArguments) HasVariables() bool          { return false }
 
 func (args GetValueArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
+func (args GetValueArguments) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 func (args GetValueArguments) GetREADType() proto.READType { return proto.READType_GET_VALUE }
 func (args GetValueArguments) HasInnerReads() bool         { return false }
 func (args GetValueArguments) HasVariables() bool          { return false }
 
 func (args GetValuesArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_ORMAP }
+func (args GetValuesArguments) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 func (args GetValuesArguments) GetREADType() proto.READType { return proto.READType_GET_VALUES }
 func (args GetValuesArguments) HasInnerReads() bool         { return false }
 func (args GetValuesArguments) HasVariables() bool          { return false }
 
 // Note: crdt can (and most often will be) nil
-func (crdt *ORMapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
+func (crdt *ORMapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	return &ORMapCrdt{
-		CRDTVM:  (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete),
+		CRDTVM:  (&genericInversibleCRDT{}).initialize(crdt),
 		entries: make(map[string]map[Element]UniqueSet),
 		random:  rand.NewSource(time.Now().Unix()),
 	}
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *ORMapCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID int16) (sameCRDT *ORMapCrdt) {
-	crdt.CRDTVM, crdt.random = (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete), rand.NewSource(time.Now().Unix())
+func (crdt *ORMapCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *ORMapCrdt) {
+	crdt.CRDTVM, crdt.random = (&genericInversibleCRDT{}).initialize(crdt), rand.NewSource(time.Now().Unix())
 	return crdt
 }
 
@@ -188,7 +193,7 @@ func (crdt *ORMapCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArgume
 }
 
 func (crdt *ORMapCrdt) getState(updsNotYetApplied []UpdateArguments) (state MapEntryState) {
-	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+	if len(updsNotYetApplied) == 0 {
 		values := make(map[string]Element)
 		for key, elemMap := range crdt.entries {
 			values[key] = crdt.getMinElem(elemMap)
@@ -241,7 +246,7 @@ func (crdt *ORMapCrdt) getState(updsNotYetApplied []UpdateArguments) (state MapE
 
 func (crdt *ORMapCrdt) getValues(updsNotYetApplied []UpdateArguments, keys []string) (state MapEntryState) {
 	//The same as getState, but only for some keys. Gotta love code repetition!
-	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+	if len(updsNotYetApplied) == 0 {
 		values := make(map[string]Element)
 		for _, key := range keys {
 			elemMap, has := crdt.entries[key]
@@ -300,7 +305,7 @@ func (crdt *ORMapCrdt) getKeys(updsNotYetApplied []UpdateArguments) (state MapKe
 	//Basically the same as getState, but only storing the keys. Yay, code repetition!
 	//It's more efficient than calling getState and then removing the values though...
 
-	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+	if len(updsNotYetApplied) == 0 {
 		keys := make([]string, len(crdt.entries))
 		i := 0
 		for key := range crdt.entries {
@@ -359,7 +364,7 @@ func (crdt *ORMapCrdt) getKeys(updsNotYetApplied []UpdateArguments) (state MapKe
 }
 
 func (crdt *ORMapCrdt) getValue(updsNotYetApplied []UpdateArguments, key string) (state MapGetValueState) {
-	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+	if len(updsNotYetApplied) == 0 {
 		//Return right away
 		return MapGetValueState{Value: crdt.getMinElem(crdt.entries[key])}
 	}
@@ -413,6 +418,14 @@ func (crdt *ORMapCrdt) Update(args UpdateArguments) (downstreamArgs DownstreamAr
 		downstreamArgs = crdt.getAddAllDownstreamArgs(opType.Values)
 	case MapRemoveAll:
 		downstreamArgs = crdt.getRemoveAllDownstreamArgs(opType.Keys)
+	case MultiUpd:
+		multiDowns := make(MultiUpd, len(opType))
+		for i, innerUpd := range opType {
+			multiDowns[i] = crdt.Update(innerUpd)
+		}
+		return multiDowns
+	default:
+		fmt.Printf("[ORMap][Update]Unknown update type: %v (%T)\n", args, args)
 	}
 	return
 }
@@ -446,6 +459,12 @@ func (crdt *ORMapCrdt) getRemoveAllDownstreamArgs(keys []string) (downstreamArgs
 }
 
 func (crdt *ORMapCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs DownstreamArguments) (otherDownstreamArgs DownstreamArguments) {
+	if multiUpd, ok := downstreamArgs.(MultiUpd); ok {
+		for _, upd := range multiUpd {
+			crdt.Downstream(updTs, upd.(DownstreamArguments))
+		}
+		return nil
+	}
 	effect := crdt.applyDownstream(downstreamArgs)
 	//Necessary for inversibleCrdt
 	crdt.addToHistory(&updTs, &downstreamArgs, effect)
@@ -460,6 +479,8 @@ func (crdt *ORMapCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effe
 		tmpEffect = crdt.applyAddAll(opType.Adds, opType.Rems)
 	case DownstreamORMapRemoveAll:
 		tmpEffect = crdt.applyRemoveAll(opType.Rems)
+	default:
+		fmt.Printf("[ORMap][Downstream]Unsupported downstream type: %v (%T)\n", downstreamArgs, downstreamArgs)
 	}
 	return &tmpEffect
 }
@@ -604,20 +625,21 @@ func (crdt *ORMapCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
 //Protobuf functions
 
 func (crdtOp MapAddAll) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
-	crdtOp.Values = make(map[string]Element)
 	protoAdds := protobuf.GetMapop().GetUpdates()
+	crdtOp.Values = make(map[string]Element, len(protoAdds))
 	for _, mapUpd := range protoAdds {
-		crdtOp.Values[string(mapUpd.GetKey().GetKey())] =
+		key := mapUpd.GetKey().GetKey()
+		crdtOp.Values[unsafe.String(&key[0], len(key))] =
 			Element(mapUpd.GetUpdate().GetRegop().GetValue())
 	}
 	return crdtOp
 }
 
 func (crdtOp MapAddAll) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	return &proto.ApbUpdateOperation{Mapop: &proto.ApbMapUpdate{
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Mapop{Mapop: &proto.ApbMapUpdate{
 		Updates:     mapEntriesToProto(crdtOp.Values),
 		RemovedKeys: []*proto.ApbMapKey{},
-	}}
+	}}}
 }
 
 func (crdtOp MapRemoveAll) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -625,56 +647,59 @@ func (crdtOp MapRemoveAll) FromUpdateObject(protobuf *proto.ApbUpdateOperation) 
 	crdtOp.Keys = make([]string, len(protoRems))
 	i := 0
 	for _, mapKey := range protoRems {
-		crdtOp.Keys[i] = string(mapKey.GetKey())
+		crdtOp.Keys[i] = unsafe.String(&mapKey.GetKey()[0], len(mapKey.GetKey()))
 		i++
 	}
 	return crdtOp
 }
 
 func (crdtOp MapRemoveAll) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	return &proto.ApbUpdateOperation{Mapop: &proto.ApbMapUpdate{
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Mapop{Mapop: &proto.ApbMapUpdate{
 		Updates:     []*proto.ApbMapNestedUpdate{},
 		RemovedKeys: stringArrayToMapKeyArray(crdtOp.Keys),
-	}}
+	}}}
 }
 
 func (crdtOp MapAdd) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
 	protoAdd := protobuf.GetMapop().GetUpdates()[0]
-	crdtOp.Key, crdtOp.Value = string(protoAdd.GetKey().GetKey()), Element(protoAdd.GetUpdate().GetRegop().GetValue())
+	keyBytes := protoAdd.GetKey().GetKey()
+	crdtOp.Key, crdtOp.Value = unsafe.String(&keyBytes[0], len(keyBytes)), Element(protoAdd.GetUpdate().GetRegop().GetValue())
 	return crdtOp
 }
 
 func (crdtOp MapAdd) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	return &proto.ApbUpdateOperation{Mapop: &proto.ApbMapUpdate{
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Mapop{Mapop: &proto.ApbMapUpdate{
 		Updates:     mapEntriesToProto(map[string]Element{crdtOp.Key: crdtOp.Value}),
 		RemovedKeys: []*proto.ApbMapKey{},
-	}}
+	}}}
 }
 
 func (crdtOp MapRemove) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
-	crdtOp.Key = string(protobuf.GetMapop().GetRemovedKeys()[0].GetKey())
+	keyBytes := protobuf.GetMapop().GetRemovedKeys()[0].GetKey()
+	crdtOp.Key = unsafe.String(&keyBytes[0], len(keyBytes))
 	return crdtOp
 }
 
 func (crdtOp MapRemove) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	return &proto.ApbUpdateOperation{Mapop: &proto.ApbMapUpdate{
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Mapop{Mapop: &proto.ApbMapUpdate{
 		Updates:     []*proto.ApbMapNestedUpdate{},
 		RemovedKeys: stringArrayToMapKeyArray([]string{crdtOp.Key}),
-	}}
+	}}}
 }
 
 func (crdtState MapEntryState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
 	crdtState.Values = make(map[string]Element)
 	if entries := protobuf.GetMap().GetEntries(); entries != nil {
 		for _, entry := range entries {
-			crdtState.Values[string(entry.GetKey().GetKey())] = Element(entry.GetValue().GetReg().GetValue())
+			keyBytes := entry.GetKey().GetKey()
+			crdtState.Values[unsafe.String(&keyBytes[0], len(keyBytes))] = Element(entry.GetValue().GetReg().GetValue())
 		}
 	} else {
 		//Partial read
 		protoResp := protobuf.GetPartread().GetMap().GetGetvalues()
 		protoKeys, protoValues := protoResp.GetKeys(), protoResp.GetValues()
 		for i, value := range protoValues {
-			crdtState.Values[string(protoKeys[i])] = Element(value.GetValue().GetReg().GetValue())
+			crdtState.Values[unsafe.String(&protoKeys[i][0], len(protoKeys[i]))] = Element(value.GetValue().GetReg().GetValue())
 		}
 	}
 
@@ -682,7 +707,7 @@ func (crdtState MapEntryState) FromReadResp(protobuf *proto.ApbReadObjectResp) (
 }
 
 func (crdtState MapEntryState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
-	return &proto.ApbReadObjectResp{Map: &proto.ApbGetMapResp{Entries: entriesToApbMapEntries(crdtState.Values)}}
+	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Map{Map: &proto.ApbGetMapResp{Entries: entriesToApbMapEntries(crdtState.Values)}}}
 }
 
 func (crdtState MapHasKeyState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
@@ -691,9 +716,8 @@ func (crdtState MapHasKeyState) FromReadResp(protobuf *proto.ApbReadObjectResp) 
 }
 
 func (crdtState MapHasKeyState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
-	return &proto.ApbReadObjectResp{Partread: &proto.ApbPartialReadResp{Map: &proto.ApbMapPartialReadResp{
-		Haskey: &proto.ApbMapHasKeyReadResp{Has: pb.Bool(crdtState.HasKey)},
-	}}}
+	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Map{
+		Map: &proto.ApbMapPartialReadResp{Haskey: &proto.ApbMapHasKeyReadResp{Has: pb.Bool(crdtState.HasKey)}}}}}}
 }
 
 func (crdtState MapKeysState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
@@ -702,9 +726,8 @@ func (crdtState MapKeysState) FromReadResp(protobuf *proto.ApbReadObjectResp) (s
 }
 
 func (crdtState MapKeysState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
-	return &proto.ApbReadObjectResp{Partread: &proto.ApbPartialReadResp{Map: &proto.ApbMapPartialReadResp{
-		Getkeys: &proto.ApbMapGetKeysReadResp{Keys: crdtState.Keys},
-	}}}
+	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Map{
+		Map: &proto.ApbMapPartialReadResp{Getkeys: &proto.ApbMapGetKeysReadResp{Keys: crdtState.Keys}}}}}}
 }
 
 func (crdtState MapGetValueState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
@@ -713,15 +736,13 @@ func (crdtState MapGetValueState) FromReadResp(protobuf *proto.ApbReadObjectResp
 }
 
 func (crdtState MapGetValueState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
-	return &proto.ApbReadObjectResp{Partread: &proto.ApbPartialReadResp{Map: &proto.ApbMapPartialReadResp{
-		Getvalue: &proto.ApbMapGetValueResp{Value: &proto.ApbReadObjectResp{
-			Reg: &proto.ApbGetRegResp{Value: []byte(crdtState.Value)},
-		}},
-	}}}
+	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Map{Map: &proto.ApbMapPartialReadResp{
+		Getvalue: &proto.ApbMapGetValueResp{Value: &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Reg{Reg: &proto.ApbGetRegResp{Value: unsafe.Slice(unsafe.StringData(string(crdtState.Value)), len(crdtState.Value))}}}}}}}}}
 }
 
 func (args HasKeyArguments) FromPartialRead(protobuf *proto.ApbPartialReadArgs) (readArgs ReadArguments) {
-	args.Key = string(protobuf.GetMap().GetHaskey().GetKey())
+	keyBytes := protobuf.GetMap().GetHaskey().GetKey()
+	args.Key = unsafe.String(&keyBytes[0], len(keyBytes))
 	return args
 }
 
@@ -730,7 +751,8 @@ func (args GetKeysArguments) FromPartialRead(protobuf *proto.ApbPartialReadArgs)
 }
 
 func (args GetValueArguments) FromPartialRead(protobuf *proto.ApbPartialReadArgs) (readArgs ReadArguments) {
-	args.Key = string(protobuf.GetMap().GetGetvalue().GetKey())
+	keyBytes := protobuf.GetMap().GetGetvalue().GetKey()
+	args.Key = unsafe.String(&keyBytes[0], len(keyBytes))
 	return args
 }
 
@@ -740,30 +762,30 @@ func (args GetValuesArguments) FromPartialRead(protobuf *proto.ApbPartialReadArg
 }
 
 func (args HasKeyArguments) ToPartialRead() (protobuf *proto.ApbPartialReadArgs) {
-	return &proto.ApbPartialReadArgs{Map: &proto.ApbMapPartialRead{Haskey: &proto.ApbMapHasKeyRead{Key: []byte(args.Key)}}}
+	return &proto.ApbPartialReadArgs{Args: &proto.ApbPartialReadArgs_Map{Map: &proto.ApbMapPartialRead{Read: &proto.ApbMapPartialRead_Haskey{Haskey: &proto.ApbMapHasKeyRead{Key: unsafe.Slice(unsafe.StringData(args.Key), len(args.Key))}}}}}
 }
 
 func (args GetKeysArguments) ToPartialRead() (protobuf *proto.ApbPartialReadArgs) {
-	return &proto.ApbPartialReadArgs{Map: &proto.ApbMapPartialRead{Getkeys: &proto.ApbMapGetKeysRead{}}}
+	return &proto.ApbPartialReadArgs{Args: &proto.ApbPartialReadArgs_Map{Map: &proto.ApbMapPartialRead{Read: &proto.ApbMapPartialRead_Getkeys{Getkeys: &proto.ApbMapGetKeysRead{}}}}}
 }
 
 func (args GetValueArguments) ToPartialRead() (protobuf *proto.ApbPartialReadArgs) {
-	return &proto.ApbPartialReadArgs{Map: &proto.ApbMapPartialRead{Getvalue: &proto.ApbMapGetValueRead{Key: []byte(args.Key)}}}
+	return &proto.ApbPartialReadArgs{Args: &proto.ApbPartialReadArgs_Map{Map: &proto.ApbMapPartialRead{Read: &proto.ApbMapPartialRead_Getvalue{Getvalue: &proto.ApbMapGetValueRead{Key: unsafe.Slice(unsafe.StringData(args.Key), len(args.Key))}}}}}
 }
 
 func (args GetValuesArguments) ToPartialRead() (protobuf *proto.ApbPartialReadArgs) {
 	keys := stringArrayToByteArray(args.Keys)
-	return &proto.ApbPartialReadArgs{Map: &proto.ApbMapPartialRead{Getvalues: &proto.ApbMapGetValuesRead{Keys: keys}}}
+	return &proto.ApbPartialReadArgs{Args: &proto.ApbPartialReadArgs_Map{Map: &proto.ApbMapPartialRead{Read: &proto.ApbMapPartialRead_Getvalues{Getvalues: &proto.ApbMapGetValuesRead{Keys: keys}}}}}
 }
 
 func (downOp DownstreamORMapAddAll) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
 	setProto := protobuf.GetOrmapOp()
 	downOp.Rems = createORMapDownRems(setProto.GetRems())
 
-	downOp.Adds = make(map[string]UniqueElemPair)
 	addsProto := setProto.GetAdds()
+	downOp.Adds = make(map[string]UniqueElemPair, len(addsProto))
 	for _, addProto := range addsProto {
-		downOp.Adds[string(addProto.GetKey())] = UniqueElemPair{Element: Element(addProto.GetElement()), Unique: Unique(addProto.GetUnique())}
+		downOp.Adds[unsafe.String(&addProto.GetKey()[0], len(addProto.GetKey()))] = UniqueElemPair{Element: Element(addProto.GetElement()), Unique: Unique(addProto.GetUnique())}
 	}
 	return downOp
 }
@@ -778,22 +800,22 @@ func (downOp DownstreamORMapAddAll) ToReplicatorObj() (protobuf *proto.ProtoOpDo
 	i := 0
 	for key, pair := range downOp.Adds {
 		adds[i] = &proto.ProtoKeyValueUnique{
-			Key: []byte(key), Element: []byte(pair.Element), Unique: pb.Uint64(uint64(pair.Unique)),
+			Key: unsafe.Slice(unsafe.StringData(key), len(key)), Element: unsafe.Slice(unsafe.StringData(string(pair.Element)), len(pair.Element)), Unique: pb.Uint64(uint64(pair.Unique)),
 		}
 		i++
 	}
-	return &proto.ProtoOpDownstream{OrmapOp: &proto.ProtoORMapDownstream{Adds: adds, Rems: createProtoMapRemoves(downOp.Rems)}}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_OrmapOp{OrmapOp: &proto.ProtoORMapDownstream{Adds: adds, Rems: createProtoMapRemoves(downOp.Rems)}}}
 }
 
 func (downOp DownstreamORMapRemoveAll) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	return &proto.ProtoOpDownstream{OrmapOp: &proto.ProtoORMapDownstream{Rems: createProtoMapRemoves(downOp.Rems)}}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_OrmapOp{OrmapOp: &proto.ProtoORMapDownstream{Rems: createProtoMapRemoves(downOp.Rems)}}}
 }
 
 func (crdt *ORMapCrdt) ToProtoState() (protobuf *proto.ProtoState) {
-	return &proto.ProtoState{Ormap: &proto.ProtoORMapState{Entries: createProtoMapRemoves(crdt.entries)}}
+	return &proto.ProtoState{State: &proto.ProtoState_Ormap{Ormap: &proto.ProtoORMapState{Entries: createProtoMapRemoves(crdt.entries)}}}
 }
 
-func (crdt *ORMapCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID int16) (newCRDT CRDT) {
+func (crdt *ORMapCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	return (&ORMapCrdt{entries: createORMapDownRems(proto.GetOrmap().GetEntries())}).initializeFromSnapshot(ts, replicaID)
 }
 

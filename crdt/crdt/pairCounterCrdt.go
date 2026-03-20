@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"potionDB/crdt/clocksi"
 	"potionDB/crdt/proto"
+	"potionDB/shared/shared"
 
 	pb "google.golang.org/protobuf/proto"
 	//pb "github.com/golang/protobuf/proto"
@@ -46,21 +47,32 @@ type DecrementSecondEffect float64
 type IncrementBothEffect IncrementBoth
 type DecrementBothEffect DecrementBoth
 
-func (crdt *PairCounterCrdt) GetCRDTType() proto.CRDTType         { return proto.CRDTType_PAIR_COUNTER }
-func (args IncrementFirst) GetCRDTType() proto.CRDTType           { return proto.CRDTType_PAIR_COUNTER }
-func (args DecrementFirst) GetCRDTType() proto.CRDTType           { return proto.CRDTType_PAIR_COUNTER }
-func (args IncrementSecond) GetCRDTType() proto.CRDTType          { return proto.CRDTType_PAIR_COUNTER }
-func (args DecrementSecond) GetCRDTType() proto.CRDTType          { return proto.CRDTType_PAIR_COUNTER }
-func (args IncrementBoth) GetCRDTType() proto.CRDTType            { return proto.CRDTType_PAIR_COUNTER }
-func (args DecrementBoth) GetCRDTType() proto.CRDTType            { return proto.CRDTType_PAIR_COUNTER }
+func (crdt *PairCounterCrdt) GetCRDTType() proto.CRDTType { return proto.CRDTType_PAIR_COUNTER }
+func (args IncrementFirst) GetCRDTType() proto.CRDTType   { return proto.CRDTType_PAIR_COUNTER }
+func (args DecrementFirst) GetCRDTType() proto.CRDTType   { return proto.CRDTType_PAIR_COUNTER }
+func (args IncrementSecond) GetCRDTType() proto.CRDTType  { return proto.CRDTType_PAIR_COUNTER }
+func (args DecrementSecond) GetCRDTType() proto.CRDTType  { return proto.CRDTType_PAIR_COUNTER }
+func (args IncrementBoth) GetCRDTType() proto.CRDTType    { return proto.CRDTType_PAIR_COUNTER }
+func (args DecrementBoth) GetCRDTType() proto.CRDTType    { return proto.CRDTType_PAIR_COUNTER }
+func (crdt *PairCounterCrdt) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
+func (args IncrementFirst) GetDATAType() proto.DATAType   { return proto.DATAType_DEFAULT }
+func (args DecrementFirst) GetDATAType() proto.DATAType   { return proto.DATAType_DEFAULT }
+func (args IncrementSecond) GetDATAType() proto.DATAType  { return proto.DATAType_DEFAULT }
+func (args DecrementSecond) GetDATAType() proto.DATAType  { return proto.DATAType_DEFAULT }
+func (args IncrementBoth) GetDATAType() proto.DATAType    { return proto.DATAType_DEFAULT }
+func (args DecrementBoth) GetDATAType() proto.DATAType    { return proto.DATAType_DEFAULT }
+
 func (state PairCounterState) GetCRDTType() proto.CRDTType        { return proto.CRDTType_PAIR_COUNTER }
 func (state PairCounterState) GetREADType() proto.READType        { return proto.READType_FULL }
+func (state PairCounterState) GetDATAType() proto.DATAType        { return proto.DATAType_DEFAULT }
 func (state SingleFirstCounterState) GetCRDTType() proto.CRDTType { return proto.CRDTType_PAIR_COUNTER }
 func (state SingleFirstCounterState) GetREADType() proto.READType { return proto.READType_PAIR_FIRST }
+func (state SingleFirstCounterState) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 func (state SingleSecondCounterState) GetCRDTType() proto.CRDTType {
 	return proto.CRDTType_PAIR_COUNTER
 }
 func (state SingleSecondCounterState) GetREADType() proto.READType { return proto.READType_PAIR_SECOND }
+func (state SingleSecondCounterState) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 func (args IncrementFirst) MustReplicate() bool                    { return true }
 func (args DecrementFirst) MustReplicate() bool                    { return true }
 func (args IncrementSecond) MustReplicate() bool                   { return true }
@@ -71,22 +83,24 @@ func (args ReadFirstArguments) GetCRDTType() proto.CRDTType        { return prot
 func (args ReadSecondArguments) GetCRDTType() proto.CRDTType       { return proto.CRDTType_PAIR_COUNTER }
 func (args ReadFirstArguments) GetREADType() proto.READType        { return proto.READType_PAIR_FIRST }
 func (args ReadSecondArguments) GetREADType() proto.READType       { return proto.READType_PAIR_SECOND }
+func (args ReadFirstArguments) GetDATAType() proto.DATAType        { return proto.DATAType_DEFAULT }
+func (args ReadSecondArguments) GetDATAType() proto.DATAType       { return proto.DATAType_DEFAULT }
 func (args ReadFirstArguments) HasInnerReads() bool                { return false }
 func (args ReadSecondArguments) HasInnerReads() bool               { return false }
 func (args ReadFirstArguments) HasVariables() bool                 { return false }
 func (args ReadSecondArguments) HasVariables() bool                { return false }
 
-func (crdt *PairCounterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
+func (crdt *PairCounterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	return &PairCounterCrdt{
-		CRDTVM: (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete),
+		CRDTVM: (&genericInversibleCRDT{}).initialize(crdt),
 		first:  0,
 		second: 0,
 	}
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *PairCounterCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID int16) (sameCRDT *PairCounterCrdt) {
-	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete)
+func (crdt *PairCounterCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *PairCounterCrdt) {
+	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
 
@@ -107,7 +121,7 @@ func (crdt *PairCounterCrdt) Read(args ReadArguments, updsNotYetApplied []Update
 }
 
 func (crdt *PairCounterCrdt) getState(updsNotYetApplied []UpdateArguments) (state PairCounterState) {
-	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+	if len(updsNotYetApplied) == 0 {
 		return PairCounterState{First: crdt.first, Second: crdt.second}
 	}
 	for _, upd := range updsNotYetApplied {
@@ -132,7 +146,7 @@ func (crdt *PairCounterCrdt) getState(updsNotYetApplied []UpdateArguments) (stat
 }
 
 func (crdt *PairCounterCrdt) getFirst(updsNotYetApplied []UpdateArguments) (state SingleFirstCounterState) {
-	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+	if len(updsNotYetApplied) == 0 {
 		return SingleFirstCounterState(crdt.first)
 	}
 	value := int32(0)
@@ -154,7 +168,7 @@ func (crdt *PairCounterCrdt) getFirst(updsNotYetApplied []UpdateArguments) (stat
 }
 
 func (crdt *PairCounterCrdt) getSecond(updsNotYetApplied []UpdateArguments) (state SingleSecondCounterState) {
-	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+	if len(updsNotYetApplied) == 0 {
 		return SingleSecondCounterState(crdt.second)
 	}
 	value := 0.0
@@ -180,6 +194,12 @@ func (crdt *PairCounterCrdt) Update(args UpdateArguments) (downstreamArgs Downst
 }
 
 func (crdt *PairCounterCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs DownstreamArguments) (otherDownstreamArgs DownstreamArguments) {
+	if multiUpd, ok := downstreamArgs.(MultiUpd); ok {
+		for _, upd := range multiUpd {
+			crdt.Downstream(updTs, upd.(DownstreamArguments))
+		}
+		return nil
+	}
 	effect := crdt.applyDownstream(downstreamArgs)
 	//Necessary for inversibleCrdt
 	crdt.addToHistory(&updTs, &downstreamArgs, effect)
@@ -208,6 +228,8 @@ func (crdt *PairCounterCrdt) applyDownstream(downstreamArgs DownstreamArguments)
 	case DecrementBoth:
 		crdt.first -= incOrDec.ChangeFirst
 		crdt.second -= incOrDec.ChangeSecond
+	default:
+		fmt.Printf("[PairCounter][Downstream]Unsupported downstream type: %v (%T)\n", downstreamArgs, downstreamArgs)
 	}
 	return &effectValue
 }
@@ -258,7 +280,7 @@ func (crdtOp IncrementFirst) FromUpdateObject(protobuf *proto.ApbUpdateOperation
 }
 
 func (crdtOp IncrementFirst) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	return &proto.ApbUpdateOperation{Paircounterop: &proto.ApbPairCounterUpdate{IncFirst: pb.Int32(int32(crdtOp))}}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Paircounterop{Paircounterop: &proto.ApbPairCounterUpdate{IncFirst: pb.Int32(int32(crdtOp))}}}
 }
 
 func (crdtOp IncrementSecond) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -266,7 +288,7 @@ func (crdtOp IncrementSecond) FromUpdateObject(protobuf *proto.ApbUpdateOperatio
 }
 
 func (crdtOp IncrementSecond) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	return &proto.ApbUpdateOperation{Paircounterop: &proto.ApbPairCounterUpdate{IncSecond: pb.Float64(float64(crdtOp))}}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Paircounterop{Paircounterop: &proto.ApbPairCounterUpdate{IncSecond: pb.Float64(float64(crdtOp))}}}
 }
 
 func (crdtOp IncrementBoth) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -275,8 +297,8 @@ func (crdtOp IncrementBoth) FromUpdateObject(protobuf *proto.ApbUpdateOperation)
 }
 
 func (crdtOp IncrementBoth) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	return &proto.ApbUpdateOperation{Paircounterop: &proto.ApbPairCounterUpdate{
-		IncFirst: pb.Int32(int32(crdtOp.ChangeFirst)), IncSecond: pb.Float64(float64(crdtOp.ChangeSecond))}}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Paircounterop{Paircounterop: &proto.ApbPairCounterUpdate{
+		IncFirst: pb.Int32(int32(crdtOp.ChangeFirst)), IncSecond: pb.Float64(float64(crdtOp.ChangeSecond))}}}
 }
 
 func (crdtOp DecrementFirst) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -284,7 +306,7 @@ func (crdtOp DecrementFirst) FromUpdateObject(protobuf *proto.ApbUpdateOperation
 }
 
 func (crdtOp DecrementFirst) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	return &proto.ApbUpdateOperation{Paircounterop: &proto.ApbPairCounterUpdate{IncFirst: pb.Int32(int32(-crdtOp))}}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Paircounterop{Paircounterop: &proto.ApbPairCounterUpdate{IncFirst: pb.Int32(int32(-crdtOp))}}}
 }
 
 func (crdtOp DecrementSecond) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -292,7 +314,7 @@ func (crdtOp DecrementSecond) FromUpdateObject(protobuf *proto.ApbUpdateOperatio
 }
 
 func (crdtOp DecrementSecond) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	return &proto.ApbUpdateOperation{Paircounterop: &proto.ApbPairCounterUpdate{IncSecond: pb.Float64(float64(-crdtOp))}}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Paircounterop{Paircounterop: &proto.ApbPairCounterUpdate{IncSecond: pb.Float64(float64(-crdtOp))}}}
 }
 
 func (crdtOp DecrementBoth) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -301,8 +323,8 @@ func (crdtOp DecrementBoth) FromUpdateObject(protobuf *proto.ApbUpdateOperation)
 }
 
 func (crdtOp DecrementBoth) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	return &proto.ApbUpdateOperation{Paircounterop: &proto.ApbPairCounterUpdate{
-		IncFirst: pb.Int32(int32(-crdtOp.ChangeFirst)), IncSecond: pb.Float64(float64(-crdtOp.ChangeSecond))}}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Paircounterop{Paircounterop: &proto.ApbPairCounterUpdate{
+		IncFirst: pb.Int32(int32(-crdtOp.ChangeFirst)), IncSecond: pb.Float64(float64(-crdtOp.ChangeSecond))}}}
 }
 
 func (crdtState PairCounterState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
@@ -311,7 +333,7 @@ func (crdtState PairCounterState) FromReadResp(protobuf *proto.ApbReadObjectResp
 }
 
 func (crdtState PairCounterState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
-	return &proto.ApbReadObjectResp{Paircounter: &proto.ApbGetPairCounterResp{First: pb.Int32(crdtState.First), Second: pb.Float64(crdtState.Second)}}
+	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Paircounter{Paircounter: &proto.ApbGetPairCounterResp{First: pb.Int32(crdtState.First), Second: pb.Float64(crdtState.Second)}}}
 }
 
 func (crdtState SingleFirstCounterState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
@@ -319,15 +341,15 @@ func (crdtState SingleFirstCounterState) FromReadResp(protobuf *proto.ApbReadObj
 }
 
 func (crdtState SingleFirstCounterState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
-	return &proto.ApbReadObjectResp{Paircounter: &proto.ApbGetPairCounterResp{First: pb.Int32(int32(crdtState))}}
+	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Paircounter{Paircounter: &proto.ApbGetPairCounterResp{First: pb.Int32(int32(crdtState))}}}
 }
 
 func (crdtState SingleSecondCounterState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
-	return SingleFirstCounterState(protobuf.GetPaircounter().GetSecond())
+	return SingleSecondCounterState(protobuf.GetPaircounter().GetSecond())
 }
 
 func (crdtState SingleSecondCounterState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
-	return &proto.ApbReadObjectResp{Paircounter: &proto.ApbGetPairCounterResp{Second: pb.Float64(float64(crdtState))}}
+	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Paircounter{Paircounter: &proto.ApbGetPairCounterResp{Second: pb.Float64(float64(crdtState))}}}
 }
 
 // The caller is the one who has to see what kind of partial read this is.
@@ -336,7 +358,7 @@ func (args ReadFirstArguments) FromPartialRead(protobuf *proto.ApbPartialReadArg
 }
 
 func (args ReadFirstArguments) ToPartialRead() (protobuf *proto.ApbPartialReadArgs) {
-	return &proto.ApbPartialReadArgs{Paircounter: &proto.ApbPairCounterPartialRead{First: &proto.ApbPairCounterFirstRead{}}}
+	return &proto.ApbPartialReadArgs{Args: &proto.ApbPartialReadArgs_Paircounter{Paircounter: &proto.ApbPairCounterPartialRead{First: &proto.ApbPairCounterFirstRead{}}}}
 }
 
 // The caller is the one who has to see what kind of partial read this is.
@@ -345,7 +367,7 @@ func (args ReadSecondArguments) FromPartialRead(protobuf *proto.ApbPartialReadAr
 }
 
 func (args ReadSecondArguments) ToPartialRead() (protobuf *proto.ApbPartialReadArgs) {
-	return &proto.ApbPartialReadArgs{Paircounter: &proto.ApbPairCounterPartialRead{Second: &proto.ApbPairCounterSecondRead{}}}
+	return &proto.ApbPartialReadArgs{Args: &proto.ApbPartialReadArgs_Paircounter{Paircounter: &proto.ApbPairCounterPartialRead{Second: &proto.ApbPairCounterSecondRead{}}}}
 }
 
 // The caller is the one who has to see what kind of update this is.
@@ -354,7 +376,7 @@ func (downOp IncrementFirst) FromReplicatorObj(protobuf *proto.ProtoOpDownstream
 }
 
 func (downOp IncrementFirst) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	return &proto.ProtoOpDownstream{PairCounterOp: &proto.ProtoPairCounterDownstream{IsInc: pb.Bool(true), FirstChange: pb.Int32(int32(downOp))}}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_PairCounterOp{PairCounterOp: &proto.ProtoPairCounterDownstream{IsInc: shared.TRUE_POINTER, FirstChange: pb.Int32(int32(downOp))}}}
 }
 
 // The caller is the one who has to see what kind of update this is.
@@ -363,7 +385,7 @@ func (downOp IncrementSecond) FromReplicatorObj(protobuf *proto.ProtoOpDownstrea
 }
 
 func (downOp IncrementSecond) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	return &proto.ProtoOpDownstream{PairCounterOp: &proto.ProtoPairCounterDownstream{IsInc: pb.Bool(true), SecondChange: pb.Float64(float64(downOp))}}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_PairCounterOp{PairCounterOp: &proto.ProtoPairCounterDownstream{IsInc: shared.TRUE_POINTER, SecondChange: pb.Float64(float64(downOp))}}}
 }
 
 // The caller is the one who has to see what kind of update this is.
@@ -373,8 +395,8 @@ func (downOp IncrementBoth) FromReplicatorObj(protobuf *proto.ProtoOpDownstream)
 }
 
 func (downOp IncrementBoth) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	return &proto.ProtoOpDownstream{PairCounterOp: &proto.ProtoPairCounterDownstream{
-		IsInc: pb.Bool(true), FirstChange: pb.Int32(int32(downOp.ChangeFirst)), SecondChange: pb.Float64(float64(downOp.ChangeSecond))}}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_PairCounterOp{PairCounterOp: &proto.ProtoPairCounterDownstream{
+		IsInc: shared.TRUE_POINTER, FirstChange: pb.Int32(int32(downOp.ChangeFirst)), SecondChange: pb.Float64(float64(downOp.ChangeSecond))}}}
 }
 
 // The caller is the one who has to see what kind of update this is.
@@ -383,7 +405,7 @@ func (downOp DecrementFirst) FromReplicatorObj(protobuf *proto.ProtoOpDownstream
 }
 
 func (downOp DecrementFirst) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	return &proto.ProtoOpDownstream{PairCounterOp: &proto.ProtoPairCounterDownstream{IsInc: pb.Bool(false), FirstChange: pb.Int32(int32(-downOp))}}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_PairCounterOp{PairCounterOp: &proto.ProtoPairCounterDownstream{IsInc: shared.FALSE_POINTER, FirstChange: pb.Int32(int32(-downOp))}}}
 }
 
 // The caller is the one who has to see what kind of update this is.
@@ -392,7 +414,7 @@ func (downOp DecrementSecond) FromReplicatorObj(protobuf *proto.ProtoOpDownstrea
 }
 
 func (downOp DecrementSecond) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	return &proto.ProtoOpDownstream{PairCounterOp: &proto.ProtoPairCounterDownstream{IsInc: pb.Bool(false), SecondChange: pb.Float64(float64(-downOp))}}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_PairCounterOp{PairCounterOp: &proto.ProtoPairCounterDownstream{IsInc: shared.FALSE_POINTER, SecondChange: pb.Float64(float64(-downOp))}}}
 }
 
 // The caller is the one who has to see what kind of update this is.
@@ -402,16 +424,16 @@ func (downOp DecrementBoth) FromReplicatorObj(protobuf *proto.ProtoOpDownstream)
 }
 
 func (downOp DecrementBoth) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	return &proto.ProtoOpDownstream{PairCounterOp: &proto.ProtoPairCounterDownstream{
-		IsInc: pb.Bool(false), FirstChange: pb.Int32(int32(-downOp.ChangeFirst)), SecondChange: pb.Float64(float64(-downOp.ChangeSecond))}}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_PairCounterOp{PairCounterOp: &proto.ProtoPairCounterDownstream{
+		IsInc: shared.FALSE_POINTER, FirstChange: pb.Int32(int32(-downOp.ChangeFirst)), SecondChange: pb.Float64(float64(-downOp.ChangeSecond))}}}
 }
 
 func (crdt *PairCounterCrdt) ToProtoState() (protobuf *proto.ProtoState) {
 	first, second := crdt.first, crdt.second
-	return &proto.ProtoState{PairCounter: &proto.ProtoPairCounterState{First: &first, Second: &second}}
+	return &proto.ProtoState{State: &proto.ProtoState_PairCounter{PairCounter: &proto.ProtoPairCounterState{First: &first, Second: &second}}}
 }
 
-func (crdt *PairCounterCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID int16) (newCRDT CRDT) {
+func (crdt *PairCounterCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	pairProto := proto.GetPairCounter()
 	return (&PairCounterCrdt{first: pairProto.GetFirst(), second: pairProto.GetSecond()}).initializeFromSnapshot(ts, replicaID)
 }

@@ -4,10 +4,12 @@
 package crdt
 
 import (
+	"fmt"
 	"math"
 
 	"potionDB/crdt/clocksi"
 	"potionDB/crdt/proto"
+	"potionDB/shared/shared"
 
 	//pb "github.com/golang/protobuf/proto"
 	pb "google.golang.org/protobuf/proto"
@@ -40,13 +42,13 @@ const (
 )
 
 func (crdt *MaxMinCrdt) GetCRDTType() proto.CRDTType { return proto.CRDTType_MAXMIN }
-
+func (crdt *MaxMinCrdt) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 func (args MaxAddValue) GetCRDTType() proto.CRDTType { return proto.CRDTType_MAXMIN }
-
+func (args MaxAddValue) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 func (args MinAddValue) GetCRDTType() proto.CRDTType { return proto.CRDTType_MAXMIN }
-
+func (args MinAddValue) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 func (args MaxMinState) GetCRDTType() proto.CRDTType { return proto.CRDTType_MAXMIN }
-
+func (args MaxMinState) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 func (args MaxMinState) GetREADType() proto.READType { return proto.READType_FULL }
 
 func (args MaxAddValue) MustReplicate() bool { return true }
@@ -54,16 +56,15 @@ func (args MaxAddValue) MustReplicate() bool { return true }
 func (args MinAddValue) MustReplicate() bool { return true }
 
 // Note: crdt can (and most often will be) nil
-func (crdt *MaxMinCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
-	return &MaxMinCrdt{
-		CRDTVM:   (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete),
-		topValue: math.MaxInt64,
-	}
+func (crdt *MaxMinCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+	crdt = &MaxMinCrdt{topValue: math.MaxInt64}
+	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
+	return crdt
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *MaxMinCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID int16) (sameCRDT *MaxMinCrdt) {
-	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete)
+func (crdt *MaxMinCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *MaxMinCrdt) {
+	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
 
@@ -104,11 +105,19 @@ func (crdt *MaxMinCrdt) Update(args UpdateArguments) (downstreamArgs DownstreamA
 		if typedUpd.Value > crdt.topValue {
 			return NoOp{}
 		}
+	default:
+		fmt.Printf("[MaxMin][Update]Unknown update type: %v (%T)\n", args, args)
 	}
 	return args.(DownstreamArguments)
 }
 
 func (crdt *MaxMinCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs DownstreamArguments) (otherDownstreamArgs DownstreamArguments) {
+	if multiUpd, ok := downstreamArgs.(MultiUpd); ok {
+		for _, upd := range multiUpd {
+			crdt.Downstream(updTs, upd.(DownstreamArguments))
+		}
+		return nil
+	}
 	effect := crdt.applyDownstream(downstreamArgs)
 	//Necessary for inversibleCrdt
 	crdt.addToHistory(&updTs, &downstreamArgs, effect)
@@ -134,6 +143,8 @@ func (crdt *MaxMinCrdt) applyDownstream(downstreamArgs DownstreamArguments) (eff
 		} else {
 			effectValue = MaxMinAddValueEffect{PreviousValue: previousValue}
 		}
+	default:
+		fmt.Printf("[MaxMin][Downstream]Unsupported downstream type: %v (%T)\n", downstreamArgs, downstreamArgs)
 	}
 	return &effectValue
 }
@@ -191,7 +202,7 @@ func (crdtOp MaxAddValue) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (
 }
 
 func (crdtOp MaxAddValue) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	return &proto.ApbUpdateOperation{Maxminop: &proto.ApbMaxMinUpdate{Value: pb.Int64(crdtOp.Value), IsMax: pb.Bool(true)}}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Maxminop{Maxminop: &proto.ApbMaxMinUpdate{Value: pb.Int64(crdtOp.Value), IsMax: shared.TRUE_POINTER}}}
 }
 
 func (crdtOp MinAddValue) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -200,7 +211,7 @@ func (crdtOp MinAddValue) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (
 }
 
 func (crdtOp MinAddValue) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	return &proto.ApbUpdateOperation{Maxminop: &proto.ApbMaxMinUpdate{Value: pb.Int64(crdtOp.Value), IsMax: pb.Bool(false)}}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Maxminop{Maxminop: &proto.ApbMaxMinUpdate{Value: pb.Int64(crdtOp.Value), IsMax: shared.FALSE_POINTER}}}
 }
 
 func (crdtState MaxMinState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
@@ -209,7 +220,7 @@ func (crdtState MaxMinState) FromReadResp(protobuf *proto.ApbReadObjectResp) (st
 }
 
 func (crdtState MaxMinState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
-	return &proto.ApbReadObjectResp{Maxmin: &proto.ApbGetMaxMinResp{Value: pb.Int64(crdtState.Value)}}
+	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Maxmin{Maxmin: &proto.ApbGetMaxMinResp{Value: pb.Int64(crdtState.Value)}}}
 }
 
 func (downOp MaxAddValue) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
@@ -223,19 +234,19 @@ func (downOp MinAddValue) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (
 }
 
 func (downOp MaxAddValue) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	return &proto.ProtoOpDownstream{MaxminOp: &proto.ProtoMaxMinDownstream{Max: &proto.ProtoMaxDownstream{Value: pb.Int64(downOp.Value)}}}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_MaxminOp{MaxminOp: &proto.ProtoMaxMinDownstream{Max: &proto.ProtoMaxDownstream{Value: pb.Int64(downOp.Value)}}}}
 }
 
 func (downOp MinAddValue) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	return &proto.ProtoOpDownstream{MaxminOp: &proto.ProtoMaxMinDownstream{Min: &proto.ProtoMinDownstream{Value: pb.Int64(downOp.Value)}}}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_MaxminOp{MaxminOp: &proto.ProtoMaxMinDownstream{Min: &proto.ProtoMinDownstream{Value: pb.Int64(downOp.Value)}}}}
 }
 
 func (crdt *MaxMinCrdt) ToProtoState() (protobuf *proto.ProtoState) {
 	topValue := crdt.topValue
-	return &proto.ProtoState{Maxmin: &proto.ProtoMaxMinState{Value: &topValue}}
+	return &proto.ProtoState{State: &proto.ProtoState_Maxmin{Maxmin: &proto.ProtoMaxMinState{Value: &topValue}}}
 }
 
-func (crdt *MaxMinCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID int16) (newCRDT CRDT) {
+func (crdt *MaxMinCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	return (&MaxMinCrdt{topValue: proto.GetMaxmin().GetValue()}).initializeFromSnapshot(ts, replicaID)
 }
 

@@ -1,6 +1,7 @@
 package crdt
 
 import (
+	"fmt"
 	rand "math/rand"
 	"time"
 
@@ -19,14 +20,14 @@ type GMapCrdt struct {
 	CRDTVM
 	values         map[string]Element
 	ts             int64
-	replicaID      int16
-	localReplicaID int16 //ReplicaID of the replica which has this CRDT instance
+	replicaID      uint16
+	localReplicaID uint16 //ReplicaID of the replica which has this CRDT instance
 }
 
 type DownstreamGMapAddAll struct {
 	Values    map[string]Element
 	Ts        int64
-	ReplicaID int16
+	ReplicaID uint16
 }
 
 //Effect for inversibleCRDT
@@ -35,26 +36,21 @@ type GMapAddAllEffect struct {
 	ReplacedValues  map[string]Element  //Entries for which there was a previous value (and stores that value)
 	NotExistentKeys map[string]struct{} //Entries which didn't exist before
 	Ts              int64               //Ts before this effect
-	ReplicaID       int16               //ReplicaID of the Ts before this effect
+	ReplicaID       uint16              //ReplicaID of the Ts before this effect
 }
 
-func (crdt *GMapCrdt) GetCRDTType() proto.CRDTType { return proto.CRDTType_RRMAP }
-
+func (crdt *GMapCrdt) GetCRDTType() proto.CRDTType            { return proto.CRDTType_RRMAP }
+func (crdt *GMapCrdt) GetDATAType() proto.DATAType            { return proto.DATAType_DEFAULT }
 func (args DownstreamGMapAddAll) GetCRDTType() proto.CRDTType { return proto.CRDTType_RRMAP }
+func (args DownstreamGMapAddAll) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 
 func (args DownstreamGMapAddAll) MustReplicate() bool { return true }
 
 // Note: crdt can (and most often will be) nil
-func (crdt *GMapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
-	crdt = &GMapCrdt{
-		CRDTVM:         (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete),
-		values:         make(map[string]Element),
-		ts:             0,
-		replicaID:      replicaID,
-		localReplicaID: replicaID,
-	}
-	newCrdt = crdt
-	return
+func (crdt *GMapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+	crdt = &GMapCrdt{values: make(map[string]Element), ts: 0, replicaID: replicaID, localReplicaID: replicaID}
+	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
+	return crdt
 }
 
 func (crdt *GMapCrdt) IsBigCRDT() bool { return false }
@@ -80,7 +76,7 @@ func (crdt *GMapCrdt) getState(updsNotYetApplied []UpdateArguments) (state MapEn
 		copyMap[key] = value
 	}
 
-	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+	if len(updsNotYetApplied) == 0 {
 		//Return right away
 		return MapEntryState{Values: copyMap}
 	}
@@ -103,7 +99,7 @@ func (crdt *GMapCrdt) getKeys(updsNotYetApplied []UpdateArguments) (state MapKey
 
 	i := 0
 
-	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+	if len(updsNotYetApplied) == 0 {
 		keys := make([]string, len(crdt.values))
 		//Copy the existing values to the array and return right away
 		for key := range crdt.values {
@@ -134,7 +130,7 @@ func (crdt *GMapCrdt) getKeys(updsNotYetApplied []UpdateArguments) (state MapKey
 }
 
 func (crdt *GMapCrdt) getValue(args GetValueArguments, updsNotYetApplied []UpdateArguments) (state MapGetValueState) {
-	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+	if len(updsNotYetApplied) == 0 {
 		//Return right away
 		return MapGetValueState{Value: crdt.values[args.Key]}
 	}
@@ -152,7 +148,7 @@ func (crdt *GMapCrdt) getValue(args GetValueArguments, updsNotYetApplied []Updat
 
 func (crdt *GMapCrdt) hasKey(args HasKeyArguments, updsNotYetApplied []UpdateArguments) (state MapHasKeyState) {
 	_, hasKey := crdt.values[args.Key]
-	if hasKey || updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+	if hasKey || len(updsNotYetApplied) == 0 {
 		//Return right away. Remember that this CRDT doesn't support removes, so once an add is found there's no need to search further.
 		return MapHasKeyState{HasKey: hasKey}
 	}
@@ -178,6 +174,14 @@ func (crdt *GMapCrdt) Update(args UpdateArguments) (downstreamArgs DownstreamArg
 		downstreamArgs = crdt.getAddAllDownstreamArgs(argMap)
 	case MapAddAll:
 		downstreamArgs = crdt.getAddAllDownstreamArgs(typedArgs.Values)
+	case MultiUpd:
+		multiDowns := make(MultiUpd, len(typedArgs))
+		for i, innerUpd := range typedArgs {
+			multiDowns[i] = crdt.Update(innerUpd)
+		}
+		return multiDowns
+	default:
+		fmt.Printf("[GMap][Update]Unknown update type: %v (%T)\n", args, args)
 	}
 	return
 }
@@ -191,6 +195,11 @@ func (crdt *GMapCrdt) getAddAllDownstreamArgs(values map[string]Element) (downst
 }
 
 func (crdt *GMapCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs DownstreamArguments) (otherDownstreamArgs DownstreamArguments) {
+	if multiUpd, ok := downstreamArgs.(MultiUpd); ok {
+		for _, upd := range multiUpd {
+			crdt.Downstream(updTs, upd.(DownstreamArguments))
+		}
+	}
 	effect := crdt.applyDownstream(downstreamArgs)
 	//Necessary for inversibleCrdt
 	crdt.addToHistory(&updTs, &downstreamArgs, effect)
@@ -205,6 +214,8 @@ func (crdt *GMapCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effec
 			effect = crdt.applyAddAll(opType.Values)
 		case *DownstreamGMapAddAll:
 			effect = crdt.applyAddAll(opType.Values)
+		default:
+			fmt.Printf("[GMap][Downstream]Unsupported downstream type: %v (%T)\n", downstreamArgs, downstreamArgs)
 		}
 	*/
 	//fmt.Println("[GMapCrdt]State after downstream: ", crdt.getState(nil))

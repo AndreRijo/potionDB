@@ -3,26 +3,32 @@ package crdt
 import (
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 
 	"potionDB/crdt/clocksi"
 	"potionDB/crdt/proto"
+	"potionDB/shared/shared"
 
 	//pb "github.com/golang/protobuf/proto"
+	"github.com/AndreRijo/go-tools/src/tools"
 	pb "google.golang.org/protobuf/proto"
+
+	"container/heap"
 )
 
 //TODO: updsNotYetApplied
 
 type TopKRmvCrdt struct {
 	CRDTVM
-	vc        clocksi.Timestamp
-	replicaID int16
+	vc clocksi.Timestamp //Logical timestamp (each replica uses a counter). So the size of each entry is irrelevant (i.e., no overflow issues.)
+	//Metrics to decide if we should cache a read result or not. TopN is always cached as it requires computing the sorted set.
+	//Note: only updates that modify the top-K (i.e., that modify elems) count, as only those can invalidate the cache.
+	nReads, nUpds int32
 
-	//Max number of elements that can be in top-K
-	maxElems int
-	//The "smallest score" in the top-K. Useful to know if when a new add arrives it should be added to the top or "hidden" to notInTop
-	smallestScore TopKElement
+	//Max number of elements that can be in top-K. We also limit maxNotTopElems to maxElems * MAX_NOT_TOP_FACTOR
+	maxElems, maxNotTopElems int
+	smallestScores           minBuffer[TopKElement] //A buffer of the smallest scores in the top-K. Useful to know if when a new add arrives it should be added to the top or "hidden" to notInTop. A buffer is used to avoid frequent searches in elems when an element is removed.
 	//Elements that are in the top-K
 	elems map[int32]TopKElement
 	//Removes of all elements, both in and not in top-K
@@ -30,20 +36,34 @@ type TopKRmvCrdt struct {
 	//Elems for which either:
 	//a) the value is < smallestScore and thus shouldn't be in top
 	//b) the value is >= smallestScore yet a higher value for the same ID is already on top, albeit with a smaller TS.
-	notInTop map[int32]setTopKElement
+	notInTop            map[int32]setTopKElement
+	smallestNotTop      minBuffer[TopKElement] //We use this to prevent notInTop from growing infinitely with elements that will never be relevant. When len(notInTop) > 100*maxElems, we will start dropping new elements that are too small.
+	highestNotTop       maxBuffer[TopKElement] //We use this to know when an element in notInTop becomes relevant again (i.e., higher than smallestScore) and thus should be promoted to top-K. Buffer avoids frequent searches.
+	notInTopEverFull    bool                   //This bool is set to true the first time notInTop becomes full. We only maintain smallestNotTop when this first happens.
+	cleanupFactor       int8                   //Factor used to help decide when should rems be cleaned up.
+	nClkUpdsSinceLastGC uint16                 //Counts the number of times vc was updated since last GC clean. It's okay to overflow this value.
 
 	//Buffer for getTopN and getTopAbove.
 	//Each time the top is modified it gets nilled, and is rebuilt on the first execution of one of those queries.
 	//Note that changes to notInTop DOES NOT nil this buffer.
-	sortedElems []TopKScore
+	sortedElems                  []TopKScore
+	nMin, nMinNotTop, nMaxNotTop int //Counters for debugging purposes.
 }
 
 type TopKValueState struct {
 	Scores []TopKScore
 }
 
-type TopKInit struct {
-	TopSize uint32
+// For max, min, sum, count
+type TopAggrState int64
+
+// For avg
+type TopAggrAvgState struct {
+	Sum, Count int64
+}
+
+type TopKRmvInit struct {
+	TopSize, NotTopSize uint32
 }
 
 type TopKAdd struct {
@@ -107,6 +127,12 @@ type GetTopKAboveValueArguments struct {
 	MinValue int32
 }
 
+type TopAggregateArguments struct { //TODO: min, max and bitmask are optional. Make sure in the protobufs to handle this appropriately. (I.e., if not defined, define as min/max/0xFFFFFFFF int32.)
+	MinValue, MaxValue int32
+	Bitmask            int32 //Optional. Useful if score has multiple fields packed together and only some should be used for aggregation.
+	AggregateType
+}
+
 type TopKScore struct {
 	Id    int32
 	Score int32
@@ -114,11 +140,10 @@ type TopKScore struct {
 }
 
 type TopKElement struct {
-	Id        int32
-	Score     int32
-	Ts        int64
-	ReplicaID int16
-	Data      *[]byte
+	Id    int32
+	Score int32
+	TsId  tsWithReplicaID
+	Data  *[]byte
 }
 
 // List of TopKRmvAddEffect, TopKRmvAddNotTopEffect and TopKRmvReplaceEffect
@@ -127,26 +152,55 @@ type TopKRmvAddAllEffect struct {
 }
 
 // Effect of an TopKAdd that adds the element to the top
-type TopKRmvAddEffect struct {
+/*type TopKRmvAddEffect struct {
 	TopKElement
 	oldTs int64 //Used to make the crdt's VC go "back in time"
+}*/
+
+// Effect of an TopKAdd that adds the element to the top
+type TopKRmvAddEffect struct {
+	newElem    TopKElement
+	removedMin TopKElement
+	oldTs      int64 //Used to make the crdt's VC go "back in time"
 }
 
 // Effect of an TopKAdd that adds the element to notInTop
-type TopKRmvAddNotTopEffect struct {
+/*type TopKRmvAddNotTopEffect struct {
 	TopKRmvAddEffect
+}*/
+
+// Effect of an TopKAdd that adds the element to notInTop
+type TopKRmvAddNotTopEffect struct {
+	newElem        TopKElement
+	updateBuffs    bool
+	kickedSmallest TopKElement
+	kickedHighest  TopKElement
+	oldTs          int64 //Used to make the crdt's VC go "back in time"
 }
 
-// Effect of an TopKAdd which replaced an older, lower value with a higher one, possibly changing the min.
+/*// Effect of an TopKAdd which replaced an older, lower value with a higher one, possibly changing the min.
 type TopKRmvReplaceEffect struct {
 	newElem TopKElement
 	oldElem TopKElement
 	oldMin  TopKElement
 	oldTs   int64 //Used to make the crdt's VC go "back in time"
+}*/
+
+// Effect of an TopKAdd which replaced an older, lower value.
+type TopKRmvReplaceEffect struct {
+	newElem              TopKElement
+	oldElem              TopKElement
+	oldTs                int64 //Used to make the crdt's VC go "back in time"
+	updatedHighestNotTop bool
 }
 
 type TopKRmvRemoveAllEffect struct {
 	effects []*TopKRmvRemoveEffect
+}
+
+type TopKRmvRemoveAllWithCleanEffect struct {
+	effects     []*TopKRmvRemoveEffect
+	cleanedRems []tools.Pair[int32, clocksi.Timestamp]
 }
 
 type TopKRmvRemoveEffect struct {
@@ -154,12 +208,30 @@ type TopKRmvRemoveEffect struct {
 	previousVc    clocksi.Timestamp //nil in case there wasn't a previous remove for this Id
 	notTopRemoved setTopKElement
 	remElem       TopKElement
-	oldMin        TopKElement
-	minAddedToTop bool //true if oldMin was updated to the top
+	promotedElem  TopKElement
 }
 
-type setTopKElement map[TopKElement]struct{}
-type setOps map[UpdateArguments]struct{}
+type TopKRmvRemoveWithCleanEffect struct {
+	TopKRmvRemoveEffect
+	cleanedRems []tools.Pair[int32, clocksi.Timestamp]
+}
+
+/*type TopKRmvRemoveEffect struct {
+	id            int32
+	previousVc    clocksi.Timestamp //nil in case there wasn't a previous remove for this Id
+	notTopRemoved setTopKElement
+	remElem       TopKElement
+	oldMin        TopKElement
+	minAddedToTop bool //true if oldMin was updated to the top
+}*/
+
+// This interface is intended to help code reusing (with generics) that involve accessing elems map across different TopK implementations.
+type HasScoreId interface {
+	GetScore() int32
+	GetId() int32
+}
+
+/*type setTopKElement map[TopKElement]struct{}
 
 // Adds an element to the set. This hides the internal representation of the set
 func (set setTopKElement) add(elem TopKElement) {
@@ -172,11 +244,586 @@ func (set setTopKElement) copy() (newSet setTopKElement) {
 		newSet[id] = elem
 	}
 	return
+}*/
+
+/*
+type setOps map[UpdateArguments]struct{}
+
+	func (set setOps) add(op UpdateArguments) {
+		set[op] = struct{}{}
+	}
+*/
+
+type MaxHeapTopKElem []TopKElement
+
+func newMaxHeapTopKElem(size int) *MaxHeapTopKElem {
+	h := make(MaxHeapTopKElem, 0, size)
+	return &h
 }
 
-func (set setOps) add(op UpdateArguments) {
-	set[op] = struct{}{}
+func (h MaxHeapTopKElem) Len() int           { return len(h) }
+func (h MaxHeapTopKElem) Less(i, j int) bool { return h[i].isHigher(h[j]) } // reversed for max-heap
+func (h MaxHeapTopKElem) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+
+func (h *MaxHeapTopKElem) Push(x any) {
+	*h = append(*h, x.(TopKElement))
 }
+
+func (h *MaxHeapTopKElem) Pop() any {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[:n-1]
+	return x
+}
+
+type MinHeapTopKElem []TopKElement
+
+func newMinHeapTopKElem(size int) *MinHeapTopKElem {
+	h := make(MinHeapTopKElem, 0, size)
+	return &h
+}
+
+func (h MinHeapTopKElem) Len() int           { return len(h) }
+func (h MinHeapTopKElem) Less(i, j int) bool { return h[i].isSmaller(h[j]) } // min-heap
+func (h MinHeapTopKElem) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+
+func (h *MinHeapTopKElem) Push(x any) {
+	*h = append(*h, x.(TopKElement))
+}
+
+func (h *MinHeapTopKElem) Pop() any {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[:n-1]
+	return x
+}
+
+type minBuffer[T HasScoreId] struct {
+	mins []T //Sorted. Min is at [0]. This should only be used with small sizes.
+	size int
+	zero T
+}
+
+func newMinBuffer[T HasScoreId](size int, zero T) minBuffer[T] {
+	return minBuffer[T]{mins: make([]T, size), size: 0, zero: zero}
+}
+
+// if elemsLen == size, then we can safely add this at the end.
+// Otherwise, only adds if it would be inbetween.
+func (mb *minBuffer[T]) addIfInBetween(elem T, elemsLen int) (removed T) {
+	removed = mb.zero
+	if mb.size == 0 {
+		if elemsLen > 1 {
+			return
+		}
+		mb.mins[0] = elem
+		mb.size++
+		return
+	}
+	currHighest := mb.mins[mb.size-1]
+	if isHigherScore(elem, currHighest) {
+		if elemsLen == mb.size+1 && mb.size < len(mb.mins) { //Safe to add last.
+			mb.mins[mb.size] = elem
+			mb.size++
+		} //else: no add.
+		return
+	}
+	//Should belong somewhere in the buffer. We'll find out where.
+	for i, curr := range mb.mins[:mb.size] {
+		if isHigherScore(curr, elem) { //curr is higher than elem, so elem belongs to this position.
+			//Shift right all elements from i to end.
+			if mb.size < len(mb.mins) {
+				mb.size++
+				copy(mb.mins[i+1:], mb.mins[i:mb.size-1]) //E.g., mins = [0]. mb.size++ -> 2. mb.mins[0:1]. Includes 0, OK.
+			} else { //Buffer full, override last position
+				removed = mb.mins[mb.size-1]
+				copy(mb.mins[i+1:], mb.mins[i:])
+			}
+			mb.mins[i] = elem
+			return removed
+		}
+	}
+	panic("[minBuffer][addIfInBetween]Got to the end of the function, which was never supposed to happen.\n")
+	//Will never reach this point.
+	return mb.zero
+}
+
+// Always adds the element, knowing it's already the new min.
+func (mb *minBuffer[T]) addMin(elem T) {
+	copy(mb.mins[1:], mb.mins[:mb.size])
+	mb.mins[0] = elem
+	if mb.size < len(mb.mins) {
+		mb.size++
+	}
+}
+
+// Adds an element to the buffer, as long as there is space. Returns the element that got removed from the buffer.
+// Unlikely to be needed.
+/*func (mb *minBuffer[T]) add(elem T) T {
+	if mb.size == 0 {
+		mb.mins[0] = elem
+		mb.size++
+		return mb.zero
+	}
+	currHighest := mb.mins[mb.size-1]
+	if isHigherScore(currHighest, elem) {
+		if mb.size < len(mb.mins) {
+			mb.mins[mb.size] = elem
+			mb.size++
+			return mb.zero
+		} //else: buf full, don't add.
+		return mb.zero
+	}
+	//Should belong somewhere in the buffer. We'll find out where.
+	for i, curr := range mb.mins[:mb.size] {
+		if isHigherScore(curr, elem) { //curr is higher than elem, so elem belongs to this position.
+			//Shift right all elements from i to end.
+			if mb.size < len(mb.mins) {
+				mb.size++
+				copy(mb.mins[i+1:mb.size], mb.mins[i:mb.size-1])
+			} else { //Buffer full, override last position
+				old := mb.mins[mb.size-1]
+				copy(mb.mins[i+1:], mb.mins[i:mb.size-1])
+				return old
+			}
+			return mb.zero
+		}
+	}
+	return mb.zero //Will never reach this point
+}*/
+
+func (mb *minBuffer[T]) remove(elem T) {
+	if mb.size == 0 {
+		return
+	}
+	max := mb.mins[mb.size-1]     //No need to compare with < min: if that was the case, it would be in the buffer...
+	if isHigherScore(elem, max) { //Can't be in the buffer.
+		return
+	}
+	//Search.
+	for i, curr := range mb.mins[:mb.size] {
+		if curr.GetId() == elem.GetId() { //Found. Shift elems and update size.
+			copy(mb.mins[i:], mb.mins[i+1:mb.size])
+			mb.size--
+			return
+		}
+	}
+	//Will never reach this point.
+}
+
+// Pre: toRemove > toAdd.
+func (mb *minBuffer[T]) removeAndAdd(toRemove, toAdd T) {
+	currHighest := mb.mins[mb.size-1]
+	if isHigherScore(toRemove, currHighest) {
+		//toRemove not in buffer.
+		if isHigherScore(toAdd, currHighest) {
+			return //Nothing to do
+		}
+		//Must search for where to add "toAdd" (this may happen as toAdd <= toRemove.)
+		for i, curr := range mb.mins[:mb.size] {
+			if isHigherScore(curr, toAdd) { //curr is higher than elem, so elem belongs to this position.
+				//Shift right all elements from i to end.
+				if mb.size < len(mb.mins) {
+					mb.size++
+					copy(mb.mins[i+1:], mb.mins[i:mb.size-1])
+				} else { //Buffer full, override last position
+					copy(mb.mins[i+1:], mb.mins[i:mb.size-1])
+				}
+				mb.mins[i] = toAdd
+				return
+			}
+		}
+	} //else: toRemove is in the buffer. Thus, add (toAdd <= toRemove) will also belong here. As such the code below can't happen.
+	/*if isHigherScore(toAdd, currHighest) {
+		//Search for position to remove, but don't add.
+		for i, curr := range mb.mins[:mb.size] {
+			if isEqualScore(curr, toRemove) {
+				//Found. Shift left all elements from i+1 to end.
+				copy(mb.mins[i:], mb.mins[i+1:mb.size])
+				mb.size--
+				return
+			}
+		}
+	}*/
+	//Both belong to the buffer (very rare case). Note that toAdd < toRemove, so add's pos will appear first.
+	addPos := -1
+	for i, curr := range mb.mins[:mb.size] {
+		if isEqualScore(curr, toRemove) { //Add element is always < toRemove.
+			copy(mb.mins[addPos+1:], mb.mins[addPos:i])
+			mb.mins[addPos] = toAdd
+			return
+		} else if isHigherScore(curr, toAdd) && addPos == -1 {
+			addPos = i
+		}
+	}
+	//Will never reach this point.
+}
+
+// Remove the actual min.
+func (mb *minBuffer[T]) removeMin() T {
+	removed := mb.mins[0]
+	copy(mb.mins[0:], mb.mins[1:mb.size])
+	mb.size--
+	return removed
+}
+
+// Pre: mb should be empty.
+func (mb *minBuffer[T]) copyFrom(buf []T) {
+	mb.size = copy(mb.mins, buf)
+}
+
+func (mb *minBuffer[T]) copy() (cp minBuffer[T]) {
+	cp.mins, cp.size, cp.zero = make([]T, len(mb.mins)), mb.size, mb.zero
+	copy(cp.mins, mb.mins[:mb.size])
+	return cp
+}
+
+func (mb *minBuffer[T]) add(elem T) {
+	if mb.size == 0 {
+		mb.mins[0] = elem
+		mb.size++
+		return
+	}
+	currHighest := mb.mins[mb.size-1]
+	if isHigherScore(elem, currHighest) {
+		if mb.size < len(mb.mins) {
+			mb.mins[mb.size] = elem
+			mb.size++
+		}
+		return
+	}
+
+	//Search.
+	for i, curr := range mb.mins[:mb.size] {
+		if isHigherScore(curr, elem) { //curr is higher than elem, so elem belongs to this position.
+			//Shift right all elements from i to end.
+			if mb.size < len(mb.mins) {
+				mb.size++
+				copy(mb.mins[i+1:], mb.mins[i:mb.size-1])
+			} else { //Buffer full, override last position
+				copy(mb.mins[i+1:], mb.mins[i:mb.size-1])
+			}
+			mb.mins[i] = elem
+			return
+		}
+	}
+	//Will never reach this point.
+}
+
+//As of now, there's a big challenge: what if we update the score of an element that is in the minBuffer?
+//This has a severe consequence that we would always need to search the whole buffer to ensure the element is not there.
+//But we can work around this. If the old elem.Score was too high, then it wouldn't be on the min in the first place.
+//So strategy is... remove old one (which we can easily see if it's there or not); add new one.
+//This is costly with copies. But a "replace" strategy doesn't work as it would likely be in different places in the buffer. I could potentially make this replace strategy work but it's too complicated. No need at this point.
+
+func (mb *minBuffer[T]) getMin() T {
+	return mb.mins[0]
+}
+
+func (mb *minBuffer[T]) hasMin() bool {
+	return mb.size > 0
+}
+
+func (mb *minBuffer[T]) Cap() int {
+	return len(mb.mins)
+}
+
+type maxBuffer[T HasScoreId] struct {
+	maxs []T //Sorted. Max is at [0]. This should only be used with small sizes.
+	size int
+	zero T
+}
+
+func newMaxBuffer[T HasScoreId](size int, zero T) maxBuffer[T] {
+	return maxBuffer[T]{maxs: make([]T, size), size: 0, zero: zero}
+}
+
+func (mb *maxBuffer[T]) addIfInBetween(elem T, elemsLen int) (removed T) {
+	removed = mb.zero
+	if mb.size == 0 {
+		if elemsLen > 1 {
+			return
+		}
+		mb.maxs[0] = elem
+		mb.size++
+		return
+	}
+	currLowest := mb.maxs[mb.size-1]
+	if isLowerScore(elem, currLowest) {
+		if elemsLen == mb.size+1 && mb.size < len(mb.maxs) { //Safe to add last.
+			mb.maxs[mb.size] = elem
+			mb.size++
+		} //else: no add
+		return
+	}
+	//Should belong somewhere in the buffer. We'll find out where.
+	for i, curr := range mb.maxs[:mb.size] {
+		if isLowerScore(curr, elem) { //curr is lower than elem, so elem belongs to this position.
+			//Shift right all elements from i to end.
+			//[30, 28, 26, 24, 22, 20]. Size = 6. Adding: 23. Will add 23 on pos 4.
+			//Copy to [5:] from [4:7-1]=[4:6]. That is, copy to 5, 6 from 4, 5.
+			//[30, 28, 26, 24, 22, 22, 20]. Size = 7.
+			//Then, add 23 to pos 4. [30, 28, 26, 24, 23, 22, 20]. OK!
+			if mb.size < len(mb.maxs) {
+				mb.size++
+				copy(mb.maxs[i+1:], mb.maxs[i:mb.size-1])
+			} else { //Buffer full, override last position
+				removed = mb.maxs[mb.size-1]
+				copy(mb.maxs[i+1:], mb.maxs[i:mb.size-1])
+			}
+			mb.maxs[i] = elem
+			return
+		}
+	}
+	//Will never reach this point.
+	panic("[maxBuffer][addIfInBetween]Got to the end of the function, which was never supposed to happen.\n")
+	return
+}
+
+// Always adds the element, knowing it's already the new max.
+func (mb *maxBuffer[T]) addMax(elem T) {
+	copy(mb.maxs[1:], mb.maxs[:mb.size])
+	mb.maxs[0] = elem
+	if mb.size < len(mb.maxs) {
+		mb.size++
+	}
+}
+
+func (mb *maxBuffer[T]) remove(elem T) {
+	if mb.size == 0 {
+		return
+	}
+	min := mb.maxs[mb.size-1]    //No need to compare with > max: if that was the case, it would be in the buffer...
+	if isLowerScore(elem, min) { //Can't be in the buffer.
+		return
+	}
+	//Search.
+	for i, curr := range mb.maxs[:mb.size] {
+		if curr.GetId() == elem.GetId() { //Found. Shift elems and update size.
+			copy(mb.maxs[i:], mb.maxs[i+1:mb.size])
+			mb.size--
+			return
+		}
+	}
+	panic("[maxBuffer][remove]Got to the end of the function, which was never supposed to happen.\n")
+	//Will never reach this point.
+}
+
+func (mb *maxBuffer[T]) removeByIdAndAddMax(elem T) {
+	//Search pos to remove
+	remPos := -1
+	for i, curr := range mb.maxs[:mb.size] {
+		if curr.GetId() == elem.GetId() { //Found.
+			remPos = i
+			break
+		}
+	}
+	if remPos == -1 { //Didn't find, just add new max.
+		mb.addMax(elem)
+	} else {
+		//Shift only elems before remPos to the right.
+		if remPos > 0 {
+			copy(mb.maxs[1:], mb.maxs[0:remPos])
+		}
+		mb.maxs[0] = elem
+		//Size always stays unchanged in this scenario.
+	}
+}
+
+// Replaces an existing entry of elem.Id with elem, if elem is higher.
+// If it doesn't exist, it will still add.
+func (mb *maxBuffer[T]) replaceIfHigher(elem T) (removed T) {
+	removed = mb.zero
+	if mb.size == 0 {
+		mb.maxs[0] = elem
+		mb.size++
+		return
+	}
+	currLowest := mb.maxs[mb.size-1]
+	if isLowerScore(elem, currLowest) { //Won't be relevant in any case.
+		return
+	}
+	//Search.
+	pos := -1
+	for i, curr := range mb.maxs[:mb.size] {
+		if curr.GetId() == elem.GetId() { //Found the elem to remove.
+			if pos != -1 { //The new elem is higher. Perfect, add.
+				removed = mb.maxs[i]
+				copy(mb.maxs[pos+1:], mb.maxs[pos:i])
+				mb.maxs[pos] = elem
+				return removed
+			} else { //Found curr but didn't find spot for new elem: thus, new elem is lower, abort.
+				return
+			}
+		} else if isLowerScore(curr, elem) && pos == -1 { //curr is lower than elem, so elem belongs to this position.
+			pos = i
+		}
+	}
+	if mb.size == len(mb.maxs) {
+		removed = mb.maxs[mb.size-1]
+	}
+	//Pos is != -1 for sure at some point.
+	copy(mb.maxs[pos+1:], mb.maxs[pos:mb.size])
+	mb.maxs[pos] = elem
+	if mb.size < len(mb.maxs) {
+		mb.size++
+	}
+	return
+}
+
+// Pre: toAdd < toRemove.
+func (mb *maxBuffer[T]) removeAndAdd(toRemove, toAdd T) {
+	currLowest := mb.maxs[mb.size-1]
+	if isLowerScore(toRemove, currLowest) {
+		//toRemove not in buffer. toAdd is even lower, so can return immediately.
+		return
+	}
+	if isLowerScore(toAdd, currLowest) {
+		//Search for position to remove, but don't add.
+		for i, curr := range mb.maxs[:mb.size] {
+			if isEqualScore(curr, toRemove) {
+				//Found. Shift left all elements from i+1 to end.
+				copy(mb.maxs[i:], mb.maxs[i+1:mb.size])
+				mb.size--
+				return
+			}
+		}
+	}
+	//Both belong to the buffer (very rare case)
+	remPos := -1
+	for i, curr := range mb.maxs[:mb.size] {
+		if isEqualScore(curr, toRemove) { //toRemove will always appear first, as toRemove is > toAdd
+			remPos = i
+		} else if isLowerScore(curr, toAdd) { //We add here.
+			copy(mb.maxs[remPos:], mb.maxs[remPos+1:i+1]) //Copy all from remPos+1 until this position, inclusive.
+			mb.maxs[i] = toAdd
+			return
+		}
+	}
+	//Will never reach this point.
+}
+
+/*
+func (mb *maxBuffer[T]) addIfInBetween(elem T, elemsLen int) (removed T) {
+	if mb.size == 0 && elemsLen > 1 {
+		return mb.zero
+	}
+	currLowest := mb.maxs[mb.size-1]
+	if isLowerScore(currLowest, elem) {
+		if elemsLen == mb.size+1 && mb.size < len(mb.maxs) { //Safe to add last.
+			mb.maxs[mb.size] = elem
+			mb.size++
+		} //else: no add
+		return mb.zero
+	}
+	//Should belong somewhere in the buffer. We'll find out where.
+	for i, curr := range mb.maxs[:mb.size] {
+		if isLowerScore(curr, elem) { //curr is lower than elem, so elem belongs to this position.
+			//Shift right all elements from i to end.
+			if mb.size < len(mb.maxs) {
+				mb.size++
+				copy(mb.maxs[i+1:mb.size], mb.maxs[i:mb.size-1])
+			} else { //Buffer full, override last position
+				removed = mb.maxs[mb.size-1]
+				copy(mb.maxs[i+1:], mb.maxs[i:mb.size-1])
+				return
+			}
+			return mb.zero
+		}
+	}
+	//Will never reach this point.
+	return mb.zero
+}
+*/
+
+// Remove the actual max.
+func (mb *maxBuffer[T]) removeMax() {
+	if mb.size > 0 {
+		copy(mb.maxs[0:], mb.maxs[1:mb.size])
+		mb.size--
+	}
+}
+
+// Pre: mb should be empty.
+func (mb *maxBuffer[T]) copyFrom(buf []T) {
+	mb.size = copy(mb.maxs, buf)
+}
+
+func (mb *maxBuffer[T]) copy() (cp maxBuffer[T]) {
+	cp.maxs, cp.size, cp.zero = make([]T, len(mb.maxs)), mb.size, mb.zero
+	copy(cp.maxs, mb.maxs)
+	return cp
+}
+
+func (mb *maxBuffer[T]) add(elem T) (removed T) {
+	removed = mb.zero
+	if mb.size == 0 {
+		mb.maxs[0] = elem
+		mb.size++
+		return
+	}
+	currLowest := mb.maxs[mb.size-1]
+	if isLowerScore(elem, currLowest) {
+		if mb.size < len(mb.maxs) {
+			mb.maxs[mb.size] = elem
+			mb.size++
+		}
+		return
+	}
+
+	//Search.
+	for i, curr := range mb.maxs[:mb.size] {
+		if isLowerScore(curr, elem) { //curr is lower than elem, so elem belongs to this position.
+			//Shift right all elements from i to end.
+			if mb.size < len(mb.maxs) {
+				mb.size++
+				copy(mb.maxs[i+1:], mb.maxs[i:mb.size-1])
+			} else { //Buffer full, override last position
+				removed = mb.maxs[mb.size-1]
+				copy(mb.maxs[i+1:], mb.maxs[i:mb.size-1])
+			}
+			mb.maxs[i] = elem
+			return
+		}
+	}
+	//Will never reach this point.
+	return
+}
+
+func (mb *maxBuffer[T]) getMax() T {
+	if mb.size == 0 {
+		return mb.zero
+	}
+	return mb.maxs[0]
+}
+
+func (mb *maxBuffer[T]) hasMax() bool {
+	return mb.size > 0
+}
+
+func (mb *maxBuffer[T]) Cap() int {
+	return len(mb.maxs)
+}
+
+func (mb *maxBuffer[T]) Len() int {
+	return mb.size
+}
+
+func isHigherScore[T HasScoreId](a, b T) bool {
+	return a.GetScore() > b.GetScore() || (a.GetScore() == b.GetScore() && a.GetId() > b.GetId())
+}
+
+func isLowerScore[T HasScoreId](a, b T) bool {
+	return a.GetScore() < b.GetScore() || (a.GetScore() == b.GetScore() && a.GetId() < b.GetId())
+}
+
+func isEqualScore[T HasScoreId](a, b T) bool {
+	return a.GetScore() == b.GetScore() && a.GetId() == b.GetId()
+}
+
+type setTopKElement tools.SliceSetInterface[TopKElement] //Usually these sets will be very small, so a slice is more appropriate.
 
 // Returns true if elem is > than other
 func (elem TopKElement) isHigher(other TopKElement) bool {
@@ -191,7 +838,7 @@ func (elem TopKElement) isHigher(other TopKElement) bool {
 		if elem.Id > other.Id {
 			return true
 		}
-		if elem.Id == other.Id && elem.Ts > other.Ts {
+		if elem.Id == other.Id && elem.TsId > other.TsId {
 			return true
 		}
 	}
@@ -203,18 +850,29 @@ func (elem TopKElement) isSmaller(other TopKElement) bool {
 }
 
 func (elem TopKElement) isEqual(other TopKElement) bool {
-	return elem.Id == other.Id && elem.ReplicaID == other.ReplicaID &&
-		elem.Score == other.Score && elem.Ts == other.Ts
+	return elem.Id == other.Id &&
+		elem.Score == other.Score && elem.TsId == other.TsId
 }
 
+func (elem TopKElement) GetScore() int32 { return elem.Score }
+func (elem TopKElement) GetId() int32    { return elem.Id }
+func (score TopKScore) GetScore() int32  { return score.Score }
+func (score TopKScore) GetId() int32     { return score.Id }
+
 func (crdt *TopKRmvCrdt) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPK_RMV }
+func (crdt *TopKRmvCrdt) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 
 // Ops
 func (args TopKAdd) GetCRDTType() proto.CRDTType       { return proto.CRDTType_TOPK_RMV }
 func (args TopKAddAll) GetCRDTType() proto.CRDTType    { return proto.CRDTType_TOPK_RMV }
 func (args TopKRemove) GetCRDTType() proto.CRDTType    { return proto.CRDTType_TOPK_RMV }
 func (args TopKRemoveAll) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPK_RMV }
-func (args TopKInit) GetCRDTType() proto.CRDTType      { return proto.CRDTType_TOPK_RMV }
+func (args TopKRmvInit) GetCRDTType() proto.CRDTType   { return proto.CRDTType_TOPK_RMV }
+func (args TopKAdd) GetDATAType() proto.DATAType       { return proto.DATAType_DEFAULT }
+func (args TopKAddAll) GetDATAType() proto.DATAType    { return proto.DATAType_DEFAULT }
+func (args TopKRemove) GetDATAType() proto.DATAType    { return proto.DATAType_DEFAULT }
+func (args TopKRemoveAll) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
+func (args TopKRmvInit) GetDATAType() proto.DATAType   { return proto.DATAType_DEFAULT }
 
 // Downstreams
 func (args DownstreamTopKAdd) GetCRDTType() proto.CRDTType       { return proto.CRDTType_TOPK_RMV }
@@ -223,68 +881,124 @@ func (args DownstreamTopKRemove) GetCRDTType() proto.CRDTType    { return proto.
 func (args DownstreamTopKRemoveAll) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPK_RMV }
 func (args OptDownstreamTopKAdd) GetCRDTType() proto.CRDTType    { return proto.CRDTType_TOPK_RMV }
 func (args OptDownstreamTopKRemove) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPK_RMV }
+func (args DownstreamTopKAdd) GetDATAType() proto.DATAType       { return proto.DATAType_DEFAULT }
+func (args DownstreamTopKAddAll) GetDATAType() proto.DATAType    { return proto.DATAType_DEFAULT }
+func (args DownstreamTopKRemove) GetDATAType() proto.DATAType    { return proto.DATAType_DEFAULT }
+func (args DownstreamTopKRemoveAll) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
+func (args OptDownstreamTopKAdd) GetDATAType() proto.DATAType    { return proto.DATAType_DEFAULT }
+func (args OptDownstreamTopKRemove) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 func (args DownstreamTopKAdd) MustReplicate() bool               { return true }
 func (args DownstreamTopKAddAll) MustReplicate() bool            { return len(args.DownstreamAdds) > 0 }
 func (args DownstreamTopKRemove) MustReplicate() bool            { return true }
 func (args DownstreamTopKRemoveAll) MustReplicate() bool         { return len(args.DownRems) > 0 }
 func (args OptDownstreamTopKAdd) MustReplicate() bool            { return false }
 func (args OptDownstreamTopKRemove) MustReplicate() bool         { return false }
-func (args TopKInit) MustReplicate() bool                        { return true }
+func (args TopKRmvInit) MustReplicate() bool                     { return true }
 
 // States
-func (args TopKValueState) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPK_RMV }
-func (args TopKValueState) GetREADType() proto.READType { return proto.READType_FULL }
+func (args TopKValueState) GetCRDTType() proto.CRDTType  { return proto.CRDTType_TOPK_RMV }
+func (args TopKValueState) GetREADType() proto.READType  { return proto.READType_FULL }
+func (args TopKValueState) GetDATAType() proto.DATAType  { return proto.DATAType_DEFAULT }
+func (args TopAggrState) GetCRDTType() proto.CRDTType    { return proto.CRDTType_TOPK_RMV }
+func (args TopAggrState) GetREADType() proto.READType    { return proto.READType_TOP_AGGR }
+func (args TopAggrState) GetDATAType() proto.DATAType    { return proto.DATAType_DEFAULT }
+func (args TopAggrAvgState) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPK_RMV }
+func (args TopAggrAvgState) GetREADType() proto.READType { return proto.READType_TOP_AGGR }
+func (args TopAggrAvgState) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 
 // Reads
 func (args GetTopNArguments) GetCRDTType() proto.CRDTType           { return proto.CRDTType_TOPK_RMV }
 func (args GetTopNArguments) GetREADType() proto.READType           { return proto.READType_GET_N }
+func (args GetTopNArguments) GetDATAType() proto.DATAType           { return proto.DATAType_DEFAULT }
 func (args GetTopNArguments) HasInnerReads() bool                   { return false }
 func (args GetTopNArguments) HasVariables() bool                    { return false }
 func (args GetTopKAboveValueArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPK_RMV }
 func (args GetTopKAboveValueArguments) GetREADType() proto.READType {
 	return proto.READType_GET_ABOVE_VALUE
 }
-func (args GetTopKAboveValueArguments) HasInnerReads() bool { return false }
-func (args GetTopKAboveValueArguments) HasVariables() bool  { return false }
+func (args GetTopKAboveValueArguments) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
+func (args GetTopKAboveValueArguments) HasInnerReads() bool         { return false }
+func (args GetTopKAboveValueArguments) HasVariables() bool          { return false }
+func (args TopAggregateArguments) GetCRDTType() proto.CRDTType      { return proto.CRDTType_TOPK_RMV }
+func (args TopAggregateArguments) GetREADType() proto.READType      { return proto.READType_TOP_AGGR }
+func (args TopAggregateArguments) GetDATAType() proto.DATAType      { return proto.DATAType_DEFAULT }
+func (args TopAggregateArguments) HasInnerReads() bool              { return false }
+func (args TopAggregateArguments) HasVariables() bool               { return false }
+
+/*const (
+	cacheSortedSet = true //If topN query should cache the sorted set of elems until an update is applied
+)*/
 
 const (
-	cacheSortedSet = true //If topN query should cache the sorted set of elems until an update is applied
+	IGNORE_BITMASK     = ^int32(0) //All bits set to 1
+	MAX_NOT_TOP_FACTOR = 50        //notInTop will have up to maxElem * MAX_NOT_TOP_FACTOR elems. This limits storage usage in scenarios with small tops but several entries.
 )
 
 var (
-	defaultTopKSize = 100 //Default number of top positions
+	defaultTopKSize                                                = 100               //Default number of top positions
+	minBufferSize                                                  = 10                //Size for min/max buffers.
+	MIN_BUF_FACTOR, MIN_NOT_TOP_BUF_FACTOR, MAX_NOT_TOP_BUF_FACTOR = 0.05, 0.075, 0.03 //Factors for buffer sizes.
+	MIN_ELEM                                                       = TopKElement{Id: math.MinInt32, Score: math.MinInt32, TsId: tsWithReplicaID(math.MaxUint64)}
 )
 
-func (crdt *TopKRmvCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
+func (crdt *TopKRmvCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	return crdt.InitializeWithSize(startTs, replicaID, defaultTopKSize)
 }
 
-func (crdt *TopKRmvCrdt) InitializeWithSize(startTs *clocksi.Timestamp, replicaID int16, size int) (newCrdt CRDT) {
+func (crdt *TopKRmvCrdt) InitializeWithSize(startTs *clocksi.Timestamp, replicaID uint16, size int) (newCrdt CRDT) {
 	crdt = &TopKRmvCrdt{
-		CRDTVM: (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete),
-		vc:     clocksi.NewClockSiTimestamp(),
+		CRDTVM: (&genericInversibleCRDT{}).initialize(crdt),
+		vc:     clocksi.NewSliceTimestamp(),
 		//vc:                    clocksi.NewClockSiTimestamp(replicaID),
-		replicaID: replicaID,
-		maxElems:  size,
+		maxElems:       size,
+		maxNotTopElems: size * MAX_NOT_TOP_FACTOR,
 		//smallestScore:         TopKElement{Score: math.MinInt32},
-		smallestScore: TopKElement{},
-		elems:         make(map[int32]TopKElement),
+		//smallestScore: TopKElement{},
+		elems:         make(map[int32]TopKElement, size),
 		rems:          make(map[int32]clocksi.Timestamp),
 		notInTop:      make(map[int32]setTopKElement),
+		cleanupFactor: 2, //By default, the Top total size can grow up to 5000, so we keep an aggressive cleanupFactor.
 	}
+	crdt.initializeBuffers()
 	newCrdt = crdt
 	return
 }
 
+func (crdt *TopKRmvCrdt) initializeBuffers() {
+	crdt.smallestScores = newMinBuffer(tools.Max(minBufferSize, int(float64(crdt.maxElems)*MIN_BUF_FACTOR)), MIN_ELEM)
+	crdt.highestNotTop = newMaxBuffer(tools.Max(minBufferSize, int(float64(crdt.maxNotTopElems)*MAX_NOT_TOP_BUF_FACTOR)), MIN_ELEM)
+	//This one is only kept when notInTop becomes full for the first time.
+	crdt.smallestNotTop = newMinBuffer(tools.Max(minBufferSize, int(float64(crdt.maxNotTopElems)*MIN_NOT_TOP_BUF_FACTOR)), MIN_ELEM)
+}
+
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *TopKRmvCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID int16) (sameCRDT *TopKRmvCrdt) {
-	crdt.CRDTVM, crdt.replicaID = (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete), replicaID
+func (crdt *TopKRmvCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *TopKRmvCrdt) {
+	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
+}
+
+func (crdt *TopKRmvCrdt) CRDTGC(safeClk clocksi.Timestamp) {
+	//A good opportunity to clean rems. However, we will still need to generate an effect with them, as safeClk may be < this CRDT's latest clock.
+	//Maybe we can ask CRDVM for this?
+	if crdt.nClkUpdsSinceLastGC > 0 { //There was updates since last GC, so attempting a clean is worthwhile.
+		cleaned := crdt.cleanupRems()
+		latestClk := crdt.CRDTVM.GetLatestClk()
+		if !latestClk.IsLowerOrEqual(safeClk) { //Must generate an effect here.
+			var effect Effect = TopKRmvRemoveAllWithCleanEffect{cleanedRems: cleaned}
+			var fakeUpd DownstreamArguments = DownstreamTopKRemoveAll{}
+			crdt.addToHistory(&latestClk, &fakeUpd, &effect)
+		} //Else: no need to store effect.
+		crdt.nClkUpdsSinceLastGC = 0 //This is already set by cleanupRems, but we set it up here for clarity too.
+	}
 }
 
 func (crdt *TopKRmvCrdt) IsBigCRDT() bool { return crdt.maxElems > 100 && len(crdt.elems) > 100 }
 
 func (crdt *TopKRmvCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
+	crdt.nReads++
+	if crdt.sortedElems == nil && (crdt.nUpds <= 1 || (crdt.nReads)/(crdt.nUpds+1) > 10) { //nUpds+1 to be safe on the case there's no updates yet. nUpds <= 1 to account for initial data setting (usually with TopKAddAll)
+		crdt.makeSortedElems()
+	}
 	//TODO: Consider updsNotYetApplied in all of these
 	switch typedArgs := args.(type) {
 	case StateReadArguments:
@@ -293,18 +1007,35 @@ func (crdt *TopKRmvCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArgu
 		return crdt.getTopN(typedArgs.NumberEntries, updsNotYetApplied)
 	case GetTopKAboveValueArguments:
 		return crdt.getTopKAboveValue(typedArgs.MinValue, updsNotYetApplied)
+	case TopAggregateArguments:
+		return crdt.getTopAggregate(typedArgs.MinValue, typedArgs.MaxValue, typedArgs.Bitmask, typedArgs.AggregateType, updsNotYetApplied)
 	default:
 		fmt.Printf("[TOPKCrdt]Unknown read type: %+v\n", args)
 	}
 	return nil
 }
 
-func (crdt *TopKRmvCrdt) getState(updsNotYetApplied []UpdateArguments) (state State) {
+func (crdt *TopKRmvCrdt) makeSortedElems() {
 	values := make([]TopKScore, len(crdt.elems))
 	i := 0
 	for _, elem := range crdt.elems {
 		values[i] = TopKScore{Id: elem.Id, Score: elem.Score, Data: elem.Data}
 		i++
+	}
+	sort.Slice(values, func(i, j int) bool { return values[i].Score > values[j].Score })
+	crdt.sortedElems = values
+}
+
+func (crdt *TopKRmvCrdt) getState(updsNotYetApplied []UpdateArguments) (state State) {
+	values := make([]TopKScore, len(crdt.elems))
+	if crdt.sortedElems != nil {
+		copy(values, crdt.sortedElems)
+	} else {
+		i := 0
+		for _, elem := range crdt.elems {
+			values[i] = TopKScore{Id: elem.Id, Score: elem.Score, Data: elem.Data}
+			i++
+		}
 	}
 	return TopKValueState{Scores: values}
 }
@@ -327,29 +1058,62 @@ func (crdt *TopKRmvCrdt) getTopN(numberEntries int32, updsNotYetApplied []Update
 	*/
 	if crdt.sortedElems == nil {
 		//TODO: May be an issue when updsNotYetApplied get considered.
-		crdt.sortedElems = crdt.getState(updsNotYetApplied).(TopKValueState).Scores
-		sort.Slice(crdt.sortedElems, func(i, j int) bool { return crdt.sortedElems[i].Score > crdt.sortedElems[j].Score })
+		//crdt.sortedElems = crdt.getState(updsNotYetApplied).(TopKValueState).Scores
+		//sort.Slice(crdt.sortedElems, func(i, j int) bool { return crdt.sortedElems[i].Score > crdt.sortedElems[j].Score })
+		crdt.makeSortedElems() //This query always needs to have the elements sorted.
 	}
-	if numberEntries >= int32(len(crdt.sortedElems)) {
+	//TODO: Note: Previously, this would use directly the sortedElems. This is wrong as it may lead to issues if the top gets modified before converting the read to protobuf.
+	/*if numberEntries >= int32(len(crdt.sortedElems)) {
 		return TopKValueState{Scores: crdt.sortedElems}
 	}
-	return TopKValueState{Scores: crdt.sortedElems[:numberEntries]}
+	return TopKValueState{Scores: crdt.sortedElems[:numberEntries]}*/
+	if numberEntries > int32(len(crdt.sortedElems)) {
+		numberEntries = int32(len(crdt.sortedElems))
+	}
+	toReturn := make([]TopKScore, numberEntries)
+	copy(toReturn, crdt.sortedElems[:numberEntries])
+	return TopKValueState{Scores: toReturn}
 }
 
 func (crdt *TopKRmvCrdt) getTopKAboveValue(minValue int32, updsNotYetApplied []UpdateArguments) (state State) {
-	values := make([]TopKScore, len(crdt.elems))
+	var values []TopKScore
 	actuallyAdded := 0
 	//Faster to do with sortedElems if it's available.
 	if crdt.sortedElems != nil {
-		for _, elem := range crdt.sortedElems {
-			if elem.Score >= minValue {
-				values[actuallyAdded] = TopKScore{Id: elem.Id, Score: elem.Score, Data: elem.Data}
-				actuallyAdded++
-			} else {
-				break
+		if !crdt.smallestScores.hasMin() || minValue <= crdt.smallestScores.getMin().Score { //If it doesn't have min, the top is empty. So we can use this codepath.
+			values = make([]TopKScore, len(crdt.elems))
+			copy(values, crdt.sortedElems)
+		} else if len(crdt.sortedElems) > 200 { //Attempt to find the end position and use a direct copy (faster)
+			//Binary search + copy.
+			left := 0
+			right := len(crdt.sortedElems) - 1
+			for left <= right {
+				mid := (left + right) / 2
+				if crdt.sortedElems[mid].Score >= minValue {
+					left = mid + 1
+				} else {
+					right = mid - 1
+				}
+			}
+			values = make([]TopKScore, left)
+			copy(values, crdt.sortedElems[:left])
+		} else { //Just iterate and copy manually.
+			values = make([]TopKScore, len(crdt.elems))
+			for i, elem := range crdt.sortedElems {
+				if elem.Score >= minValue {
+					//values[actuallyAdded] = TopKScore{Id: elem.Id, Score: elem.Score, Data: elem.Data}
+					values[i] = elem //This will copy as its a value type.
+				} else {
+					actuallyAdded = i
+					break
+				}
+			}
+			if actuallyAdded == 0 {
+				actuallyAdded = len(crdt.elems)
 			}
 		}
 	} else {
+		values = make([]TopKScore, len(crdt.elems))
 		//Must go through all elems
 		for _, elem := range crdt.elems {
 			if elem.Score >= minValue {
@@ -360,6 +1124,356 @@ func (crdt *TopKRmvCrdt) getTopKAboveValue(minValue int32, updsNotYetApplied []U
 	}
 
 	return TopKValueState{Scores: values[:actuallyAdded]}
+}
+
+func (crdt *TopKRmvCrdt) getTopAggregate(minValue, maxValue int32, bitmask int32, aggrType AggregateType, updsNotYetApplied []UpdateArguments) (state State) {
+	if len(crdt.elems) == 0 {
+		return getAggregateState(aggrType, 0)
+	}
+	minScore := crdt.smallestScores.getMin().Score
+	if aggrType == M_MIN && minScore > minValue { //This is already known.
+		return getAggregateState(aggrType, int64(minScore))
+	}
+	if crdt.sortedElems != nil {
+		if aggrType == M_MAX && crdt.sortedElems[0].Score < maxValue { //This is already known.
+			return getAggregateState(aggrType, int64(crdt.sortedElems[0].Score))
+		}
+		return aggrStrategyChooserSortedElems(crdt.sortedElems, crdt.sortedElems[0].Score, minScore, minValue, maxValue, bitmask, aggrType)
+	} else {
+		return aggrStrategyChooserTopKMap(crdt.elems, minScore, minValue, maxValue, bitmask, aggrType)
+	}
+	//Compilation tests.
+	//aggregateSimpleTopKMap(make(map[int32]*TopKHeapElement), minValue, maxValue, bitmask, aggrType)
+	//aggregateSimpleTopKMap(make(map[int32]*TopKScore), minValue, maxValue, bitmask, aggrType)
+	//aggregateSimpleTopKMap(make(map[int32]TopKScore), minValue, maxValue, bitmask, aggrType)
+}
+
+func aggrStrategyChooserSortedElems(sortedElems []TopKScore, maxScore, minScore, minValue, maxValue, bitmask int32, aggrType AggregateType) (state State) {
+	//fmt.Printf("[TopKRmv]aggrStrategyChooserSortedElems choosen as sortedElems is not nil. MaxScore, minScore, minValue, maxValue, bitmask, aggrType: %d, %d, %d, %d, %x, %d\n",
+	//	maxScore, minScore, minValue, maxValue, bitmask, aggrType)
+	if minScore > maxValue || maxScore < minValue { //No elements to aggregate
+		//fmt.Printf("[TopKRmv]aggrStrategyChooserSortedElems. No elements to aggregate as either minScore > maxValue or maxScore < minValue. minScore %d, maxValue %d, maxScore %d, minValue %d.\n", minScore, maxValue, maxScore, minValue)
+		return getAggregateState(aggrType, 0)
+	}
+	if len(sortedElems) <= 200 { //If small enough, it's better to just iterate the full thing and always test min and max value. Also ok to do bitmask always.
+		//fmt.Printf("[TopKRmv]aggrStrategyChooserSortedElems. Small sortedElems (%d). Using simple aggregation.\n", len(sortedElems))
+		return aggregateSimpleSortedElems(sortedElems, minValue, maxValue, bitmask, aggrType)
+	}
+	start, end, pos := -1, -1, -1
+	if minValue <= (minScore & bitmask) {
+		end, pos = len(sortedElems), len(sortedElems)-1 //Start iterating at the end, go backward.
+	}
+	if maxValue >= (maxScore & bitmask) {
+		start, pos = 0, 0 //Start iterating at the beginning, go forward.
+	}
+	//fmt.Printf("[TopKRmv]aggrStrategyChooserSortedElems. Start %d, end %d, doBitmask? %v.\n", start, end, bitmask != IGNORE_BITMASK)
+	if start != -1 && end != -1 { //Have to aggregate everything. (minValue is <= minScore; maxValue is >= maxScore.)
+		if bitmask == IGNORE_BITMASK { //Aggregate without mask and without limits
+			return aggregateAllSortedElems(sortedElems, aggrType)
+		}
+		return aggregateAllMaskSortedElems(sortedElems, bitmask, aggrType)
+	} else if start != -1 || end != -1 { //Begin at one of the points and go the opposite direction
+		if bitmask == IGNORE_BITMASK { //Aggregate without mask (but with limits)
+			return aggregateRangeSortedElems(sortedElems, minValue, maxValue, aggrType, pos)
+		}
+		return aggregateRangeMaskSortedElems(sortedElems, minValue, maxValue, bitmask, aggrType, pos)
+	} else { //Find some point in the range, iterate in both directions. Binary search but stop as soon as we find a position within range.
+		//fmt.Printf("[TopKRmv]aggrStrategyChooserSortedElems. Doing binary search to find position in range, as both min and max are somewhere within the Top.\n")
+		left, right, mid, score := 0, len(sortedElems)-1, -1, int32(0)
+		for left <= right {
+			mid = (left + right) / 2
+			score = sortedElems[mid].Score & bitmask
+			if score < minValue {
+				right = mid - 1
+			} else if score > maxValue {
+				left = mid + 1
+			} else {
+				break
+			}
+		}
+		if bitmask == IGNORE_BITMASK { //Aggregate without mask (but with limits)
+			return aggregateRangeSortedElems(sortedElems, minValue, maxValue, aggrType, mid)
+		}
+		return aggregateRangeMaskSortedElems(sortedElems, minValue, maxValue, bitmask, aggrType, mid)
+	}
+}
+
+func aggrStrategyChooserTopKMap[S HasScoreId](elems map[int32]S, minScore, minValue, maxValue, bitmask int32, aggrType AggregateType) (state State) {
+	//fmt.Printf("[TopKRmv]aggrStrategyChooserTopKMap choosen as sortedElems is nil.\n")
+	//Iterate through the map. There's no advanced strategy we can do here, other than deciding if we do bitmask or not, or if we filter the min (can only ignore max if it is MaxInt32).
+	if minScore > maxValue { //No elements to aggregate
+		return getAggregateState(aggrType, 0)
+	}
+	if len(elems) <= 50 { //No need for strategy, just iterate.
+		return aggregateSimpleTopKMap(elems, minValue, maxValue, bitmask, aggrType)
+	}
+	testMin, testMax, doBitmask := true, true, true
+	if minValue < minScore { //No need to test minValue. This already includes the case that minValue is undefined.
+		testMin = false
+	}
+	if maxValue == math.MaxInt32 { //No need to test maxValue
+		testMax = false
+	}
+	if bitmask == IGNORE_BITMASK { //No need to do bitmask
+		doBitmask = false
+	}
+	//fmt.Printf("[TopKRmv]testMin %v, testMax %v, doBitmask %v.\n", testMin, testMax, doBitmask)
+	//More common cases first. Else should never happen, but it will still work correctly if somehow it does.
+	if testMin && testMax && doBitmask {
+		return aggregateSimpleTopKMap(elems, minValue, maxValue, bitmask, aggrType)
+	} else if testMin && testMax {
+		//fmt.Printf("[TopKRmv]Choosing aggregateRangeTopKMap\n")
+		return aggregateRangeTopKMap(elems, minValue, maxValue, aggrType)
+	} else if !testMin && !testMax && !doBitmask {
+		return aggregateAllTopKMap(elems, aggrType)
+	} else if !testMin && !testMax {
+		return aggregateAllMaskTopKMap(elems, bitmask, aggrType)
+	} else if testMax && doBitmask {
+		return aggregateTestMaxMaskTopKMap(elems, maxValue, bitmask, aggrType)
+	} else if testMax {
+		return aggregateTestMaxTopKMap(elems, maxValue, aggrType)
+	} else if testMin && doBitmask {
+		return aggregateTestMinMaskTopKMap(elems, minValue, bitmask, aggrType)
+	} else if testMin {
+		return aggregateTestMinTopKMap(elems, minValue, aggrType)
+	} else {
+		return aggregateSimpleTopKMap(elems, minValue, maxValue, bitmask, aggrType)
+	}
+}
+
+/*func aggregateChooserSortedElems(sortedElems []TopKScore, minValue, maxValue int32, bitmask int32, aggrType AggregateType, pos int) (state State) {
+	if minValue == math.MinInt32 && maxValue == math.MaxInt32 && uint32(bitmask) == 0xFFFFFFFF { //Aggregate only.
+
+	} else if minValue == math.MinInt32 && maxValue == math.MaxInt32 { //Aggregate with mask only
+
+	} else if uint32(bitmask) == 0xFFFFFFFF { //Aggregate without mask (but with limits)
+
+	} else { //Mask + limits.
+
+	}
+}*/
+
+// Naive version. It will always test everything. Intended only for small slices, in order to avoid the overhead of determining the right strategy/starting pos.
+func aggregateSimpleSortedElems(sortedElems []TopKScore, minValue, maxValue, bitmask int32, aggrType AggregateType) (state State) {
+	//fmt.Printf("[TopKRmv]aggregateSimpleSortedElems. MinValue %d, maxValue %d, bitmask %x, aggrType %d, nElems: %d", minValue, maxValue, bitmask, aggrType, len(sortedElems))
+	aggrFun, result, curr := getAggregateFun(aggrType), int64(0), int32(0)
+	for _, elem := range sortedElems {
+		curr = elem.Score & bitmask
+		if curr >= minValue && curr <= maxValue {
+			result = aggrFun(result, curr)
+		} else if curr < minValue { //Can stop as the slice is sorted: no further elements will be in the range.
+			break
+		}
+	}
+	return getAggregateState(aggrType, result)
+}
+
+func aggregateRangeMaskSortedElems(sortedElems []TopKScore, minValue, maxValue, bitmask int32, aggrType AggregateType, pos int) (state State) {
+	initialPos, aggrFun := pos, getAggregateFun(aggrType)
+	result, curr := int64(0), int32(0)
+	for ; pos < len(sortedElems); pos++ { //The initial pos is for sure in the range. But the following ones may not.
+		curr = sortedElems[pos].Score & bitmask
+		if curr < minValue {
+			break
+		}
+		result = aggrFun(result, curr)
+	}
+	for pos = initialPos - 1; pos >= 0; pos-- {
+		curr = sortedElems[pos].Score & bitmask
+		if curr > maxValue {
+			break
+		}
+		result = aggrFun(result, curr)
+	}
+	return getAggregateState(aggrType, result)
+}
+
+// This function works also if only minValue or maxValue are defined, as that way we can slice the slice.
+func aggregateAllMaskSortedElems(sortedElems []TopKScore, bitmask int32, aggrType AggregateType) (state State) {
+	aggrFun := getAggregateFun(aggrType)
+	result := int64(0)
+	for _, elem := range sortedElems {
+		result = aggrFun(result, elem.Score&bitmask)
+	}
+	return getAggregateState(aggrType, result)
+}
+
+func aggregateAllSortedElems(sortedElems []TopKScore, aggrType AggregateType) (state State) {
+	//fmt.Printf("[TopKRmv]aggregateAllSortedElems ")
+	aggrFun := getAggregateFun(aggrType)
+	result := int64(0)
+	for _, elem := range sortedElems {
+		result = aggrFun(result, elem.Score)
+	}
+	return getAggregateState(aggrType, result)
+}
+
+func aggregateRangeSortedElems(sortedElems []TopKScore, minValue, maxValue int32, aggrType AggregateType, pos int) (state State) {
+	//fmt.Printf("[TopKRmv]aggregateRangeSortedElems called with min %d, max %d, aggrType %d.\n", minValue, maxValue, aggrType)
+	initialPos, aggrFun := pos, getAggregateFun(aggrType)
+	result, curr := int64(0), int32(0)
+	for ; pos < len(sortedElems); pos++ { //The initial pos is for sure in the range. But the following ones may not.
+		curr = sortedElems[pos].Score
+		if curr < minValue {
+			break
+		}
+		result = aggrFun(result, curr)
+	}
+	for pos = initialPos - 1; pos >= 0; pos-- {
+		curr = sortedElems[pos].Score
+		if curr > maxValue {
+			break
+		}
+		result = aggrFun(result, curr)
+	}
+	return getAggregateState(aggrType, result)
+}
+
+func aggregateSimpleTopKMap[S HasScoreId](elems map[int32]S, minValue, maxValue, bitmask int32, aggrType AggregateType) (state State) {
+	aggrFun, result, curr := getAggregateFun(aggrType), int64(0), int32(0)
+	for _, elem := range elems {
+		curr = elem.GetScore() & bitmask
+		if curr >= minValue && curr <= maxValue {
+			result = aggrFun(result, curr)
+		}
+	}
+	return getAggregateState(aggrType, result)
+}
+
+func aggregateRangeTopKMap[S HasScoreId](elems map[int32]S, minValue, maxValue int32, aggrType AggregateType) (state State) {
+	//fmt.Printf("[TopKRmv]aggregateRangeTopKMap called with min %d, max %d, aggrType %d.\n", minValue, maxValue, aggrType)
+	aggrFun, result, curr := getAggregateFun(aggrType), int64(0), int32(0)
+	for _, elem := range elems {
+		curr = elem.GetScore()
+		if curr >= minValue && curr <= maxValue {
+			result = aggrFun(result, curr)
+		}
+	}
+	return getAggregateState(aggrType, result)
+}
+
+func aggregateAllTopKMap[S HasScoreId](elems map[int32]S, aggrType AggregateType) (state State) {
+	aggrFun, result := getAggregateFun(aggrType), int64(0)
+	for _, elem := range elems {
+		result = aggrFun(result, elem.GetScore())
+	}
+	return getAggregateState(aggrType, result)
+}
+
+func aggregateAllMaskTopKMap[S HasScoreId](elems map[int32]S, bitmask int32, aggrType AggregateType) (state State) {
+	aggrFun, result := getAggregateFun(aggrType), int64(0)
+	for _, elem := range elems {
+		result = aggrFun(result, elem.GetScore()&bitmask)
+	}
+	return getAggregateState(aggrType, result)
+}
+
+func aggregateTestMaxMaskTopKMap[S HasScoreId](elems map[int32]S, maxValue, bitmask int32, aggrType AggregateType) (state State) {
+	aggrFun, result, curr := getAggregateFun(aggrType), int64(0), int32(0)
+	for _, elem := range elems {
+		curr = elem.GetScore() & bitmask
+		if curr <= maxValue {
+			result = aggrFun(result, curr)
+		}
+	}
+	return getAggregateState(aggrType, result)
+}
+
+func aggregateTestMaxTopKMap[S HasScoreId](elems map[int32]S, maxValue int32, aggrType AggregateType) (state State) {
+	aggrFun, result, curr := getAggregateFun(aggrType), int64(0), int32(0)
+	for _, elem := range elems {
+		curr = elem.GetScore()
+		if curr <= maxValue {
+			result = aggrFun(result, curr)
+		}
+	}
+	return getAggregateState(aggrType, result)
+}
+
+func aggregateTestMinMaskTopKMap[S HasScoreId](elems map[int32]S, minValue, bitmask int32, aggrType AggregateType) (state State) {
+	aggrFun, result, curr := getAggregateFun(aggrType), int64(0), int32(0)
+	for _, elem := range elems {
+		curr = elem.GetScore() & bitmask
+		if curr >= minValue {
+			result = aggrFun(result, curr)
+		}
+	}
+	return getAggregateState(aggrType, result)
+}
+
+func aggregateTestMinTopKMap[S HasScoreId](elems map[int32]S, minValue int32, aggrType AggregateType) (state State) {
+	aggrFun, result, curr := getAggregateFun(aggrType), int64(0), int32(0)
+	for _, elem := range elems {
+		curr = elem.GetScore()
+		if curr >= minValue {
+			result = aggrFun(result, curr)
+		}
+	}
+	return getAggregateState(aggrType, result)
+}
+
+/*if testMin && testMax && doBitmask {
+	return aggregateRangeMaskTopKMap(elems, minValue, maxValue, bitmask, aggrType)
+} else if testMin && testMax {
+	return aggregateRangeTopKMap(elems, minValue, maxValue, aggrType)
+} else if !testMin && !testMax && !doBitmask {
+	return aggregateAllTopKMap(elems, aggrType)
+} else if !testMin && !testMax {
+	return aggregateAllMaskTopKMap(elems, bitmask, aggrType)
+} else if testMax && doBitmask {
+	return aggregateTestMaxMaskTopKMap(elems, maxValue, bitmask, aggrType)
+} else if testMax {
+	return aggregateTestMaxTopKMap(elems, maxValue, bitmask, aggrType)
+} else if testMin && doBitmask {
+	return aggregateTestMinMaskTopKMap(elems, minValue, bitmask, aggrType)
+} else if testMin {
+	return aggregateTestMinTopKMap(elems, minValue, aggrType)
+} else {
+	return aggregateSimpleTopKMap(elems, minValue, maxValue, bitmask, aggrType)
+}*/
+
+func getAggregateFun(aggrType AggregateType) (aggrFun func(int64, int32) int64) {
+	switch aggrType {
+	case M_SUM:
+		aggrFun = aggregateSum
+	case M_MAX:
+		aggrFun = aggregateMax
+	case M_MIN:
+		aggrFun = aggregateMin
+	case M_COUNT:
+		aggrFun = aggregateCount
+	case M_AVG:
+		aggrFun = aggregateAvg
+	}
+	return
+}
+
+func getAggregateState(aggrType AggregateType, aggregate int64) (state State) {
+	if aggrType == M_AVG {
+		return TopAggrAvgState{Sum: aggregate >> 16, Count: aggregate & 0xFFFF}
+	}
+	return TopAggrState(aggregate)
+}
+
+func aggregateSum(sum int64, value int32) (newSum int64) {
+	return sum + int64(value)
+}
+
+func aggregateMax(max int64, value int32) (newMax int64) {
+	return tools.Max(max, int64(value))
+}
+
+func aggregateMin(min int64, value int32) (newMin int64) {
+	return tools.Min(min, int64(value))
+}
+
+func aggregateCount(count int64, value int32) (newCount int64) {
+	return count + 1
+}
+
+// This will work correctly as long as count is, at most, 65536 (16 bits).
+func aggregateAvg(packedAvg int64, value int32) (newPackedAvg int64) {
+	return packedAvg + (int64(value) << 16) + 1
 }
 
 func (crdt *TopKRmvCrdt) Update(args UpdateArguments) (downstreamArgs DownstreamArguments) {
@@ -378,24 +1492,47 @@ func (crdt *TopKRmvCrdt) Update(args UpdateArguments) (downstreamArgs Downstream
 		downstreamArgs = crdt.getTopKAddAllDownstreamArgs(&opType)
 	case TopKRemoveAll:
 		downstreamArgs = crdt.getTopKRemoveAllDownstreamArgs(&opType)
-	case TopKInit:
-		downstreamArgs = opType
+	case TopKRmvInit:
+		downstreamArgs = crdt.getInitDownstreamArgs(opType)
+	case MultiUpd:
+		multiDowns := make(MultiUpd, len(opType))
+		for i, innerUpd := range opType {
+			multiDowns[i] = crdt.Update(innerUpd)
+		}
+		return multiDowns
+	default:
+		fmt.Printf("[TopKRmv][Update]Unknown update type: %v (%T)\n", args, args)
 	}
 	return
 }
 
+func (crdt *TopKRmvCrdt) getInitDownstreamArgs(initOp TopKRmvInit) (args TopKRmvInit) {
+	if len(crdt.elems) == 0 { //Set nElems immediately if it's the first op, in order for upcoming Update() to make correct decisions. This does not affect correctness.
+		crdt.maxElems = int(initOp.TopSize)
+		if initOp.NotTopSize > 0 {
+			crdt.maxNotTopElems = int(initOp.NotTopSize)
+		} else {
+			crdt.maxNotTopElems = crdt.maxElems * MAX_NOT_TOP_FACTOR
+		}
+	}
+	return initOp
+}
+
 func (crdt *TopKRmvCrdt) getTopKAddDownstreamArgs(addOp *TopKAdd) (args DownstreamArguments) {
-	crdt.vc.SelfIncTimestamp(crdt.replicaID)
+	myReplicaID := shared.SortedReplicaID
+	crdt.vc.SelfIncTimestamp(myReplicaID)
 	elem, hasId := crdt.elems[addOp.Id]
-	localArgs := DownstreamTopKAdd{TopKElement: TopKElement{Id: addOp.Id, Score: addOp.Score, Ts: crdt.vc.GetPos(crdt.replicaID), ReplicaID: crdt.replicaID, Data: addOp.Data}}
+	//localArgs := DownstreamTopKAdd{TopKElement: TopKElement{Id: addOp.Id, Score: addOp.Score, Ts: crdt.vc.GetPos(myReplicaID), ReplicaID: myReplicaID, Data: addOp.Data}}
+	localArgs := DownstreamTopKAdd{TopKElement: TopKElement{Id: addOp.Id, Score: addOp.Score, TsId: makeTsWithReplicaID(crdt.vc.GetPos(myReplicaID), myReplicaID), Data: addOp.Data}}
 	if addOp.Data == nil {
-		localArgs.Data = &[]byte{}
+		addOp.Data = emptyData
 	}
 	//Check if this element should belong to the top or not
 	//An element should belong to the top iff one of those are true:
 	//1) Its id is already in the Top but with a smaller score
 	//2) Its id is not in the top but it is higher than the smallestScore
 	//If an element belongs to the top, then a normal TopKAdd must be returned. Otherwise, a "TopKAdd_r" is returned.
+	minElem := crdt.getMinWhenMaybeEmpty()
 	if hasId && elem.Score <= addOp.Score {
 		//1st
 		args = localArgs
@@ -405,8 +1542,7 @@ func (crdt *TopKRmvCrdt) getTopKAddDownstreamArgs(addOp *TopKAdd) (args Downstre
 		//args = localArgs
 	} else {
 		//2nd, i.e., !hasId
-		if localArgs.isHigher(crdt.smallestScore) {
-			//if elem.isHigher(crdt.smallestScore) {
+		if localArgs.isHigher(minElem) {
 			args = localArgs
 		} else {
 			//add_r
@@ -415,6 +1551,13 @@ func (crdt *TopKRmvCrdt) getTopKAddDownstreamArgs(addOp *TopKAdd) (args Downstre
 		}
 	}
 	return
+}
+
+func (crdt *TopKRmvCrdt) getMinWhenMaybeEmpty() TopKElement {
+	if crdt.smallestScores.hasMin() {
+		return crdt.smallestScores.getMin()
+	}
+	return MIN_ELEM
 }
 
 /*
@@ -426,17 +1569,69 @@ The current workings of this method lead to more adds than necessary being downs
 	For the latter, the same exact problem happens when executing multiple TopKAdd in the same txn.
 */
 func (crdt *TopKRmvCrdt) getTopKAddAllDownstreamArgs(addOp *TopKAddAll) (args DownstreamArguments) {
-	crdt.vc.SelfIncTimestamp(crdt.replicaID)
-	localClk := crdt.vc.GetPos(crdt.replicaID)
-	nAdd, nOpt := 0, 0
-	downAdds, optDownAdds := make([]TopKElement, len(addOp.Scores)), make([]TopKElement, len(addOp.Scores))
-	var existingElem, currElem TopKElement = TopKElement{}, TopKElement{}
+	myReplicaID := shared.SortedReplicaID
+	crdt.vc.SelfIncTimestamp(myReplicaID)
+	localClk := crdt.vc.GetPos(myReplicaID)
+	tsId := makeTsWithReplicaID(localClk, myReplicaID)
+	var downAdds, optDownAdds []TopKElement
+	currElem := TopKElement{TsId: tsId, Data: emptyData}
+	if len(crdt.elems) == 0 { //No element will go to optDownAdds. There's no existing elem to check either. So we just copy.
+		totalMax := crdt.maxElems + crdt.maxNotTopElems
+		//Idea: if the top (+notTop) is rather small, but we're adding a lot of elements, we will filter them. This is helpful in situations where we want a small top (e.g., top 1, or top 10), but we have several millions of entries.
+		if len(addOp.Scores) <= int(float64(totalMax)*1.5) { //Straight-forward copy
+			downAdds = make([]TopKElement, len(addOp.Scores))
+			for i, add := range addOp.Scores {
+				currElem.Id, currElem.Score = add.Id, add.Score
+				if add.Data != nil {
+					currElem.Data = add.Data
+				}
+				downAdds[i] = currElem
+				currElem.Data = emptyData
+			}
+		} else if totalMax <= 200 && len(addOp.Scores) >= totalMax*5 { //Use a maxBuffer.
+			maxBuf := newMaxBuffer(totalMax, MIN_ELEM)
+			for _, score := range addOp.Scores {
+				currElem.Id, currElem.Score = score.Id, score.Score
+				if score.Data != nil {
+					currElem.Data = score.Data
+				}
+				maxBuf.addIfInBetween(currElem, maxBuf.Len()) //Passing maxBuf.Len() ensures that if the buffer isn't full, even new "mins" will be added to the buffer.
+				currElem.Data = emptyData                     //Reset
+			}
+			downAdds = maxBuf.maxs
+		} else { //Better copy everything, sort and then filter. Note that we already know that len(addOp.Scores) is, at least, 1.5*(maxElems + maxNotTopElems)
+			downAdds = make([]TopKElement, len(addOp.Scores))
+			for i, add := range addOp.Scores {
+				currElem.Id, currElem.Score = add.Id, add.Score
+				if add.Data != nil {
+					currElem.Data = add.Data
+				}
+				downAdds[i] = currElem
+				currElem.Data = emptyData //Reset
+			}
+			sort.Slice(downAdds, func(i, j int) bool { return downAdds[i].isHigher(downAdds[j]) })
+			if len(downAdds) > totalMax*10 { //Copy to reduce memory usage.
+				downAddsCopy := make([]TopKElement, totalMax)
+				copy(downAddsCopy, downAdds[:totalMax])
+				downAdds = downAddsCopy
+			} else {
+				downAdds = downAdds[:totalMax]
+			}
+		}
+		return DownstreamTopKAddAll{DownstreamAdds: downAdds}
+	}
+
+	//Since this is not initialization, we will assume not many elements are being added.
+	downAdds, optDownAdds = make([]TopKElement, len(addOp.Scores)), make([]TopKElement, len(addOp.Scores))
+	var existingElem TopKElement
 	hasId := false
+	minElem := crdt.smallestScores.getMin()
+	nAdd, nOpt := 0, 0
 	for _, add := range addOp.Scores {
 		existingElem, hasId = crdt.elems[add.Id]
-		currElem = TopKElement{Id: add.Id, Score: add.Score, Ts: localClk, ReplicaID: crdt.replicaID, Data: add.Data}
-		if add.Data == nil {
-			currElem.Data = &[]byte{}
+		currElem.Id, currElem.Score = add.Id, add.Score
+		if add.Data != nil {
+			currElem.Data = add.Data
 		}
 		if hasId && existingElem.Score <= add.Score {
 			downAdds[nAdd] = currElem
@@ -445,7 +1640,7 @@ func (crdt *TopKRmvCrdt) getTopKAddAllDownstreamArgs(addOp *TopKAddAll) (args Do
 			optDownAdds[nOpt] = currElem
 			nOpt++
 		} else {
-			if currElem.isHigher(crdt.smallestScore) {
+			if currElem.isHigher(minElem) {
 				downAdds[nAdd] = currElem
 				nAdd++
 			} else {
@@ -453,6 +1648,7 @@ func (crdt *TopKRmvCrdt) getTopKAddAllDownstreamArgs(addOp *TopKAddAll) (args Do
 				nOpt++
 			}
 		}
+		currElem.Data = emptyData
 	}
 	return DownstreamTopKAddAll{DownstreamAdds: downAdds[0:nAdd], OptDownstreamAdds: optDownAdds[0:nOpt]}
 }
@@ -502,11 +1698,23 @@ func (crdt *TopKRmvCrdt) getTopKRemoveAllDownstreamArgs(remOp *TopKRemoveAll) (a
 		return NoOp{}
 	}
 	removesDown.Vc = []clocksi.Timestamp{crdt.vc.Copy()}
-	removesDown.DownRems, removesDown.OptDownRems = removesDown.DownRems[0:nRem], removesDown.OptDownRems[0:nOpt]
+	removesDown.DownRems, removesDown.OptDownRems = removesDown.DownRems[:nRem], removesDown.OptDownRems[:nOpt]
 	return removesDown
 }
 
 func (crdt *TopKRmvCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs DownstreamArguments) (otherDownstreamArgs DownstreamArguments) {
+	if multiUpd, ok := downstreamArgs.(MultiUpd); ok {
+		//fmt.Printf("[TOPKRMV]Original args: %v (%T). Converted args: %v.\n", downstreamArgs, downstreamArgs, multiUpd)
+		//fmt.Printf("[TOPKRMV]Original args type: %T.\n", downstreamArgs)
+		var otherDown MultiUpd
+		for _, innerDown := range multiUpd {
+			newDown := crdt.Downstream(updTs, innerDown.(DownstreamArguments))
+			if newDown != nil {
+				otherDown = append(otherDown, newDown)
+			}
+		}
+		return otherDown
+	}
 	effect, otherDownstreamArgs := crdt.applyDownstream(downstreamArgs)
 	//Necessary for inversibleCrdt
 	crdt.addToHistory(&updTs, &downstreamArgs, effect)
@@ -528,16 +1736,44 @@ func (crdt *TopKRmvCrdt) applyDownstream(downstreamArgs UpdateArguments) (effect
 		effect, otherDownstreamArgs = crdt.applyAddAll(&opType)
 	case DownstreamTopKRemoveAll:
 		effect, otherDownstreamArgs = crdt.applyRemoveAll(&opType)
-	case TopKInit:
+	case TopKRmvInit:
 		effect, otherDownstreamArgs = crdt.applyInit(&opType)
+	default:
+		fmt.Printf("[TopKRmv][Downstream]Unsupported downstream type %v (%T)\n", downstreamArgs, downstreamArgs)
 	}
 	return
 }
 
-func (crdt *TopKRmvCrdt) applyInit(op *TopKInit) (effect *Effect, otherDownstreamArgs DownstreamArguments) {
+func (crdt *TopKRmvCrdt) applyInit(op *TopKRmvInit) (effect *Effect, otherDownstreamArgs DownstreamArguments) {
+	if int(op.TopSize) > crdt.maxElems*10 && len(crdt.elems) == 0 {
+		crdt.elems = make(map[int32]TopKElement, int(op.TopSize)) //Resize.
+	}
 	crdt.maxElems = int(op.TopSize)
+	if op.NotTopSize > 0 {
+		crdt.maxNotTopElems = int(op.NotTopSize)
+	} else {
+		crdt.maxNotTopElems = crdt.maxElems * MAX_NOT_TOP_FACTOR
+	}
 	var effectValue Effect = NoEffect{}
 	effect = &effectValue
+	crdt.initializeBuffers()
+	if len(crdt.elems) > 0 { //This is outside Init's intended usage.
+		crdt.findAndUpdateMin()
+		if len(crdt.notInTop) > 0 {
+			crdt.findAndUpdateMaxNotTop()
+		}
+	}
+	//Deciding the factor for cleaning crdt.rems when it grows too big. In general, if the top is small, we allow it to grow more.
+	crdt.cleanupFactor = 10
+	if crdt.maxElems+crdt.maxNotTopElems >= 10000 {
+		crdt.cleanupFactor = 1
+	} else if crdt.maxElems+crdt.maxNotTopElems >= 1000 {
+		crdt.cleanupFactor = 2
+	} else if crdt.maxElems+crdt.maxNotTopElems >= 300 {
+		crdt.cleanupFactor = 4
+	} else if crdt.maxElems+crdt.maxNotTopElems >= 100 {
+		crdt.cleanupFactor = 5
+	}
 	//fmt.Println("[TOPKRMV]Max top size set to", crdt.maxElems)
 	return
 }
@@ -551,90 +1787,122 @@ func (crdt *TopKRmvCrdt) applyAddAll(op *DownstreamTopKAddAll) (effect *Effect, 
 		//May happen when applying locally the adds, as all the received values may be too small for the topK
 		firstElem = op.OptDownstreamAdds[0]
 	}
-	oldTs := crdt.vc.GetPos(firstElem.ReplicaID)
-	crdt.vc.UpdatePos(firstElem.ReplicaID, firstElem.Ts)
+	firstElemTs, firstElemReplicaID := firstElem.TsId.getTs(), firstElem.TsId.getReplicaID()
+	oldTs := crdt.vc.GetPos(firstElemReplicaID)
+	crdt.vc.UpdatePos(firstElemReplicaID, firstElemTs)
+	crdt.nClkUpdsSinceLastGC++
 	listEffect := TopKRmvAddAllEffect{effects: make([]*Effect, len(op.DownstreamAdds)+len(op.OptDownstreamAdds))}
 	downRemoves := DownstreamTopKRemoveAll{Vc: make([]clocksi.Timestamp, len(op.DownstreamAdds)), DownRems: make([]int32, len(op.DownstreamAdds))}
 	nRemoves, nEffects := 0, 0
+	changedTop := false
+
+	nPossibleUpds := len(op.DownstreamAdds) + len(op.OptDownstreamAdds)
+	if nPossibleUpds-crdt.maxElems > 100-len(crdt.notInTop) { //In this case, notInTop would suffer multiple resizes. We will pre-allocate.
+		//This optimization is mostly aimed for when initializing Tops with a lot of data, e.g., for views.
+		newSize := tools.Min(len(crdt.notInTop)+nPossibleUpds-(crdt.maxElems-len(crdt.elems)), crdt.maxNotTopElems+crdt.maxElems) //Don't allocate more than the capacity for notTop.
+		newNotInTop := make(map[int32]setTopKElement, newSize)
+		tools.MapCopyFromTo(crdt.notInTop, newNotInTop)
+		crdt.notInTop = newNotInTop
+		//fmt.Printf("[TopKRmv][ApplyAddAll]Resize optimization: got %d updates to apply, notInTop has len %d, resized to %d.\n", nPossibleUpds, len(crdt.notInTop), newSize)
+	}
+	//start := time.Now().UnixNano()
 
 	currAdds := op.DownstreamAdds
+	nReplicas := clocksi.GetNumberReplicas()
 	//Must apply both down and opt (if the latter is even present)
 	//Simple for to execute the same set of operations for both down and opt.
 	for i := 0; i < 2; i++ {
 		for _, newElem := range currAdds {
 			var effectValue Effect
-			if newElem.Data == nil {
-				newElem.Data = &[]byte{}
-			}
-
 			remsVc, hasEntry := crdt.rems[newElem.Id]
-			if !hasEntry || remsVc.GetPos(newElem.ReplicaID) < newElem.Ts {
+			newElemTs, newElemReplicaID := newElem.TsId.getTs(), newElem.TsId.getReplicaID()
+			if !hasEntry || remsVc.GetPos(newElemReplicaID) < newElemTs {
 				elem, hasId := crdt.elems[newElem.Id]
 				if hasId {
 					//Check if the "new elem" is > elem. If it is, add it. On the end, check if min should be updated.
 					if newElem.isHigher(elem) {
-						effectValue = TopKRmvReplaceEffect{newElem: newElem, oldElem: elem, oldMin: crdt.smallestScore, oldTs: oldTs}
+						//effectValue = TopKRmvReplaceEffect{newElem: newElem, oldElem: elem, oldMin: crdt.smallestScores.getMin(), oldTs: oldTs}
+						effectValue = TopKRmvReplaceEffect{newElem: newElem, oldElem: elem, oldTs: oldTs, updatedHighestNotTop: false}
 						crdt.elems[newElem.Id] = newElem
 						//Different replicas, so we'll keep the old entry in notInTop (as it might be relevant again depending on concurrent removes)
-						if elem.ReplicaID != newElem.ReplicaID {
-							entry, hasEntry := crdt.notInTop[newElem.Id]
+						if elem.TsId.getReplicaID() != newElemReplicaID {
+							/*entry, hasEntry := crdt.notInTop[newElem.Id]
 							if !hasEntry {
-								entry = make(setTopKElement)
+								entry = tools.NewSliceSet[TopKElement](nReplicas) //This may actually have more than nReplicas, but unlikely.
 								crdt.notInTop[newElem.Id] = entry
 							}
-							entry.add(elem)
+							entry.AddNoCheck(elem) //elem will always be different, even if it's only the score or ts that changes.*/
+							crdt.addTopDuplicateToNotTop(elem, nReplicas) //This element will *not* go to notInTop's min or max as this ID already exists in elems.
 						}
-						//Check if min should be updated
-						if crdt.smallestScore.isEqual(elem) {
+						//Update min if needed.
+						crdt.smallestScores.remove(elem)
+						crdt.smallestScores.addIfInBetween(newElem, len(crdt.elems)) //This will never kick out any existing elem, as newElem > elem: if newElem belongs there, so did elem.
+						if !crdt.smallestScores.hasMin() {
 							crdt.findAndUpdateMin()
 						}
-						crdt.sortedElems = nil
+						crdt.sortedElems, changedTop = nil, true
 					} else {
-						effectValue = TopKRmvAddNotTopEffect{TopKRmvAddEffect: TopKRmvAddEffect{TopKElement: newElem, oldTs: oldTs}}
-						//Store in notInTop as it might be relevant later on
-						entry, hasEntry := crdt.notInTop[newElem.Id]
-						if !hasEntry {
-							entry = make(setTopKElement)
-							crdt.notInTop[newElem.Id] = entry
-						}
-						entry.add(newElem)
+						effectValue = TopKRmvAddNotTopEffect{newElem: newElem, oldTs: oldTs, updateBuffs: false}
+						crdt.addTopDuplicateToNotTop(newElem, nReplicas) //This element will not go to notInTop's min or max as this ID already exists in elems.
 					}
 				} else {
 					//Check if it should belong to topK (i.e. there's space or its score is > min)
 					if len(crdt.elems) < crdt.maxElems {
 						crdt.elems[newElem.Id] = newElem
 						//Check if min should be updated
-						if (crdt.smallestScore.isEqual(TopKElement{}) || crdt.smallestScore.isHigher(newElem)) {
-							effectValue = TopKRmvReplaceEffect{newElem: newElem, oldMin: crdt.smallestScore, oldTs: oldTs}
-							crdt.smallestScore = newElem
+						removedMin := crdt.smallestScores.addIfInBetween(newElem, len(crdt.elems))
+						//fmt.Printf("[TopKRmv][ApplyAddAll]Top has space, adding %v to top. Mins after add: %v\n", newElem, crdt.smallestScores.mins[:crdt.smallestScores.size])
+						/*if removedMin != MIN_ELEM {
+							effectValue = TopKRmvReplaceEffect{newElem: newElem, oldMin: removedMin, oldTs: oldTs} //TODO
 						} else {
 							effectValue = TopKRmvAddEffect{TopKElement: newElem, oldTs: oldTs}
-						}
-						crdt.sortedElems = nil
-					} else if newElem.isHigher(crdt.smallestScore) {
-						effectValue = TopKRmvReplaceEffect{newElem: newElem, oldElem: crdt.smallestScore, oldMin: crdt.smallestScore, oldTs: oldTs}
+						}*/
+						effectValue = TopKRmvAddEffect{newElem: newElem, removedMin: removedMin, oldTs: oldTs}
+						crdt.sortedElems, changedTop = nil, true
+					} else if newElem.isHigher(crdt.smallestScores.getMin()) {
+						//fmt.Printf("[TopKRmv][ApplyAddAll]Mins before min removal: %v.\n", crdt.smallestScores.mins[:crdt.smallestScores.size])
+						oldMin := crdt.smallestScores.removeMin()
+						//fmt.Printf("[TopKRmv][ApplyAddAll]Mins after min remove: %v.\n", crdt.smallestScores.mins[:crdt.smallestScores.size])
+						//effectValue = TopKRmvReplaceEffect{newElem: newElem, oldElem: oldMin, oldMin: oldMin, oldTs: oldTs}
+						effectValue = TopKRmvReplaceEffect{newElem: newElem, oldElem: oldMin, oldTs: oldTs, updatedHighestNotTop: true}
 						//Take min out of top (and store in notInTop) to give space to the new elem with higher score
 						//Note that it's possible to have existing entries for this ID in notInTop. The opposite is also possible.
-						entry, hasEntry := crdt.notInTop[crdt.smallestScore.Id]
+						entry, hasEntry := crdt.notInTop[oldMin.Id] //This element will definitely go to notInTop and highestNotTop.
 						if !hasEntry {
-							entry = make(setTopKElement)
-							crdt.notInTop[crdt.smallestScore.Id] = entry
+							entry = tools.NewSliceSet[TopKElement](nReplicas)
+							crdt.notInTop[oldMin.Id] = entry
 						}
-						entry.add(crdt.smallestScore)
-						delete(crdt.elems, crdt.smallestScore.Id)
+						entry.AddNoCheck(oldMin)
+						//fmt.Printf("[TopKRmv][ApplyAddAll, newElemHigher]Sanity check, entry: %v, %v.\n", entry.GetValues(), crdt.notInTop[oldMin.Id].GetValues())
+						crdt.highestNotTop.addMax(oldMin) //Note: we only keep IDs in highestNotTop that are not present in crdt.elems.
+						//Since we're moving oldMin to notInTop, no need to update smallestNotTop.
+						/*if _, has := crdt.elems[oldMin.Id]; !has {
+							panic("[TopKRmv][ApplyAddAll][newElemHigher]Removing theoretical min " + fmt.Sprintf("%v", oldMin) + " from elems, but it doesn't exist in crdt.elems! Number of mins: " + fmt.Sprintf("%d", crdt.smallestScores.size))
+						}*/
+						delete(crdt.elems, oldMin.Id)
 						crdt.elems[newElem.Id] = newElem
-						crdt.findAndUpdateMin()
-						crdt.sortedElems = nil
-					} else {
-						effectValue = TopKRmvAddNotTopEffect{TopKRmvAddEffect: TopKRmvAddEffect{TopKElement: newElem, oldTs: oldTs}}
-						//effectValue = TopKRmvAddEffect{TopKElement: op.TopKElement}
-						//Add to notInTop
-						entry, hasEntry := crdt.notInTop[newElem.Id]
-						if !hasEntry {
-							entry = make(setTopKElement)
-							crdt.notInTop[newElem.Id] = entry
+						crdt.smallestScores.addIfInBetween(newElem, len(crdt.elems))
+						//fmt.Printf("[TopKRmv][ApplyAddAll][newElemNhigher]Mins after addIfInBetween of %v: %v.\n", newElem, crdt.smallestScores.mins[:crdt.smallestScores.size])
+						if !crdt.smallestScores.hasMin() {
+							crdt.findAndUpdateMin()
 						}
-						entry.add(newElem)
+						if len(crdt.notInTop) >= crdt.maxNotTopElems {
+							if !crdt.notInTopEverFull {
+								crdt.notInTopEverFull = true
+								//fmt.Printf("[TopKRmv]notInTop reached max size (%d) for the first time. Will start maintaining smallestNotTop buffer.\n", crdt.maxNotTopElems)
+								crdt.findAndUpdateNotTopMin()
+							}
+							minNotTop := crdt.smallestNotTop.removeMin()
+							delete(crdt.notInTop, minNotTop.Id)
+							if !crdt.smallestNotTop.hasMin() {
+								crdt.findAndUpdateNotTopMin()
+							}
+						}
+						//fmt.Printf("[TopKRmv][ApplyAddAll][newElemHigher]Moved oldMin %v to notInTop to add newElem %v. New min is %v. notInTop size: %d.\n",
+						//	oldMin, newElem, crdt.smallestScores.getMin(), len(crdt.notInTop))
+						crdt.sortedElems, changedTop = nil, true
+					} else {
+						effectValue = crdt.addToNotTop(newElem, nReplicas, oldTs)
 					}
 				}
 
@@ -652,6 +1920,17 @@ func (crdt *TopKRmvCrdt) applyAddAll(op *DownstreamTopKAddAll) (effect *Effect, 
 
 		currAdds = op.OptDownstreamAdds
 	}
+	if changedTop {
+		crdt.nUpds++
+	}
+	if crdt.sortedElems == nil && len(op.DownstreamAdds) >= 100 { //Likely a initialization operation. We'll make the sortedElems now to avoid the overhead when reading.
+		crdt.makeSortedElems()
+	}
+	//end := time.Now().UnixNano()
+	//fmt.Printf("[TopKRmv][ApplyAddAll]Applied %d adds, took %dms. Lens elem, notTopSize: %d %d. nMinCalcs, nMinNotTopCalcs, nMaxNotTopCalcs: %d %d %d. Max elems, maxNotTopElems: %d %d.\n",
+	//	len(op.DownstreamAdds), (end-start)/1000000, len(crdt.elems), len(crdt.notInTop), crdt.nMin, crdt.nMinNotTop, crdt.nMaxNotTop, crdt.maxElems, crdt.maxNotTopElems)
+	//fmt.Printf("[TopKRmv][ApplyAddAll]Applied %d adds. Lens elem, notTopSize: %d %d. nMinCalcs, nMinNotTopCalcs, nMaxNotTopCalcs: %d %d %d. Buffer min, notTopMin, notTopMax: %d %d %d. Max elems, maxNotTopElems: %d %d.\n",
+	//	len(op.DownstreamAdds), len(crdt.elems), len(crdt.notInTop), crdt.nMin, crdt.nMinNotTop, crdt.nMaxNotTop, crdt.smallestScores.Cap(), crdt.smallestNotTop.Cap(), crdt.highestNotTop.Cap(), crdt.maxElems, crdt.maxNotTopElems)
 
 	var effectI Effect = listEffect
 	if nRemoves == 0 {
@@ -666,45 +1945,51 @@ func (crdt *TopKRmvCrdt) applyAddAll(op *DownstreamTopKAddAll) (effect *Effect, 
 func (crdt *TopKRmvCrdt) applyAdd(op *DownstreamTopKAdd) (effect *Effect, otherDownstreamArgs DownstreamArguments) {
 	//fmt.Println("Applying topK add")
 	var effectValue Effect
-	oldTs := crdt.vc.GetPos(op.ReplicaID)
-	if op.Data == nil {
-		op.Data = &[]byte{}
-	}
+	opTs, opReplicaID := op.TsId.getTs(), op.TsId.getReplicaID()
+	oldTs := crdt.vc.GetPos(opReplicaID)
 
-	crdt.vc.UpdatePos(op.ReplicaID, op.Ts)
+	crdt.vc.UpdatePos(opReplicaID, opTs)
+	crdt.nClkUpdsSinceLastGC++
+	nReplicas := clocksi.GetNumberReplicas()
 	remsVc, hasEntry := crdt.rems[op.Id]
-	if !hasEntry || remsVc.GetPos(op.ReplicaID) < op.Ts {
+	if !hasEntry || remsVc.GetPos(opReplicaID) < opTs {
 		elem, hasId := crdt.elems[op.Id]
 		if hasId {
 			//Check if the "new elem" is > elem. If it is, add it. On the end, check if min should be updated.
 			if op.TopKElement.isHigher(elem) {
 				//fmt.Printf("[TOPK][ADD]Id already exists and new value is higher, number elems %d, max elems %d, min score %d\n", len(crdt.elems), crdt.maxElems, crdt.smallestScore.Score)
-				effectValue = TopKRmvReplaceEffect{newElem: op.TopKElement, oldElem: elem, oldMin: crdt.smallestScore, oldTs: oldTs}
+				//effectValue = TopKRmvReplaceEffect{newElem: op.TopKElement, oldElem: elem, oldMin: crdt.smallestScores.getMin(), oldTs: oldTs}
+				effectValue = TopKRmvReplaceEffect{newElem: op.TopKElement, oldElem: elem, oldTs: oldTs, updatedHighestNotTop: false}
 				crdt.elems[op.Id] = op.TopKElement
 				//Different replicas, so we'll keep the old entry in notInTop (as it might be relevant again depending on concurrent removes)
-				if elem.ReplicaID != op.TopKElement.ReplicaID {
-					entry, hasEntry := crdt.notInTop[op.Id]
+				if elem.TsId.getReplicaID() != opReplicaID {
+					/*entry, hasEntry := crdt.notInTop[op.Id]
 					if !hasEntry {
-						entry = make(setTopKElement)
+						entry = tools.NewSliceSet[TopKElement](nReplicas)
 						crdt.notInTop[op.Id] = entry
 					}
-					entry.add(elem)
+					entry.AddNoCheck(elem)*/
+					crdt.addTopDuplicateToNotTop(elem, nReplicas) //This element will *not* go to notInTop's min or max as this ID already exists in elems.
 				}
-				//Check if min should be updated
-				if crdt.smallestScore.isEqual(elem) {
+				//Update min if needed.
+				crdt.smallestScores.remove(elem)
+				crdt.smallestScores.addIfInBetween(op.TopKElement, len(crdt.elems)) //This will never kick out any existing elem, as newElem > elem: if newElem belongs there, so did elem.
+				if !crdt.smallestScores.hasMin() {
 					crdt.findAndUpdateMin()
 				}
-				crdt.sortedElems = nil
+				crdt.sortedElems, crdt.nUpds = nil, crdt.nUpds+1
 			} else {
 				//fmt.Printf("[TOPK][ADD]Id already exists but new value is lower, number elems %d, max elems %d, min score %d\n", len(crdt.elems), crdt.maxElems, crdt.smallestScore.Score)
-				effectValue = TopKRmvAddNotTopEffect{TopKRmvAddEffect: TopKRmvAddEffect{TopKElement: op.TopKElement, oldTs: oldTs}}
+				//effectValue = TopKRmvAddNotTopEffect{TopKRmvAddEffect: TopKRmvAddEffect{TopKElement: op.TopKElement, oldTs: oldTs}}
 				//Store in notInTop as it might be relevant later on
-				entry, hasEntry := crdt.notInTop[op.Id]
+				/*entry, hasEntry := crdt.notInTop[op.Id]
 				if !hasEntry {
-					entry = make(setTopKElement)
+					entry = tools.NewSliceSet[TopKElement](nReplicas)
 					crdt.notInTop[op.Id] = entry
 				}
-				entry.add(op.TopKElement)
+				entry.AddNoCheck(op.TopKElement)*/
+				effectValue = TopKRmvAddNotTopEffect{newElem: op.TopKElement, oldTs: oldTs, updateBuffs: false}
+				crdt.addTopDuplicateToNotTop(op.TopKElement, nReplicas) //This element will not go to notInTop's min or max as this ID already exists in elems.
 			}
 		} else {
 			//Check if it should belong to topK (i.e. there's space or its score is > min)
@@ -712,39 +1997,61 @@ func (crdt *TopKRmvCrdt) applyAdd(op *DownstreamTopKAdd) (effect *Effect, otherD
 				//fmt.Printf("[TOPK][ADD]Still has space for more elements, number elems %d, max elems %d, min score %d\n", len(crdt.elems), crdt.maxElems, crdt.smallestScore.Score)
 				crdt.elems[op.Id] = op.TopKElement
 				//Check if min should be updated
-				if (crdt.smallestScore.isEqual(TopKElement{}) || crdt.smallestScore.isHigher(op.TopKElement)) {
-					effectValue = TopKRmvReplaceEffect{newElem: op.TopKElement, oldMin: crdt.smallestScore, oldTs: oldTs}
-					crdt.smallestScore = op.TopKElement
+				removedMin := crdt.smallestScores.addIfInBetween(op.TopKElement, len(crdt.elems))
+				/*if removedMin != MIN_ELEM {
+					effectValue = TopKRmvReplaceEffect{newElem: op.TopKElement, oldMin: removedMin, oldTs: oldTs}
 				} else {
 					effectValue = TopKRmvAddEffect{TopKElement: op.TopKElement, oldTs: oldTs}
-				}
-				crdt.sortedElems = nil
-			} else if op.TopKElement.isHigher(crdt.smallestScore) {
+				}*/
+				effectValue = TopKRmvAddEffect{newElem: op.TopKElement, removedMin: removedMin, oldTs: oldTs}
+				crdt.sortedElems, crdt.nUpds = nil, crdt.nUpds+1
+			} else if op.TopKElement.isHigher(crdt.smallestScores.getMin()) {
+				oldMin := crdt.smallestScores.getMin()
 				//fmt.Printf("[TOPK][ADD]Doesn't have space for more elements, but new is higher than smallest score. Number elems %d, max elems %d, min score %d\n", len(crdt.elems), crdt.maxElems, crdt.smallestScore.Score)
-				effectValue = TopKRmvReplaceEffect{newElem: op.TopKElement, oldElem: crdt.smallestScore, oldMin: crdt.smallestScore, oldTs: oldTs}
+				//effectValue = TopKRmvReplaceEffect{newElem: op.TopKElement, oldElem: oldMin, oldMin: oldMin, oldTs: oldTs}
+				effectValue = TopKRmvReplaceEffect{newElem: op.TopKElement, oldElem: oldMin, oldTs: oldTs, updatedHighestNotTop: true}
 				//Take min out of top (and store in notInTop) to give space to the new elem with higher score
 				//Note that it's possible to have existing entries for this ID in notInTop. The opposite is also possible.
-				entry, hasEntry := crdt.notInTop[crdt.smallestScore.Id]
+				entry, hasEntry := crdt.notInTop[oldMin.Id]
 				if !hasEntry {
-					entry = make(setTopKElement)
-					crdt.notInTop[crdt.smallestScore.Id] = entry
+					entry = tools.NewSliceSet[TopKElement](nReplicas)
+					crdt.notInTop[oldMin.Id] = entry
 				}
-				entry.add(crdt.smallestScore)
-				delete(crdt.elems, crdt.smallestScore.Id)
+				crdt.highestNotTop.addMax(oldMin) //Note: we only keep IDs in highestNotTop that are not present in crdt.elems.
+				//Since we're moving oldMin to notInTop, no need to update smallestNotTop.
+				entry.AddNoCheck(oldMin)
+				delete(crdt.elems, oldMin.Id)
 				crdt.elems[op.Id] = op.TopKElement
-				crdt.findAndUpdateMin()
-				crdt.sortedElems = nil
+				crdt.smallestScores.removeMin()
+				crdt.smallestScores.addIfInBetween(op.TopKElement, len(crdt.elems))
+				if !crdt.smallestScores.hasMin() {
+					crdt.findAndUpdateMin()
+				}
+				if len(crdt.notInTop) >= crdt.maxNotTopElems {
+					if !crdt.notInTopEverFull {
+						crdt.notInTopEverFull = true
+						//fmt.Printf("[TopKRmv]notInTop reached max size (%d) for the first time. Will start maintaining smallestNotTop buffer.\n", crdt.maxNotTopElems)
+						crdt.findAndUpdateNotTopMin()
+					}
+					minNotTop := crdt.smallestNotTop.removeMin()
+					delete(crdt.notInTop, minNotTop.Id)
+					if !crdt.smallestNotTop.hasMin() {
+						crdt.findAndUpdateNotTopMin()
+					}
+				}
+				crdt.sortedElems, crdt.nUpds = nil, crdt.nUpds+1
 			} else {
 				//fmt.Printf("[TOPK][ADD]Doesn't have space for more elements and new is smaller than smallest score. Number elems %d, max elems %d, min score %d\n", len(crdt.elems), crdt.maxElems, crdt.smallestScore.Score)
-				effectValue = TopKRmvAddNotTopEffect{TopKRmvAddEffect: TopKRmvAddEffect{TopKElement: op.TopKElement, oldTs: oldTs}}
+				//effectValue = TopKRmvAddNotTopEffect{TopKRmvAddEffect: TopKRmvAddEffect{TopKElement: op.TopKElement, oldTs: oldTs}}
 				//effectValue = TopKRmvAddEffect{TopKElement: op.TopKElement}
 				//Add to notInTop
-				entry, hasEntry := crdt.notInTop[op.Id]
+				/*entry, hasEntry := crdt.notInTop[op.Id]
 				if !hasEntry {
-					entry = make(setTopKElement)
+					entry = tools.NewSliceSet[TopKElement](nReplicas)
 					crdt.notInTop[op.Id] = entry
 				}
-				entry.add(op.TopKElement)
+				entry.AddNoCheck(op.TopKElement)*/
+				effectValue = crdt.addToNotTop(op.TopKElement, nReplicas, oldTs)
 			}
 		}
 
@@ -763,13 +2070,15 @@ func (crdt *TopKRmvCrdt) applyRemoveAll(op *DownstreamTopKRemoveAll) (effect *Ef
 	//downAdds := DownstreamTopKAddAll{DownstreamAdds: make([]TopKElement, len(op.DownRems))}
 	nAdds, nEffects := 0, 0
 	listEffect := TopKRmvRemoveAllEffect{effects: make([]*TopKRmvRemoveEffect, len(op.DownRems)+len(op.OptDownRems))}
+	changedTop := false
+	nReplicas := int(NReplicas)
 
 	//Need to apply the same algorithm for both downRems and optRems (if present)
 	currRems := op.DownRems
 	for i := 0; i < 2; i++ {
 		for j, remID := range currRems {
 			//Must be <= as the remove's clk is a copy without incrementing.
-			remEffect := TopKRmvRemoveEffect{id: remID, notTopRemoved: make(setTopKElement)}
+			remEffect := TopKRmvRemoveEffect{id: remID, notTopRemoved: tools.NewSliceSet[TopKElement](nReplicas)}
 			rems, hasRems := crdt.rems[remID]
 			//Works for both when there's only 1 Vc and for when there's as many Vcs as downRems
 			vc := op.Vc[j%len(op.Vc)]
@@ -782,39 +2091,71 @@ func (crdt *TopKRmvCrdt) applyRemoveAll(op *DownstreamTopKRemoveAll) (effect *Ef
 			}
 
 			//Find all adds for op.Id that are in notInTop whose ts is < clock[replicaID of the rmv] and remove them.
-			hiddenForId := crdt.notInTop[remID]
-			for elem := range hiddenForId {
-				if elem.Ts <= vc.GetPos(elem.ReplicaID) {
-					delete(hiddenForId, elem)
-					remEffect.notTopRemoved.add(elem)
+			hiddenForId, hasNotTop := crdt.notInTop[remID]
+			maxRemovedElem := MIN_ELEM
+			if hiddenForId != nil {
+				toIterate := hiddenForId.Len()
+				for k, elem := range hiddenForId.GetValues() {
+					if elem.TsId.getTs() <= vc.GetPos(elem.TsId.getReplicaID()) {
+						//delete(hiddenForId, elem)
+						//remEffect.notTopRemoved.add(elem)
+						hiddenForId.DeleteByPos(k)
+						remEffect.notTopRemoved.AddNoCheck(elem)
+						if elem.Score > maxRemovedElem.Score {
+							maxRemovedElem = elem
+						}
+
+						toIterate-- //Need this to ensure we don't start reading removed positions
+						if k >= toIterate {
+							break
+						}
+					}
+				}
+				//Id was totally removed
+				if hiddenForId.Len() == 0 {
+					delete(crdt.notInTop, remID)
 				}
 			}
-			//Id was totally removed
-			if hiddenForId != nil && len(hiddenForId) == 0 {
-				delete(crdt.notInTop, remID)
-			}
+
+			elem, hasElem := crdt.elems[remID]
 			//Also remove from elems if the same condition is true.
-			if elem, hasElem := crdt.elems[remID]; hasElem && elem.Ts <= vc.GetPos(elem.ReplicaID) {
+			if hasElem && elem.TsId.getTs() <= vc.GetPos(elem.TsId.getReplicaID()) {
 				delete(crdt.elems, remID)
 				remEffect.remElem = elem
-				remEffect.oldMin = crdt.smallestScore
-				crdt.sortedElems = nil
+				//remEffect.oldMin = crdt.smallestScores.getMin()
+				crdt.sortedElems, changedTop = nil, true
+				crdt.updateMaxMinNotTopBuffersOnRemoval(remID, hiddenForId, elem, maxRemovedElem)
 
 				if len(crdt.elems) == crdt.maxElems-1 {
 					//Top-k was full previously, need to find the next highest value to replace (possibly in different ID)
-					highestElem := TopKElement{}
+					/*highestElem := TopKElement{}
 					for id, setElems := range crdt.notInTop {
 						if _, has := crdt.elems[id]; !has {
 							//We're only interested in IDs which aren't already in the top-k
-							for elemNotTop := range setElems {
+							for _, elemNotTop := range setElems.GetValues() {
 								if elemNotTop.isHigher(highestElem) {
 									highestElem = elemNotTop
 								}
 							}
 						}
+					}*/
+					highestElem, foundHigher := crdt.highestNotTop.getMax(), false
+					if hiddenForId != nil && hiddenForId.Len() > 0 {
+						//Maybe an element higher than highestElem is available for this ID.
+						for _, elemNotTop := range hiddenForId.GetValues() {
+							if elemNotTop.isHigher(highestElem) {
+								highestElem, foundHigher = elemNotTop, true
+							}
+						}
 					}
+					if !foundHigher && crdt.highestNotTop.hasMax() {
+						crdt.highestNotTop.removeMax()
+					}
+
 					//Check that notInTop actually had elements.
-					if (!highestElem.isEqual(TopKElement{})) {
+					//if (!highestElem.isEqual(TopKElement{})) {
+					if highestElem != MIN_ELEM {
+						remEffect.promotedElem = highestElem
 						/*
 							if nAdds >= len(op.DownRems) {
 								fmt.Println("[TOPK]WARNING - TopKRmvAll trying to downstream more adds than the number of obligatory removes.")
@@ -828,66 +2169,232 @@ func (crdt *TopKRmvCrdt) applyRemoveAll(op *DownstreamTopKRemoveAll) (effect *Ef
 						*/
 						//Promote to top-k and set as min
 						crdt.elems[highestElem.Id] = highestElem
-						crdt.smallestScore = highestElem
-						if highestElem.Data == nil {
-							highestElem.Data = &[]byte{}
+						if !foundHigher {
+							crdt.smallestScores.addMin(highestElem)
+						} else { //if foundHigher, it may not be a min.
+							crdt.smallestScores.addIfInBetween(highestElem, len(crdt.elems))
 						}
 						downAdds.DownstreamAdds[nAdds] = highestElem
 						nAdds++
 						//Also remove it from notInTop
 						notTop := crdt.notInTop[highestElem.Id]
-						delete(notTop, highestElem)
-						if len(notTop) == 0 {
+						notTop.Delete(highestElem)
+						if notTop.Len() == 0 {
 							delete(crdt.notInTop, highestElem.Id)
 						}
 
-						remEffect.minAddedToTop = true
-					} else if elem.isEqual(crdt.smallestScore) {
-						//No elem to add to top-k, however the removed element was the min. Need to find new one
+						//remEffect.minAddedToTop = true
+					} //Nothing to do on else: we'll already update the min at the end.
+					/*else if elem.isEqual(crdt.smallestScores.getMin()) {
+						//No elem to add to top-k, however the removed element was the min.
 						crdt.findAndUpdateMin()
-					}
-				} else if hiddenForId != nil && len(hiddenForId) > 0 {
+					}*/
+				} else if hiddenForId != nil && hiddenForId.Len() > 0 {
 					//There's no other element in notInTop that isn't already in top but, for the element we removed,
 					//there's other entries still left. The highest should go to top.
-					highest := TopKElement{}
-					for elemNotTop := range hiddenForId {
+					highest, pos := MIN_ELEM, 0
+					for k, elemNotTop := range hiddenForId.GetValues() {
 						if elemNotTop.isHigher(highest) {
-							highest = elemNotTop
+							highest, pos = elemNotTop, k
 						}
 					}
-					delete(hiddenForId, highest)
-					if len(hiddenForId) == 0 {
+					remEffect.promotedElem = highest
+					//delete(hiddenForId, highest)
+					hiddenForId.DeleteByPos(pos)
+					if hiddenForId.Len() == 0 {
 						delete(crdt.notInTop, highest.Id)
 					}
 					crdt.elems[highest.Id] = highest
-					if elem.isEqual(crdt.smallestScore) {
+					crdt.smallestScores.addIfInBetween(highest, len(crdt.elems))
+					/*if elem.isEqual(crdt.smallestScore) {
 						//If the removed elem was the min, the one we added now has, for sure, an even smaller value
 						crdt.smallestScore = highest
-					}
+					}*/
+
 					//Need to pass this add now
 					//TODO: Analyze if it really needs to be downstreamed or not
-					if highest.Data == nil {
-						highest.Data = &[]byte{}
-					}
 					downAdds.DownstreamAdds[nAdds] = highest
 					nAdds++
-				} else if elem.isEqual(crdt.smallestScore) {
+				} /*else if elem.isEqual(crdt.smallestScore) {
 					//Removed element was the min, need to find new min
 					crdt.findAndUpdateMin()
+				}*/
+				//Remove elem from min, if it was there.
+				crdt.smallestScores.remove(elem) //No effect if the elem wasn't there.
+				if !crdt.smallestScores.hasMin() {
+					crdt.findAndUpdateMin()
 				}
+			} else if hasElem { //In this case, nothing gets updated in max/min buffers, as the element stays on top
 
-			}
+			} else if hasNotTop { //Element didn't exist in crdt.elems. We may still need to update buffers due to removing from notInTop.
+				crdt.updateMaxMinNotTopBuffersOnRemoval(remID, hiddenForId, MIN_ELEM, maxRemovedElem) //Didn't remove from crdt.elems, hence passing MIN_ELEM.
+			} //else: if the element wasn't on top and notInTop -> nothing to do.
 			listEffect.effects[nEffects] = &remEffect
 			nEffects++
 		}
 		currRems = op.OptDownRems
 	}
 	var effectI Effect = listEffect
+	if changedTop {
+		crdt.nUpds++
+	}
+	if crdt.shouldCleanRems() {
+		cleaned := crdt.cleanupRems()
+		if len(cleaned) > 0 {
+			effectI = TopKRmvRemoveAllWithCleanEffect{effects: listEffect.effects, cleanedRems: cleaned}
+		} else { //Somehow didn't clean anything. Increase factor to avoid repeating a clean soon. Should be rare to happen.
+			crdt.cleanupFactor++
+		}
+	}
 	if nAdds == 0 {
 		return &effectI, nil
 	}
 	downAdds.DownstreamAdds = downAdds.DownstreamAdds[0:nAdds]
 	return &effectI, downAdds
+}
+
+// Elem already exists in crdt.elems, so it will not go to highestNotTop nor smallestNotTop.
+func (crdt *TopKRmvCrdt) addTopDuplicateToNotTop(elem TopKElement, nReplicas int) {
+	entry, hasEntry := crdt.notInTop[elem.Id]
+	if !hasEntry {
+		entry = tools.NewSliceSet[TopKElement](nReplicas)
+		crdt.notInTop[elem.Id] = entry
+	}
+	entry.AddNoCheck(elem)
+}
+
+// Elem doesn't exist in crdt.elems
+func (crdt *TopKRmvCrdt) addToNotTop(elem TopKElement, nReplicas int, oldTs int64) (effect Effect) {
+	/*entry, hasEntry := crdt.notInTop[elem.Id]
+	if hasEntry {
+		entry.AddNoCheck(elem)
+		//fmt.Printf("[TopKRmv][addToNotTop]Sanity check, entry: %v, %v\n", entry.GetValues(), crdt.notInTop[elem.Id].GetValues())
+		kicked := crdt.highestNotTop.replaceIfHigher(elem)
+		return TopKRmvAddNotTopEffect{newElem: elem, kickedHighest: kicked, updateBuffs: true}
+	}*/
+
+	if len(crdt.notInTop) >= crdt.maxNotTopElems { //May be higher due to having IDs from elems also in notInTop.
+		if !crdt.notInTopEverFull {
+			crdt.notInTopEverFull = true
+			//fmt.Printf("[TopKRmv][addToNotTop]notInTop reached max size (%d) for the first time. Will start maintaining smallestNotTop buffer.\n", crdt.maxNotTopElems)
+			crdt.findAndUpdateNotTopMin()
+		}
+		if elem.isHigher(crdt.smallestNotTop.getMin()) { //It should be added to notInTop, despite not existing yet.
+			//fmt.Printf("[TopKRmv][addToNotTop]notInTop full (%d), new elem is high enough (%d), min notTop %d\n", len(crdt.notInTop), elem.Score, crdt.smallestNotTop.getMin().Score)
+			entry, hasEntry := crdt.notInTop[elem.Id]
+			if hasEntry {
+				entry.AddNoCheck(elem)
+				//fmt.Printf("[TopKRmv][addToNotTop]Sanity check, entry: %v, %v\n", entry.GetValues(), crdt.notInTop[elem.Id].GetValues())
+				kicked := crdt.highestNotTop.replaceIfHigher(elem)
+				return TopKRmvAddNotTopEffect{newElem: elem, kickedHighest: kicked, updateBuffs: true}
+			}
+			notTopEff := TopKRmvAddNotTopEffect{newElem: elem, updateBuffs: true}
+			entry = tools.NewSliceSet[TopKElement](nReplicas) //This may actually have more than nReplicas, but unlikely.
+			crdt.notInTop[elem.Id] = entry
+			entry.AddNoCheck(elem)
+			notTopEff.kickedHighest = crdt.highestNotTop.addIfInBetween(elem, len(crdt.notInTop))
+			notTopEff.kickedSmallest = crdt.smallestNotTop.removeMin()
+			crdt.smallestNotTop.addIfInBetween(elem, len(crdt.notInTop)) //Will never kick any elem, as removeMin() already made a space.
+			delete(crdt.notInTop, notTopEff.kickedSmallest.Id)           //Remove from nonTop the min of nonTop
+			if !crdt.smallestNotTop.hasMin() {
+				crdt.findAndUpdateNotTopMin()
+			}
+			/*if notTopEff.kickedSmallest.Score == MIN_ELEM.Score {
+				panic("Kicked smallest from notInTop is MIN_ELEM: " + fmt.Sprint(notTopEff.kickedSmallest.Score))
+			}*/
+			return notTopEff
+		} else {
+			//fmt.Printf("[TopKRmv][addToNotTop]notInTop full (%d), new elem too small (%d), min notTop %d\n", len(crdt.notInTop), elem.Score, crdt.smallestNotTop.getMin().Score)
+			return NoEffect{}
+		}
+	} else {
+		entry, hasEntry := crdt.notInTop[elem.Id]
+		if hasEntry {
+			entry.AddNoCheck(elem)
+			//fmt.Printf("[TopKRmv][addToNotTop]Sanity check, entry: %v, %v\n", entry.GetValues(), crdt.notInTop[elem.Id].GetValues())
+			kicked := crdt.highestNotTop.replaceIfHigher(elem)
+			return TopKRmvAddNotTopEffect{newElem: elem, kickedHighest: kicked, updateBuffs: true}
+		}
+		notTopEff := TopKRmvAddNotTopEffect{newElem: elem, updateBuffs: true}
+		entry = tools.NewSliceSet[TopKElement](nReplicas) //This may actually have more than nReplicas, but unlikely.
+		crdt.notInTop[elem.Id] = entry
+		entry.AddNoCheck(elem)
+		//fmt.Printf("[TopKRmv][addToNotTop]Sanity check, entry: %v, %v\n", entry.GetValues(), crdt.notInTop[elem.Id].GetValues())
+		if crdt.notInTopEverFull {
+			notTopEff.kickedSmallest = crdt.smallestNotTop.addIfInBetween(elem, len(crdt.notInTop))
+		}
+		//notTopEff.kickedHighest = crdt.highestNotTop.add(elem)
+		notTopEff.kickedHighest = crdt.highestNotTop.addIfInBetween(elem, len(crdt.notInTop))
+		return notTopEff
+	}
+}
+
+func (crdt *TopKRmvCrdt) updateMaxMinNotTopBuffersOnRemoval(remID int32, hiddenForId setTopKElement, elemRemovedFromElems, maxRemovedFromNotTop TopKElement) {
+	//Update buffers. Must consider:
+	//If the element is fully removed from notInTop (hiddenForId)
+	//If the element was present in crdt.elems, and if it is getting deleted from there or not.
+	if elemRemovedFromElems != MIN_ELEM { //It was removed from crdt.elems. So this ID doesn't exist in the buffers.
+		if hiddenForId == nil || hiddenForId.Len() == 0 {
+			return //Nothing to do: the ID wasn't in the buffers (as it was on top), and notInTop doesn't have the ID either.
+		}
+		//ID existed in notInTop. Need to find the highest element for this ID.
+		highestInHidden := MIN_ELEM
+		for _, elem := range hiddenForId.GetValues() {
+			if elem.Score > highestInHidden.Score {
+				highestInHidden = elem
+			}
+		}
+		crdt.highestNotTop.addIfInBetween(highestInHidden, len(crdt.notInTop))
+		if crdt.notInTopEverFull {
+			crdt.smallestNotTop.addIfInBetween(highestInHidden, len(crdt.notInTop))
+		}
+	} else { //This else means the elem did not exist in crdt.elems, but it did exist in notInTop.
+		//Two cases: a) hiddenForId is empty, so we simply remove the ID from both buffers;
+		//b) hiddenForId has elements, so multiple options: if we removed the elem that was in a buffer, we may need to replace with the next best; otherwise, leave it there.
+		//Best way to tackle b) is to first look for the max of hiddenForId, then check if those could be in the buffer.
+		if maxRemovedFromNotTop == MIN_ELEM {
+			return //Nothing to update, as the relevant element is still in notInTop.
+		}
+		//Something was removed from notInTop.
+		if hiddenForId == nil || hiddenForId.Len() == 0 { //a)
+			crdt.highestNotTop.remove(maxRemovedFromNotTop)
+			if crdt.notInTopEverFull {
+				crdt.smallestNotTop.remove(maxRemovedFromNotTop)
+			}
+		} else { //b)
+			//Find highest in hiddenForId
+			highestInHidden := MIN_ELEM
+			for _, elem := range hiddenForId.GetValues() {
+				if elem.Score > highestInHidden.Score {
+					highestInHidden = elem
+				}
+			}
+			if maxRemovedFromNotTop.isSmaller(highestInHidden) { //There's a chance we couldn't remove the real highest from notTop due to clocks. If so, nothing to do.
+				crdt.highestNotTop.removeAndAdd(maxRemovedFromNotTop, highestInHidden)
+				if crdt.notInTopEverFull {
+					crdt.smallestNotTop.removeAndAdd(maxRemovedFromNotTop, highestInHidden)
+				}
+			}
+		}
+		if !crdt.highestNotTop.hasMax() {
+			crdt.findAndUpdateMaxNotTop()
+		}
+		if crdt.notInTopEverFull && !crdt.smallestNotTop.hasMin() {
+			crdt.findAndUpdateNotTopMin()
+		}
+	}
+
+	if crdt.notInTopEverFull && crdt.isNotInTopSmallEnough() {
+		//Don't track smallestNotTop anymore.
+		crdt.notInTopEverFull = false
+		crdt.smallestNotTop.size = 0
+	}
+}
+
+// Used to help decide when to stop tracking smallestNotTop.
+func (crdt *TopKRmvCrdt) isNotInTopSmallEnough() bool {
+	//If maxNotTop is small enough, it's okay to just keep tracking.
+	return crdt.maxNotTopElems >= 100 && len(crdt.notInTop) < ((crdt.maxNotTopElems*9)/10) || (crdt.maxNotTopElems >= 40 && len(crdt.notInTop) < (crdt.maxNotTopElems/2))
 }
 
 /*
@@ -905,7 +2412,7 @@ Variants for element removed:
 */
 func (crdt *TopKRmvCrdt) applyRemove(op *DownstreamTopKRemove) (effect *Effect, otherDownstreamArgs DownstreamArguments) {
 	//Must be <= as the remove's clk is a copy without incrementing.
-	remEffect := TopKRmvRemoveEffect{id: op.Id, notTopRemoved: make(setTopKElement)}
+	remEffect := TopKRmvRemoveEffect{id: op.Id}
 	rems, hasRems := crdt.rems[op.Id]
 	if !hasRems {
 		remEffect.previousVc = nil
@@ -916,97 +2423,173 @@ func (crdt *TopKRmvCrdt) applyRemove(op *DownstreamTopKRemove) (effect *Effect, 
 	}
 
 	//Find all adds for op.Id that are in notInTop whose ts is < clock[replicaID of the rmv] and remove them.
-	hiddenForId := crdt.notInTop[op.Id]
-	for elem := range hiddenForId {
-		if elem.Ts <= op.Vc.GetPos(elem.ReplicaID) {
-			delete(hiddenForId, elem)
-			remEffect.notTopRemoved.add(elem)
+	hiddenForId, hasNotTop := crdt.notInTop[op.Id]
+	maxRemovedElem := MIN_ELEM
+	if hiddenForId != nil {
+		toIterate := hiddenForId.Len()
+		remEffect.notTopRemoved = tools.NewSliceSet[TopKElement](hiddenForId.Len())
+		for k, elem := range hiddenForId.GetValues() {
+			if elem.TsId.getTs() <= op.Vc.GetPos(elem.TsId.getReplicaID()) {
+				hiddenForId.DeleteByPos(k)
+				remEffect.notTopRemoved.AddNoCheck(elem)
+				if elem.Score > maxRemovedElem.Score {
+					maxRemovedElem = elem
+				}
+
+				toIterate-- //Need this to ensure we don't start reading removed positions
+				if k >= toIterate {
+					break
+				}
+			}
+		}
+		//Id was totally removed
+		if hiddenForId.Len() == 0 {
+			delete(crdt.notInTop, op.Id)
 		}
 	}
-	//Id was totally removed
-	if hiddenForId != nil && len(hiddenForId) == 0 {
-		delete(crdt.notInTop, op.Id)
-	}
+
+	elem, hasElem := crdt.elems[op.Id]
 	//Also remove from elems if the same condition is true.
-	if elem, hasElem := crdt.elems[op.Id]; hasElem && elem.Ts <= op.Vc.GetPos(elem.ReplicaID) {
+	if hasElem && elem.TsId.getTs() <= op.Vc.GetPos(elem.TsId.getReplicaID()) {
 		delete(crdt.elems, op.Id)
 		remEffect.remElem = elem
-		remEffect.oldMin = crdt.smallestScore
-		crdt.sortedElems = nil
+		//remEffect.oldMin = crdt.smallestScores.getMin()
+		crdt.sortedElems, crdt.nUpds = nil, crdt.nUpds+1
+		crdt.updateMaxMinNotTopBuffersOnRemoval(op.Id, hiddenForId, elem, maxRemovedElem)
 
 		if len(crdt.elems) == crdt.maxElems-1 {
 			//Top-k was full previously, need to find the next highest value to replace (possibly in different ID)
-			highestElem := TopKElement{}
+			/*highestElem := TopKElement{}
 			for id, setElems := range crdt.notInTop {
 				if _, has := crdt.elems[id]; !has {
 					//We're only interested in IDs which aren't already in the top-k
-					for elemNotTop := range setElems {
+					for _, elemNotTop := range setElems.GetValues() {
 						if elemNotTop.isHigher(highestElem) {
 							highestElem = elemNotTop
 						}
 					}
 				}
+			}*/
+			highestElem, foundHigher := crdt.highestNotTop.getMax(), false
+			if hiddenForId != nil && hiddenForId.Len() > 0 {
+				//Maybe an element higher than highestElem is available for this ID.
+				for _, elemNotTop := range hiddenForId.GetValues() {
+					if elemNotTop.isHigher(highestElem) {
+						highestElem, foundHigher = elemNotTop, true
+					}
+				}
 			}
+			if !foundHigher && crdt.highestNotTop.hasMax() {
+				crdt.highestNotTop.removeMax()
+			}
+
 			//Check that notInTop actually had elements.
-			if (!highestElem.isEqual(TopKElement{})) {
+			//if (!highestElem.isEqual(TopKElement{})) {
+			if highestElem != MIN_ELEM {
+				remEffect.promotedElem = highestElem
 				//Promote to top-k and set as min
 				crdt.elems[highestElem.Id] = highestElem
-				crdt.smallestScore = highestElem
-				otherDown := DownstreamTopKAdd{TopKElement: highestElem}
-				if otherDown.Data == nil {
-					otherDown.Data = &[]byte{}
+				if !foundHigher {
+					crdt.smallestScores.addMin(highestElem)
+				} else { //if foundHigher, it may not be a min.
+					crdt.smallestScores.addIfInBetween(highestElem, len(crdt.elems))
 				}
+				otherDown := DownstreamTopKAdd{TopKElement: highestElem}
 				otherDownstreamArgs = otherDown
 				//Also remove it from notInTop
 				notTop := crdt.notInTop[highestElem.Id]
-				delete(notTop, highestElem)
-				if len(notTop) == 0 {
+				notTop.Delete(highestElem)
+				if notTop.Len() == 0 {
 					delete(crdt.notInTop, highestElem.Id)
 				}
 
-				remEffect.minAddedToTop = true
-			} else if elem.isEqual(crdt.smallestScore) {
+				//remEffect.minAddedToTop = true
+			} /*else if elem.isEqual(crdt.smallestScore) {
 				//No elem to add to top-k, however the removed element was the min. Need to find new one
 				crdt.findAndUpdateMin()
-			}
-		} else if hiddenForId != nil && len(hiddenForId) > 0 {
+			}*/
+		} else if hiddenForId != nil && hiddenForId.Len() > 0 {
 			//There's no other element in notInTop that isn't already in top but, for the element we removed,
 			//there's other entries still left. The highest should go to top.
-			highest := TopKElement{}
-			for elemNotTop := range hiddenForId {
+			highest, pos := MIN_ELEM, 0
+			for k, elemNotTop := range hiddenForId.GetValues() {
 				if elemNotTop.isHigher(highest) {
-					highest = elemNotTop
+					highest, pos = elemNotTop, k
 				}
 			}
-			delete(hiddenForId, highest)
-			if len(hiddenForId) == 0 {
+			remEffect.promotedElem = highest
+			//hiddenForId.Delete(highest)
+			hiddenForId.DeleteByPos(pos)
+			if hiddenForId.Len() == 0 {
 				delete(crdt.notInTop, highest.Id)
 			}
 			crdt.elems[highest.Id] = highest
-			if elem.isEqual(crdt.smallestScore) {
+			crdt.smallestScores.addIfInBetween(highest, len(crdt.elems))
+			/*if elem.isEqual(crdt.smallestScore) {
 				//If the removed elem was the min, the one we added now has, for sure, an even smaller value
 				crdt.smallestScore = highest
-			}
+			}*/
 			//Need to pass this add now
 			//TODO: Analyze if it really needs to be downstreamed or not
 			otherDown := DownstreamTopKAdd{TopKElement: highest}
-			if otherDown.Data == nil {
-				otherDown.Data = &[]byte{}
-			}
 			otherDownstreamArgs = otherDown
-		} else if elem.isEqual(crdt.smallestScore) {
+		} /*else if elem.isEqual(crdt.smallestScore) {
 			//Removed element was the min, need to find new min
 			crdt.findAndUpdateMin()
+		}*/
+		//Remove elem from min, if it was there
+		crdt.smallestScores.remove(elem) //No effect if the elem wasn't there.
+		if !crdt.smallestScores.hasMin() {
+			crdt.findAndUpdateMin()
 		}
+	} else if hasElem { //In this case, nothing gets updated in max/min buffers, as the element stays on top
 
-	}
+	} else if hasNotTop { //Element didn't exist in crdt.elems. We may still need to update buffers due to removing from notInTop.
+		crdt.updateMaxMinNotTopBuffersOnRemoval(op.Id, hiddenForId, MIN_ELEM, maxRemovedElem) //Didn't remove from crdt.elems, hence passing MIN_ELEM.
+	} //else: if the element wasn't on top and notInTop -> nothing to do.å
 
 	var eff Effect = remEffect
+	if crdt.shouldCleanRems() {
+		cleaned := crdt.cleanupRems()
+		if len(cleaned) > 0 {
+			eff = TopKRmvRemoveWithCleanEffect{TopKRmvRemoveEffect: remEffect, cleanedRems: cleaned}
+		} else { //Somehow didn't clean anything. Increase factor to avoid repeating a clean soon. Should be rare to happen.
+			crdt.cleanupFactor++
+		}
+	}
 	return &eff, otherDownstreamArgs
 }
 
+func (crdt *TopKRmvCrdt) shouldCleanRems() bool {
+	return len(crdt.rems) > int(crdt.cleanupFactor)*(crdt.maxElems+crdt.maxNotTopElems)
+}
+
+// This will be called by remove operations when crdt.rems' size exceeds considerably the size of top+notInTop.
+// Idea: if crdt.vc has advanced enough, old removes can be discarded, as causal consistency ensures we won't receive any older add.
+func (crdt *TopKRmvCrdt) cleanupRems() (cleanSlice []tools.Pair[int32, clocksi.Timestamp]) {
+	clean := tools.NewSliceWithCounter[tools.Pair[int32, clocksi.Timestamp]](len(crdt.rems) / 2) //Heuristic. Worst case there'll be one resize.
+	for id, remsVc := range crdt.rems {
+		if remsVc.IsLower(crdt.vc) {
+			delete(crdt.rems, id)
+			clean.Append(tools.Pair[int32, clocksi.Timestamp]{First: id, Second: remsVc})
+		}
+	}
+	if clean.Len() == 0 {
+		return nil
+	}
+	if clean.Len() < clean.Cap()/10 {
+		//If we cleaned little, reduce the capacity to save memory.
+		cleanSlice = make([]tools.Pair[int32, clocksi.Timestamp], clean.Len())
+		copy(cleanSlice, clean.ToSlice())
+	} else {
+		cleanSlice = clean.ToSlice()
+	}
+	crdt.nClkUpdsSinceLastGC = 0 //We already cleaned rems, so GC doesn't need to clean it.
+	return
+}
+
 // Called whenever the min needs to be updated, due to either an add or a remove
-func (crdt *TopKRmvCrdt) findAndUpdateMin() {
+/*func (crdt *TopKRmvCrdt) findAndUpdateMin() {
 	minSoFar := TopKElement{}
 	for _, elem := range crdt.elems {
 		if elem.isSmaller(minSoFar) {
@@ -1014,6 +2597,155 @@ func (crdt *TopKRmvCrdt) findAndUpdateMin() {
 		}
 	}
 	crdt.smallestScore = minSoFar
+}*/
+
+// Pre: smallestScores is empty
+func (crdt *TopKRmvCrdt) findAndUpdateMin() {
+	if len(crdt.elems) <= 1500 { //Cheaper to copy to a slice and then sort.
+		elemsSlice := make([]TopKElement, len(crdt.elems))
+		i := 0
+		for _, elem := range crdt.elems {
+			elemsSlice[i] = elem
+			i++
+		}
+		slices.SortFunc(elemsSlice, func(a, b TopKElement) int {
+			if a.Score != b.Score {
+				return int(a.Score - b.Score)
+			}
+			return int(a.Id - b.Id)
+		})
+		crdt.smallestScores.copyFrom(elemsSlice)
+	} else { //Need a heap.
+		bufSize := crdt.smallestScores.Cap()
+		h := newMaxHeapTopKElem(bufSize)
+		heap.Init(h)
+		for _, elem := range crdt.elems {
+			if h.Len() < bufSize {
+				heap.Push(h, elem)
+			} else if elem.isSmaller((*h)[0]) {
+				heap.Pop(h)
+				heap.Push(h, elem)
+			}
+		}
+		minSlice := crdt.smallestScores.mins[:bufSize]
+		for i := len(minSlice) - 1; i >= 0; i-- {
+			minSlice[i] = heap.Pop(h).(TopKElement)
+		}
+		crdt.smallestScores.size = bufSize
+	}
+	crdt.nMin++
+}
+
+func (crdt *TopKRmvCrdt) findAndUpdateMaxNotTop() {
+	if len(crdt.notInTop) <= 1500 {
+		elemsSlice := make([]TopKElement, len(crdt.notInTop))
+		i := 0
+		for id, entry := range crdt.notInTop {
+			if _, has := crdt.elems[id]; !has {
+				max := MIN_ELEM
+				for _, elem := range entry.GetValues() {
+					if elem.isHigher(max) {
+						max = elem
+					}
+				}
+				elemsSlice[i] = max
+				i++
+			}
+		}
+		elemsSlice = elemsSlice[:i]
+		slices.SortFunc(elemsSlice, func(a, b TopKElement) int {
+			if a.Score != b.Score {
+				return int(b.Score - a.Score)
+			}
+			return int(b.Id - a.Id)
+		})
+		crdt.highestNotTop.copyFrom(elemsSlice)
+	} else { //Need a heap.
+		bufSize := crdt.highestNotTop.Cap()
+		h := newMinHeapTopKElem(bufSize)
+		heap.Init(h)
+		for id, entry := range crdt.notInTop {
+			if _, has := crdt.elems[id]; !has {
+				max := MIN_ELEM
+				for _, elem := range entry.GetValues() {
+					if elem.isHigher(max) {
+						max = elem
+					}
+				}
+				if h.Len() < bufSize {
+					heap.Push(h, max)
+				} else if max.isHigher((*h)[0]) {
+					heap.Pop(h)
+					heap.Push(h, max)
+				}
+			}
+		}
+		maxSlice := crdt.highestNotTop.maxs[:bufSize]
+		for i := len(maxSlice) - 1; i >= 0; i-- {
+			maxSlice[i] = heap.Pop(h).(TopKElement)
+		}
+		crdt.highestNotTop.size = bufSize
+	}
+	crdt.nMaxNotTop++
+}
+
+func (crdt *TopKRmvCrdt) findAndUpdateNotTopMin() {
+	//start := time.Now().UnixNano()
+	//fmt.Printf("[TopKRmv][findAndUpdateNotTopMin]Got called, size notInTop: %d.\n", len(crdt.notInTop))
+	if len(crdt.notInTop) <= 1500 {
+		elemsSlice := make([]TopKElement, len(crdt.notInTop))
+		i := 0
+		for id, entry := range crdt.notInTop {
+			if _, has := crdt.elems[id]; !has {
+				min := MIN_ELEM
+				for _, elem := range entry.GetValues() {
+					if elem.isHigher(min) {
+						min = elem
+					}
+				}
+				elemsSlice[i] = min
+				i++
+			}
+		}
+		elemsSlice = elemsSlice[:i]
+		slices.SortFunc(elemsSlice, func(a, b TopKElement) int {
+			if a.Score != b.Score {
+				return int(a.Score - b.Score)
+			}
+			return int(a.Id - b.Id)
+		})
+		//fmt.Printf("[TopKRmv][findAndUpdateNotTopMin]Elems for new min: %v\n", elemsSlice[:minBufferSize])
+		crdt.smallestNotTop.copyFrom(elemsSlice)
+	} else { //Need a heap.
+		bufSize := crdt.smallestNotTop.Cap()
+		h := newMaxHeapTopKElem(bufSize)
+		heap.Init(h)
+		for id, entry := range crdt.notInTop {
+			if _, has := crdt.elems[id]; !has {
+				min := MIN_ELEM
+				for _, elem := range entry.GetValues() {
+					if elem.isHigher(min) {
+						min = elem
+					}
+				}
+				if h.Len() < bufSize {
+					heap.Push(h, min)
+				} else if min.isSmaller((*h)[0]) {
+					heap.Pop(h)
+					heap.Push(h, min)
+				}
+			}
+		}
+		minSlice := crdt.smallestNotTop.mins[:bufSize]
+		for i := len(minSlice) - 1; i >= 0; i-- {
+			minSlice[i] = heap.Pop(h).(TopKElement)
+		}
+		//fmt.Printf("[TopKRmv][findAndUpdateNotTopMin]Elems for new min: %v\n", minSlice)
+		crdt.smallestNotTop.size = bufSize
+	}
+	crdt.nMinNotTop++
+	//end := time.Now().UnixNano()
+	//fmt.Printf("[TopKRmv][findAndUpdateNotTopMin]Finished in %d ms.\n", (end-start)/1000000)
 }
 
 func (crdt *TopKRmvCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err error) {
@@ -1024,24 +2756,20 @@ func (crdt *TopKRmvCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, er
 
 func (crdt *TopKRmvCrdt) Copy() (copyCRDT InversibleCRDT) {
 	newCrdt := TopKRmvCrdt{
-		CRDTVM:        crdt.CRDTVM.copy(),
-		vc:            crdt.vc.Copy(),
-		replicaID:     crdt.replicaID,
-		maxElems:      crdt.maxElems,
-		smallestScore: crdt.smallestScore,
-		elems:         make(map[int32]TopKElement),
-		rems:          make(map[int32]clocksi.Timestamp),
-		notInTop:      make(map[int32]setTopKElement),
-	}
-
-	for id, elem := range crdt.elems {
-		newCrdt.elems[id] = elem
-	}
-	for id, clk := range crdt.rems {
-		newCrdt.rems[id] = clk.Copy()
-	}
-	for id, set := range crdt.notInTop {
-		newCrdt.notInTop[id] = set.copy()
+		CRDTVM:           crdt.CRDTVM.copy(),
+		vc:               crdt.vc.Copy(),
+		maxElems:         crdt.maxElems,
+		maxNotTopElems:   crdt.maxNotTopElems,
+		smallestScores:   crdt.smallestScores.copy(),
+		elems:            tools.MapCopy(crdt.elems),
+		rems:             tools.MapCopy(crdt.rems),
+		notInTop:         tools.MapCopy(crdt.notInTop),
+		smallestNotTop:   crdt.smallestNotTop.copy(),
+		highestNotTop:    crdt.highestNotTop.copy(),
+		nUpds:            crdt.nUpds,
+		nReads:           crdt.nReads,
+		notInTopEverFull: crdt.notInTopEverFull,
+		cleanupFactor:    crdt.cleanupFactor,
 	}
 
 	return &newCrdt
@@ -1069,36 +2797,107 @@ func (crdt *TopKRmvCrdt) undoEffect(effect *Effect) {
 	case TopKRmvAddAllEffect:
 		crdt.undoAddAllEffect(&typedEffect)
 	case TopKRmvRemoveAllEffect:
-		crdt.undoRemoveAllEffect(&typedEffect)
+		crdt.undoRemoveAllEffect(typedEffect.effects)
+	case TopKRmvRemoveAllWithCleanEffect:
+		crdt.undoRemoveAllEffect(typedEffect.effects)
+		crdt.undoCleanRems(typedEffect.cleanedRems)
+	case TopKRmvRemoveWithCleanEffect:
+		crdt.undoRemoveEffect(&typedEffect.TopKRmvRemoveEffect)
+		crdt.undoCleanRems(typedEffect.cleanedRems)
 	}
 }
 
-func (crdt *TopKRmvCrdt) undoAddEffect(effect *TopKRmvAddEffect) {
-	crdt.vc.UpdateForcedPos(effect.ReplicaID, effect.oldTs)
+/*func (crdt *TopKRmvCrdt) undoAddEffect(effect *TopKRmvAddEffect) {
+	crdt.vc.UpdateForcedPos(effect.TsId.getReplicaID(), effect.oldTs)
 	//Element was added to top and there wasn't any entry for it previously on top
 	delete(crdt.elems, effect.Id)
 	//Both effects will need the old Ts.
-	/*
-		Possible cases:
-		- Add is there but with higher value. In this case, it only removes entry from notInTop
-		- Add is there with this value. In this case we would need to search for the higher value (would be better to store it in the effect). And possibly it might disapear from top...
-		- Add isn't there but it is in notInTop. Remove it from there and nothing else changes
-		I also need the old ts...
-	*/
+	//Possible cases:
+	//	- Add is there but with higher value. In this case, it only removes entry from notInTop
+	//	- Add is there with this value. In this case we would need to search for the higher value (would be better to store it in the effect). And possibly it might disapear from top...
+	//	- Add isn't there but it is in notInTop. Remove it from there and nothing else changes
+	//	I also need the old ts...
+}*/
+
+func (crdt *TopKRmvCrdt) undoAddEffect(effect *TopKRmvAddEffect) {
+	crdt.vc.UpdateForcedPos(effect.newElem.TsId.getReplicaID(), effect.oldTs)
+	//Element was added to the top and there wasn't any entry for it previously on top. Also, there was space in crdt.elems
+	delete(crdt.elems, effect.newElem.Id)
+	if effect.removedMin != MIN_ELEM {
+		crdt.smallestScores.remove(effect.removedMin)
+	}
+	//
 }
 
+//Three cases:
+//1 - Elem already existed with higher value in the topK, so this entry was added to notInTop, not updating any buffers.
+//2 - Elem didn't exist in the topK:
+//	a - That ID already existed in notInTop, we add it and potentially update highestNotTop
+//  b - That ID didn't exist in notInTop, notInTop is not full, we add and potentially update highestNotTop and smallestNotTop.
+//  c - That ID didn't exist in notInTop, notInTop is full, and we know the new ID is being added to notInTop.
+//      We remove min from smallestNotTop, update smallestNotTop and highestNotTop.
+//If we updated highestNotTop and smallestNotTop... how to do?
+//Tough.. also have to consider that maybe it didn't get added to notInTop (due to being full).
+//TIP: If it didn't get added to notInTop, it is for sure not there, as if the ID is already there, we always add.
+//Man :(
+
 func (crdt *TopKRmvCrdt) undoAddNotTopEffect(effect *TopKRmvAddNotTopEffect) {
-	crdt.vc.UpdateForcedPos(effect.ReplicaID, effect.oldTs)
+	crdt.vc.UpdateForcedPos(effect.newElem.TsId.getReplicaID(), effect.oldTs)
 	//Element was added to notInTop
-	notInTop := crdt.notInTop[effect.Id]
-	delete(notInTop, effect.TopKElement)
-	if len(notInTop) == 0 {
-		delete(crdt.notInTop, effect.Id)
+	notInTop := crdt.notInTop[effect.newElem.Id]
+	notInTop.Delete(effect.newElem)
+	if notInTop.Len() == 0 {
+		delete(crdt.notInTop, effect.newElem.Id)
+	}
+	if !effect.updateBuffs {
+		return
+	}
+
+	if crdt.notInTopEverFull {
+		crdt.smallestNotTop.remove(effect.newElem)
+	}
+	crdt.highestNotTop.remove(effect.newElem)
+
+	if effect.kickedSmallest != MIN_ELEM {
+		crdt.smallestNotTop.add(effect.kickedSmallest)
+	}
+	if effect.kickedHighest != MIN_ELEM {
+		crdt.highestNotTop.add(effect.kickedHighest)
 	}
 }
 
+/*func (crdt *TopKRmvCrdt) undoAddNotTopEffect(effect *TopKRmvAddNotTopEffect) {
+	crdt.vc.UpdateForcedPos(effect.TsId.getReplicaID(), effect.oldTs)
+	//Element was added to notInTop
+	notInTop := crdt.notInTop[effect.Id]
+	notInTop.Delete(effect.TopKElement)
+	if notInTop.Len() == 0 {
+		delete(crdt.notInTop, effect.Id)
+	}
+}*/
+
 func (crdt *TopKRmvCrdt) undoReplaceEffect(effect *TopKRmvReplaceEffect) {
-	crdt.vc.UpdateForcedPos(effect.newElem.ReplicaID, effect.oldTs)
+	crdt.vc.UpdateForcedPos(effect.newElem.TsId.getReplicaID(), effect.oldTs)
+	//New element was added to the top
+	delete(crdt.elems, effect.newElem.Id)
+	crdt.smallestScores.remove(effect.newElem)
+	crdt.smallestScores.addIfInBetween(effect.oldElem, len(crdt.elems))
+	//Old element is back to the top
+	crdt.elems[effect.oldElem.Id] = effect.oldElem
+	if notInTop, has := crdt.notInTop[effect.oldElem.Id]; has {
+		notInTop.Delete(effect.oldElem)
+		if notInTop.Len() == 0 {
+			delete(crdt.notInTop, effect.oldElem.Id)
+		}
+	}
+	if effect.updatedHighestNotTop {
+		crdt.highestNotTop.removeMax()
+	}
+
+}
+
+/*func (crdt *TopKRmvCrdt) undoReplaceEffect(effect *TopKRmvReplaceEffect) {
+	crdt.vc.UpdateForcedPos(effect.newElem.TsId.getReplicaID(), effect.oldTs)
 	//New element was added to the top
 	delete(crdt.elems, effect.newElem.Id)
 	//If there was an old element, it could had been in the top or notInTop. Regardless, it now belongs to the top
@@ -1106,14 +2905,92 @@ func (crdt *TopKRmvCrdt) undoReplaceEffect(effect *TopKRmvReplaceEffect) {
 		crdt.elems[effect.oldElem.Id] = effect.oldElem
 		//If the old element was in notInTop, remove it from there
 		if notInTop, has := crdt.notInTop[effect.oldElem.Id]; has {
-			delete(notInTop, effect.oldElem)
-			if len(notInTop) == 0 {
+			notInTop.Delete(effect.oldElem)
+			if notInTop.Len() == 0 {
 				delete(crdt.notInTop, effect.oldElem.Id)
 			}
 		}
 	}
 	//Update the min
 	crdt.smallestScore = effect.oldMin
+}*/
+
+/*
+Remove cases:
+- So many :(((((((
+*/
+func (crdt *TopKRmvCrdt) undoRemoveEffect(effect *TopKRmvRemoveEffect) {
+	if effect.previousVc == nil {
+		//There was no remove previous to this one
+		delete(crdt.rems, effect.id)
+	} else {
+		crdt.rems[effect.id] = effect.previousVc.Copy()
+	}
+
+	nReplicas := clocksi.GetNumberReplicas()
+	notTop, hasNotTop := crdt.notInTop[effect.id]
+	highestExistingNotTop := MIN_ELEM //Will be useful later to update highestNotTop and smallestNotTop
+	if !hasNotTop {
+		notTop = tools.NewSliceSet[TopKElement](nReplicas)
+		crdt.notInTop[effect.id] = notTop
+	} else {
+		for _, elem := range notTop.GetValues() {
+			if elem.isHigher(highestExistingNotTop) {
+				highestExistingNotTop = elem
+			}
+		}
+	}
+	//Add elements removed from notInTop
+	if effect.notTopRemoved != nil {
+		for _, elem := range effect.notTopRemoved.GetValues() {
+			notTop.AddNoCheck(elem)
+		}
+	}
+
+	if (!effect.remElem.isEqual(TopKElement{})) {
+		//The element was actually removed from top. So we add it back there.
+		crdt.elems[effect.id] = effect.remElem
+
+		if !effect.promotedElem.isEqual(TopKElement{}) { //Two options: a) min was promoted to top; b) another entry of remElem.Id was promoted.
+			delete(crdt.elems, effect.promotedElem.Id)
+			notTop, has := crdt.notInTop[effect.promotedElem.Id]
+			if !has {
+				notTop = tools.NewSliceSet[TopKElement](nReplicas)
+				crdt.notInTop[effect.promotedElem.Id] = notTop
+			}
+			notTop.AddNoCheck(effect.promotedElem)
+			if effect.promotedElem.Id != effect.remElem.Id { //It was min that got promoted
+				crdt.smallestScores.removeMin()
+				crdt.highestNotTop.addMax(effect.promotedElem)
+			} else {
+				crdt.smallestScores.remove(effect.promotedElem)
+			}
+		}
+
+		if hasNotTop { //ID existed in notTop but not in elems, so we remove it from the buffers.
+			crdt.highestNotTop.remove(highestExistingNotTop)
+			if crdt.notInTopEverFull {
+				crdt.smallestNotTop.remove(highestExistingNotTop)
+			}
+		} //else: !hasNotTop. In this case, remElem was removed from top, and all of its entries in notInTop were also cleared. So, nothing to update in the buffers.
+		crdt.smallestScores.addIfInBetween(effect.remElem, len(crdt.elems))
+	} else if effect.notTopRemoved != nil { //The element did not exist in crdt.elems, but did in notInTop.
+		//Check if any of the elems removed in notInTop is higher than highestExistingNotTop.
+		newHighest := highestExistingNotTop
+		for _, elem := range effect.notTopRemoved.GetValues() {
+			if elem.isHigher(newHighest) {
+				newHighest = elem
+			}
+		}
+		if newHighest != highestExistingNotTop { //In theory this could use a "removeAndAdd", but a different one in which add > remove, instead of the opposite.
+			crdt.highestNotTop.remove(highestExistingNotTop)
+			crdt.highestNotTop.add(newHighest)
+			if crdt.notInTopEverFull {
+				crdt.smallestNotTop.remove(highestExistingNotTop)
+				crdt.smallestNotTop.addIfInBetween(newHighest, len(crdt.notInTop))
+			}
+		}
+	}
 }
 
 /*
@@ -1129,7 +3006,7 @@ Variants for element removed:
   - Wasn't able to find an element to add and the removed one was the min;
   - Didn't find an element to add;
 */
-func (crdt *TopKRmvCrdt) undoRemoveEffect(effect *TopKRmvRemoveEffect) {
+/*func (crdt *TopKRmvCrdt) undoRemoveEffect(effect *TopKRmvRemoveEffect) {
 	if effect.previousVc == nil {
 		//There was no remove previous to this one
 		delete(crdt.rems, effect.id)
@@ -1137,14 +3014,15 @@ func (crdt *TopKRmvCrdt) undoRemoveEffect(effect *TopKRmvRemoveEffect) {
 		crdt.rems[effect.id] = effect.previousVc.Copy()
 	}
 
+	nReplicas := clocksi.GetNumberReplicas()
 	notTop, has := crdt.notInTop[effect.id]
 	if !has {
-		notTop = make(setTopKElement)
+		notTop = tools.NewSliceSet[TopKElement](nReplicas)
 		crdt.notInTop[effect.id] = notTop
 	}
 	//Add elements removed from notInTop
-	for elem := range effect.notTopRemoved {
-		notTop.add(elem)
+	for _, elem := range effect.notTopRemoved.GetValues() {
+		notTop.AddNoCheck(elem)
 	}
 
 	if (!effect.remElem.isEqual(TopKElement{})) {
@@ -1155,10 +3033,10 @@ func (crdt *TopKRmvCrdt) undoRemoveEffect(effect *TopKRmvRemoveEffect) {
 			//Move that element to notInTop
 			notTop, has = crdt.notInTop[effect.id]
 			if !has {
-				notTop = make(setTopKElement)
+				notTop = tools.NewSliceSet[TopKElement](nReplicas)
 				crdt.notInTop[effect.id] = notTop
 			}
-			notTop.add(inTop)
+			notTop.AddNoCheck(inTop)
 		}
 		//Add removed element back to the top
 		crdt.elems[effect.id] = effect.remElem
@@ -1167,15 +3045,15 @@ func (crdt *TopKRmvCrdt) undoRemoveEffect(effect *TopKRmvRemoveEffect) {
 			delete(crdt.elems, crdt.smallestScore.Id)
 			notTop, has = crdt.notInTop[crdt.smallestScore.Id]
 			if !has {
-				notTop = make(setTopKElement)
+				notTop = tools.NewSliceSet[TopKElement](nReplicas)
 				crdt.notInTop[crdt.smallestScore.Id] = notTop
 			}
-			notTop.add(crdt.smallestScore)
+			notTop.AddNoCheck(crdt.smallestScore)
 		}
 		//Update the min
 		crdt.smallestScore = effect.oldMin
 	}
-}
+}*/
 
 func (crdt *TopKRmvCrdt) undoAddAllEffect(effect *TopKRmvAddAllEffect) {
 	for _, eff := range effect.effects {
@@ -1183,9 +3061,15 @@ func (crdt *TopKRmvCrdt) undoAddAllEffect(effect *TopKRmvAddAllEffect) {
 	}
 }
 
-func (crdt *TopKRmvCrdt) undoRemoveAllEffect(effect *TopKRmvRemoveAllEffect) {
-	for _, eff := range effect.effects {
+func (crdt *TopKRmvCrdt) undoRemoveAllEffect(effects []*TopKRmvRemoveEffect) {
+	for _, eff := range effects {
 		crdt.undoRemoveEffect(eff)
+	}
+}
+
+func (crdt *TopKRmvCrdt) undoCleanRems(cleaned []tools.Pair[int32, clocksi.Timestamp]) {
+	for _, pair := range cleaned {
+		crdt.rems[pair.First] = pair.Second
 	}
 }
 
@@ -1259,17 +3143,20 @@ func (crdt *TopKRmvCrdt) applyRemove(op *DownstreamTopKRemove) (effect *Effect, 
 // Protobuf functions
 func (crdtOp TopKAdd) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
 	add := protobuf.GetTopkrmvop().GetAdds()[0]
-	crdtOp.TopKScore = TopKScore{Id: add.GetPlayerId(), Score: add.GetScore(), Data: &add.Data}
+	crdtOp.TopKScore = TopKScore{Id: add.GetPlayerId(), Score: add.GetScore(), Data: emptyData}
+	if add.Data != nil {
+		crdtOp.Data = tools.NewByteSlicePtr(add.Data)
+	}
 	//fmt.Println("[TopK][FromUpdateObject]Pair:", *add.PlayerId, " ", *add.Score)
 	return crdtOp
 }
 
 func (crdtOp TopKAdd) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
 	add := proto.ApbIntPair{PlayerId: pb.Int32(crdtOp.Id), Score: pb.Int32(crdtOp.Score)}
-	if crdtOp.Data != nil {
+	if crdtOp.Data != nil && crdtOp.Data != emptyData {
 		add.Data = *crdtOp.Data
 	}
-	return &proto.ApbUpdateOperation{Topkrmvop: &proto.ApbTopkRmvUpdate{Adds: []*proto.ApbIntPair{&add}}}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Topkrmvop{Topkrmvop: &proto.ApbTopkRmvUpdate{Adds: []*proto.ApbIntPair{&add}}}}
 }
 
 func (crdtOp TopKRemove) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -1278,14 +3165,19 @@ func (crdtOp TopKRemove) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (o
 }
 
 func (crdtOp TopKRemove) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	return &proto.ApbUpdateOperation{Topkrmvop: &proto.ApbTopkRmvUpdate{Rems: []int32{crdtOp.Id}}}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Topkrmvop{Topkrmvop: &proto.ApbTopkRmvUpdate{Rems: []int32{crdtOp.Id}}}}
 }
 
 func (crdtOp TopKAddAll) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
 	adds := protobuf.GetTopkrmvop().GetAdds()
 	crdtOp.Scores = make([]TopKScore, len(adds))
+	var currScore TopKScore
 	for i, add := range adds {
-		crdtOp.Scores[i] = TopKScore{Id: add.GetPlayerId(), Score: add.GetScore(), Data: &add.Data}
+		currScore = TopKScore{Id: add.GetPlayerId(), Score: add.GetScore(), Data: emptyData}
+		if add.Data != nil {
+			currScore.Data = tools.NewByteSlicePtr(add.Data)
+		}
+		crdtOp.Scores[i] = currScore
 	}
 	return crdtOp
 }
@@ -1294,12 +3186,12 @@ func (crdtOp TopKAddAll) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
 	protoAdds := make([]*proto.ApbIntPair, len(crdtOp.Scores))
 	for i, score := range crdtOp.Scores {
 		add := proto.ApbIntPair{PlayerId: pb.Int32(score.Id), Score: pb.Int32(score.Score)}
-		if score.Data != nil {
+		if score.Data != nil && score.Data != emptyData {
 			add.Data = *score.Data
 		}
 		protoAdds[i] = &add
 	}
-	return &proto.ApbUpdateOperation{Topkrmvop: &proto.ApbTopkRmvUpdate{Adds: protoAdds}}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Topkrmvop{Topkrmvop: &proto.ApbTopkRmvUpdate{Adds: protoAdds}}}
 }
 
 func (crdtOp TopKRemoveAll) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -1308,17 +3200,23 @@ func (crdtOp TopKRemoveAll) FromUpdateObject(protobuf *proto.ApbUpdateOperation)
 }
 
 func (crdtOp TopKRemoveAll) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	return &proto.ApbUpdateOperation{Topkrmvop: &proto.ApbTopkRmvUpdate{Rems: crdtOp.Ids}}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Topkrmvop{Topkrmvop: &proto.ApbTopkRmvUpdate{Rems: crdtOp.Ids}}}
 }
 
-func (crdtOp TopKInit) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
+func (crdtOp TopKRmvInit) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
 	init := protobuf.GetTopkinitop()
 	crdtOp.TopSize = init.GetTopSize()
+	crdtOp.NotTopSize = init.GetNotTopSize() //Safe even if it's undefined, as then 0 will be returned, which is properly handled.
 	return crdtOp
 }
 
-func (crdtOp TopKInit) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	return &proto.ApbUpdateOperation{Topkinitop: &proto.ApbTopKInit{TopSize: &crdtOp.TopSize}}
+func (crdtOp TopKRmvInit) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
+	initPb := &proto.ApbTopKInit{TopSize: &crdtOp.TopSize, TopType: proto.CRDTType_TOPK_RMV.Enum()}
+	if crdtOp.NotTopSize > 0 {
+		initPb.NotTopSize = &crdtOp.NotTopSize
+	}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Topkinitop{Topkinitop: initPb}}
+	//return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Topkrmvop{Topkinitop: &proto.ApbTopKInit{TopSize: &crdtOp.TopSize,TopType: proto.CRDTType_TOPK_RMV.Enum()}}
 }
 
 func (crdtState TopKValueState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
@@ -1328,19 +3226,48 @@ func (crdtState TopKValueState) FromReadResp(protobuf *proto.ApbReadObjectResp) 
 		protoScores = protobuf.GetPartread().GetTopk().GetPairs().GetValues()
 	}
 	crdtState.Scores = make([]TopKScore, len(protoScores))
+	var currScore TopKScore
 	for i, pair := range protoScores {
-		data := pair.GetData()
-		crdtState.Scores[i] = TopKScore{Id: pair.GetPlayerId(), Score: pair.GetScore(), Data: &data}
+		currScore.Id, currScore.Score, currScore.Data = pair.GetPlayerId(), pair.GetScore(), emptyData
+		if len(pair.Data) > 0 {
+			currScore.Data = tools.NewByteSlicePtr(pair.Data)
+		}
+		crdtState.Scores[i] = currScore
+		//crdtState.Scores[i] = TopKScore{Id: pair.GetPlayerId(), Score: pair.GetScore(), Data: &data}
 	}
 	return crdtState
+}
+
+func (crdtState TopAggrState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
+	return TopAggrState(protobuf.GetPartread().GetTopk().GetAggr().GetAggrResult())
+}
+
+func (crdtState TopAggrAvgState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
+	aggrProto := protobuf.GetPartread().GetTopk().GetAggr()
+	return TopAggrAvgState{Sum: aggrProto.GetAggrResult(), Count: int64(aggrProto.GetCount())}
 }
 
 func (crdtState TopKValueState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
 	protos := make([]*proto.ApbIntPair, len(crdtState.Scores))
 	for i, score := range crdtState.Scores {
-		protos[i] = &proto.ApbIntPair{PlayerId: pb.Int32(score.Id), Score: pb.Int32(score.Score), Data: *score.Data}
+		curr := proto.ApbIntPair{PlayerId: pb.Int32(score.Id), Score: pb.Int32(score.Score)}
+		if score.Data != emptyData {
+			curr.Data = *score.Data
+		}
+		protos[i] = &curr
+		//protos[i] = &proto.ApbIntPair{PlayerId: pb.Int32(score.Id), Score: pb.Int32(score.Score), Data: *score.Data}
 	}
-	return &proto.ApbReadObjectResp{Topk: &proto.ApbGetTopkResp{Values: protos}}
+	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Topk{Topk: &proto.ApbGetTopkResp{Values: protos}}}
+}
+
+func (crdtState TopAggrState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Topk{
+		Topk: &proto.ApbTopkPartialReadResp{Aggr: &proto.ApbTopKAvgAggrResp{AggrResult: pb.Int64(int64(crdtState))}}}}}}
+}
+
+func (crdtState TopAggrAvgState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Topk{
+		Topk: &proto.ApbTopkPartialReadResp{Aggr: &proto.ApbTopKAvgAggrResp{AggrResult: pb.Int64(crdtState.Sum), Count: pb.Int64(crdtState.Count)}}}}}}
 }
 
 func (args GetTopNArguments) FromPartialRead(protobuf *proto.ApbPartialReadArgs) (readArgs ReadArguments) {
@@ -1353,22 +3280,54 @@ func (args GetTopKAboveValueArguments) FromPartialRead(protobuf *proto.ApbPartia
 	return args
 }
 
+func (args TopAggregateArguments) FromPartialRead(protobuf *proto.ApbPartialReadArgs) (readArgs ReadArguments) {
+	topProto := protobuf.GetTopk().GetAggregateread()
+	args.AggregateType = AggregateType(topProto.GetAggregationtype())
+	if topProto.MinValue != nil {
+		args.MinValue = *topProto.MinValue
+	} else {
+		args.MinValue = math.MinInt32
+	}
+	if topProto.MaxValue != nil {
+		args.MaxValue = *topProto.MaxValue
+	} else {
+		args.MaxValue = math.MaxInt32
+	}
+	if topProto.Bitmask != nil {
+		args.Bitmask = IGNORE_BITMASK
+	}
+	return args
+}
+
 func (args GetTopNArguments) ToPartialRead() (protobuf *proto.ApbPartialReadArgs) {
-	return &proto.ApbPartialReadArgs{Topk: &proto.ApbTopkPartialRead{Getn: &proto.ApbTopkGetNRead{
-		Amount: pb.Int32(args.NumberEntries),
-	}}}
+	return &proto.ApbPartialReadArgs{Args: &proto.ApbPartialReadArgs_Topk{Topk: &proto.ApbTopkPartialRead{Getn: &proto.ApbTopkGetNRead{Amount: pb.Int32(args.NumberEntries)}}}}
 }
 
 func (args GetTopKAboveValueArguments) ToPartialRead() (protobuf *proto.ApbPartialReadArgs) {
-	return &proto.ApbPartialReadArgs{Topk: &proto.ApbTopkPartialRead{Getabovevalue: &proto.ApbTopkAboveValueRead{
-		MinValue: pb.Int32(args.MinValue),
-	}}}
+	return &proto.ApbPartialReadArgs{Args: &proto.ApbPartialReadArgs_Topk{Topk: &proto.ApbTopkPartialRead{Getabovevalue: &proto.ApbTopkAboveValueRead{MinValue: pb.Int32(args.MinValue)}}}}
+}
+
+func (args TopAggregateArguments) ToPartialRead() (protobuf *proto.ApbPartialReadArgs) {
+	aggrType := proto.AGGRType(args.AggregateType)
+	topProto := proto.ApbTopKAggregateRead{Aggregationtype: &aggrType}
+	if args.MinValue != math.MinInt32 {
+		topProto.MinValue = &args.MinValue
+	}
+	if args.MaxValue != math.MaxInt32 {
+		topProto.MaxValue = &args.MaxValue
+	}
+	if args.Bitmask != IGNORE_BITMASK {
+		topProto.Bitmask = &args.Bitmask
+	}
+	return &proto.ApbPartialReadArgs{Args: &proto.ApbPartialReadArgs_Topk{Topk: &proto.ApbTopkPartialRead{Aggregateread: &topProto}}}
 }
 
 func (downOp DownstreamTopKAdd) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
 	addProto := protobuf.GetTopkrmvOp().GetAdds()[0]
-	downOp.Id, downOp.Score, downOp.Ts, downOp.ReplicaID, downOp.Data = addProto.GetId(), addProto.GetScore(), addProto.GetTs(),
-		int16(addProto.GetReplicaID()), &addProto.Data
+	downOp.Id, downOp.Score, downOp.TsId, downOp.Data = addProto.GetId(), addProto.GetScore(), tsWithReplicaID(addProto.GetTsId()), emptyData
+	if addProto.Data != nil {
+		downOp.Data = tools.NewByteSlicePtr(addProto.Data)
+	}
 	return downOp
 }
 
@@ -1376,30 +3335,36 @@ func (downOp DownstreamTopKRemove) FromReplicatorObj(protobuf *proto.ProtoOpDown
 	//remProto := protobuf.GetTopkrmvOp().GetRems()[0]
 	//downOp.Id, downOp.Vc = remProto.GetId(), clocksi.ClockSiTimestamp{}.FromBytes(remProto.GetVc())
 	remProto := protobuf.GetTopkrmvOp().GetRems()
-	downOp.Id, downOp.Vc = remProto.GetIds()[0], clocksi.ClockSiTimestamp{}.FromBytes(remProto.GetVcs()[0])
+	downOp.Id, downOp.Vc = remProto.GetIds()[0], clocksi.SliceTimestamp{}.FromBytes(remProto.GetVcs()[0])
 	return downOp
 }
 
 func (downOp DownstreamTopKAdd) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	return &proto.ProtoOpDownstream{TopkrmvOp: &proto.ProtoTopKRmvDownstream{Adds: []*proto.ProtoTopKElement{{
-		Id: pb.Int32(downOp.Id), Score: pb.Int32(downOp.Score), Ts: pb.Int64(downOp.Ts),
-		ReplicaID: pb.Int32(int32(downOp.ReplicaID)), Data: *downOp.Data,
-	}}}}
+	add := &proto.ProtoTopKElement{Id: pb.Int32(downOp.Id), Score: pb.Int32(downOp.Score), TsId: pb.Uint64(uint64(downOp.TsId))}
+	if downOp.Data != nil && len(*downOp.Data) > 0 {
+		add.Data = *downOp.Data
+	}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_TopkrmvOp{TopkrmvOp: &proto.ProtoTopKRmvDownstream{Adds: []*proto.ProtoTopKElement{add}}}}
 }
 
 func (downOp DownstreamTopKRemove) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	//return &proto.ProtoOpDownstream{TopkrmvOp: &proto.ProtoTopKRmvDownstream{Rems: []*proto.ProtoTopKIdVc{&proto.ProtoTopKIdVc{
+	//return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_TopkrmvOp{TopkrmvOp: &proto.ProtoTopKRmvDownstream{Rems: []*proto.ProtoTopKIdVc{&proto.ProtoTopKIdVc{
 	//Id: pb.Int32(downOp.Id), Vc: downOp.Vc.ToBytes(),
 	//}}}}
-	return &proto.ProtoOpDownstream{TopkrmvOp: &proto.ProtoTopKRmvDownstream{Rems: &proto.ProtoTopKRmvRemove{
-		Ids: []int32{downOp.Id}, Vcs: [][]byte{downOp.Vc.ToBytes()}}}}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_TopkrmvOp{TopkrmvOp: &proto.ProtoTopKRmvDownstream{
+		Rems: &proto.ProtoTopKRmvRemove{Ids: []int32{downOp.Id}, Vcs: [][]byte{downOp.Vc.ToBytes()}}}}}
 }
 
 func (downOp DownstreamTopKAddAll) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
 	addProto := protobuf.GetTopkrmvOp().GetAdds()
 	downOp.DownstreamAdds = make([]TopKElement, len(addProto))
+	var curr TopKElement
 	for i, add := range addProto {
-		downOp.DownstreamAdds[i] = TopKElement{Id: add.GetId(), Score: add.GetScore(), Ts: add.GetTs(), ReplicaID: int16(add.GetReplicaID()), Data: &add.Data}
+		curr = TopKElement{Id: add.GetId(), Score: add.GetScore(), TsId: tsWithReplicaID(add.GetTsId()), Data: emptyData}
+		if add.Data != nil {
+			curr.Data = tools.NewByteSlicePtr(add.Data)
+		}
+		downOp.DownstreamAdds[i] = curr
 	}
 	return downOp
 }
@@ -1410,18 +3375,22 @@ func (downOp DownstreamTopKRemoveAll) FromReplicatorObj(protobuf *proto.ProtoOpD
 	downOp.DownRems = ids
 	downOp.Vc = make([]clocksi.Timestamp, len(vcs))
 	for i, vc := range vcs {
-		downOp.Vc[i] = clocksi.ClockSiTimestamp{}.FromBytes(vc)
+		downOp.Vc[i] = clocksi.SliceTimestamp{}.FromBytes(vc)
 	}
 	return downOp
 }
 
 func (downOp DownstreamTopKAddAll) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
 	protoElems := make([]*proto.ProtoTopKElement, len(downOp.DownstreamAdds))
+	var curr *proto.ProtoTopKElement
 	for i, add := range downOp.DownstreamAdds {
-		protoElems[i] = &proto.ProtoTopKElement{Id: pb.Int32(add.Id), Score: pb.Int32(add.Score), Ts: pb.Int64(add.Ts),
-			ReplicaID: pb.Int32(int32(add.ReplicaID)), Data: *add.Data}
+		curr = &proto.ProtoTopKElement{Id: pb.Int32(add.Id), Score: pb.Int32(add.Score), TsId: pb.Uint64(uint64(add.TsId))}
+		if add.Data != nil && add.Data != emptyData {
+			curr.Data = *add.Data
+		}
+		protoElems[i] = curr
 	}
-	return &proto.ProtoOpDownstream{TopkrmvOp: &proto.ProtoTopKRmvDownstream{Adds: protoElems}}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_TopkrmvOp{TopkrmvOp: &proto.ProtoTopKRmvDownstream{Adds: protoElems}}}
 }
 
 func (downOp DownstreamTopKRemoveAll) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
@@ -1429,18 +3398,22 @@ func (downOp DownstreamTopKRemoveAll) ToReplicatorObj() (protobuf *proto.ProtoOp
 	for i, vc := range downOp.Vc {
 		protoVcs[i] = vc.ToBytes()
 	}
-	return &proto.ProtoOpDownstream{TopkrmvOp: &proto.ProtoTopKRmvDownstream{Rems: &proto.ProtoTopKRmvRemove{
-		Ids: downOp.DownRems, Vcs: protoVcs}}}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_TopkrmvOp{TopkrmvOp: &proto.ProtoTopKRmvDownstream{
+		Rems: &proto.ProtoTopKRmvRemove{Ids: downOp.DownRems, Vcs: protoVcs}}}}
 }
 
-func (crdtOp TopKInit) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
+func (crdtOp TopKRmvInit) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
 	init := protobuf.GetTopkinitOp()
-	crdtOp.TopSize = init.GetTopSize()
+	crdtOp.TopSize, crdtOp.NotTopSize = init.GetTopSize(), init.GetNotTopSize() //If notTop is undefined, 0 will be returned, which we correctly handle.
 	return crdtOp
 }
 
-func (crdtOp TopKInit) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	return &proto.ProtoOpDownstream{TopkinitOp: &proto.ProtoTopKInitDownstream{TopSize: &crdtOp.TopSize}}
+func (crdtOp TopKRmvInit) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
+	initPb := &proto.ProtoTopKInitDownstream{TopSize: pb.Uint32(crdtOp.TopSize)}
+	if crdtOp.NotTopSize > 0 {
+		initPb.NotTopSize = pb.Uint32(crdtOp.NotTopSize)
+	}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_TopkinitOp{TopkinitOp: initPb}}
 }
 
 func (crdt *TopKRmvCrdt) ToProtoState() (protobuf *proto.ProtoState) {
@@ -1449,8 +3422,7 @@ func (crdt *TopKRmvCrdt) ToProtoState() (protobuf *proto.ProtoState) {
 	i, j, k := 0, 0, 0
 
 	for _, elem := range crdt.elems {
-		protoElems[i] = &proto.ProtoTopKElement{Id: &elem.Id, Score: &elem.Score,
-			Ts: &elem.Ts, ReplicaID: pb.Int32(int32(elem.ReplicaID)), Data: *elem.Data}
+		protoElems[i] = &proto.ProtoTopKElement{Id: &elem.Id, Score: &elem.Score, TsId: pb.Uint64(uint64(elem.TsId)), Data: *elem.Data}
 		i++
 	}
 	for playerId, vc := range crdt.rems {
@@ -1459,55 +3431,61 @@ func (crdt *TopKRmvCrdt) ToProtoState() (protobuf *proto.ProtoState) {
 	}
 	nElemsNotTop := 0
 	for _, elems := range crdt.notInTop {
-		nElemsNotTop += len(elems)
+		nElemsNotTop += elems.Len()
 	}
 	protoNotTop := make([]*proto.ProtoTopKElement, nElemsNotTop)
 	for _, elems := range crdt.notInTop {
-		for elem := range elems {
-			protoNotTop[k] = &proto.ProtoTopKElement{Id: &elem.Id, Score: &elem.Score,
-				Ts: &elem.Ts, ReplicaID: pb.Int32(int32(elem.ReplicaID)), Data: *elem.Data}
+		for _, elem := range elems.GetValues() {
+			protoNotTop[k] = &proto.ProtoTopKElement{Id: &elem.Id, Score: &elem.Score, TsId: pb.Uint64(uint64(elem.TsId)), Data: *elem.Data}
 			k++
 		}
 	}
-	smallest := &proto.ProtoTopKElement{Id: &crdt.smallestScore.Id, Score: &crdt.smallestScore.Score,
-		Ts: &crdt.smallestScore.Ts, ReplicaID: pb.Int32(int32(crdt.smallestScore.ReplicaID)), Data: *crdt.smallestScore.Data}
-	return &proto.ProtoState{Topkrmv: &proto.ProtoTopKRmvState{Elems: protoElems, Rems: protoRems,
-		NotTop: protoNotTop, Smallest: smallest, MaxElems: pb.Int32(int32(crdt.maxElems)), Vc: crdt.vc.ToBytes()}}
+	/*smallest := &proto.ProtoTopKElement{Id: &crdt.smallestScore.Id, Score: &crdt.smallestScore.Score,
+	TsId: pb.Uint64(uint64(crdt.smallestScore.TsId)), Data: *crdt.smallestScore.Data}*/
+	return &proto.ProtoState{State: &proto.ProtoState_Topkrmv{Topkrmv: &proto.ProtoTopKRmvState{Elems: protoElems, Rems: protoRems, NotTopSize: pb.Int32(int32(crdt.maxNotTopElems)),
+		NotTop: protoNotTop /*Smallest: smallest, */, MaxElems: pb.Int32(int32(crdt.maxElems)), Vc: crdt.vc.ToBytes()}}}
 }
 
-func (crdt *TopKRmvCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID int16) (newCRDT CRDT) {
-	topKProto := proto.GetTopkrmv()
+func (crdt *TopKRmvCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
+	topKProto, nReplicas := proto.GetTopkrmv(), int(NReplicas)
 	elems, rems, notTop := make(map[int32]TopKElement), make(map[int32]clocksi.Timestamp), make(map[int32]setTopKElement)
 
 	for _, protoElem := range topKProto.GetElems() {
 		data := protoElem.GetData()
-		elems[protoElem.GetId()] = TopKElement{Id: protoElem.GetId(), Score: protoElem.GetScore(), Ts: protoElem.GetTs(),
-			ReplicaID: int16(protoElem.GetReplicaID()), Data: &data}
+		elems[protoElem.GetId()] = TopKElement{Id: protoElem.GetId(), Score: protoElem.GetScore(), TsId: tsWithReplicaID(protoElem.GetTsId()), Data: &data}
 	}
 	for _, protoRem := range topKProto.GetRems() {
-		rems[protoRem.GetId()] = clocksi.ClockSiTimestamp{}.FromBytes(protoRem.GetVc())
+		rems[protoRem.GetId()] = clocksi.SliceTimestamp{}.FromBytes(protoRem.GetVc())
 	}
 	previousId := int32(math.MinInt32)
 	var currElemSet setTopKElement
 	for _, protoElem := range topKProto.GetNotTop() {
 		//data := protoElem.GetData()
 		if protoElem.GetId() != previousId {
-			currElemSet = make(setTopKElement)
+			currElemSet = tools.NewSliceSet[TopKElement](nReplicas)
 			previousId = protoElem.GetId()
 			notTop[previousId] = currElemSet
 		}
 		data := protoElem.GetData()
-		currElemSet.add(TopKElement{Id: protoElem.GetId(), Score: protoElem.GetScore(), Ts: protoElem.GetTs(),
-			ReplicaID: int16(protoElem.GetReplicaID()), Data: &data})
+		currElemSet.AddNoCheck(TopKElement{Id: protoElem.GetId(), Score: protoElem.GetScore(), TsId: tsWithReplicaID(protoElem.GetTsId()), Data: &data})
 	}
-	smallestProto := topKProto.GetSmallest()
+	/*smallestProto := topKProto.GetSmallest()
 	smallestData := smallestProto.GetData()
-	smallestScore := TopKElement{Id: smallestProto.GetId(), Score: smallestProto.GetScore(), Ts: smallestProto.GetTs(),
-		ReplicaID: int16(smallestProto.GetReplicaID()), Data: &smallestData}
-	vc := clocksi.ClockSiTimestamp{}.FromBytes(topKProto.GetVc())
+	smallestScore := TopKElement{Id: smallestProto.GetId(), Score: smallestProto.GetScore(), TsId: tsWithReplicaID(smallestProto.GetTsId()), Data: &smallestData}*/
+	vc := clocksi.SliceTimestamp{}.FromBytes(topKProto.GetVc())
 
-	return (&TopKRmvCrdt{elems: elems, rems: rems, notInTop: notTop, smallestScore: smallestScore,
-		maxElems: int(topKProto.GetMaxElems()), vc: vc}).initializeFromSnapshot(ts, replicaID)
+	topKCrdt := (&TopKRmvCrdt{elems: elems, rems: rems, notInTop: notTop, maxElems: int(topKProto.GetMaxElems()), maxNotTopElems: int(topKProto.GetMaxElems()) * MAX_NOT_TOP_FACTOR,
+		vc: vc, smallestScores: newMinBuffer(minBufferSize, MIN_ELEM), smallestNotTop: newMinBuffer(minBufferSize, MIN_ELEM),
+		highestNotTop: newMaxBuffer(minBufferSize, MIN_ELEM)}).initializeFromSnapshot(ts, shared.ReplicaID)
+	topKCrdt.findAndUpdateMin()
+	topKCrdt.findAndUpdateMaxNotTop()
+	if len(notTop) >= topKCrdt.maxNotTopElems {
+		topKCrdt.notInTopEverFull = true
+		topKCrdt.findAndUpdateNotTopMin()
+	}
+	return topKCrdt
+	//return (&TopKRmvCrdt{elems: elems, rems: rems, notInTop: notTop, /*smallestScore: smallestScore,*/
+	//maxElems: int(topKProto.GetMaxElems()), vc: vc}).initializeFromSnapshot(ts, shared.ReplicaID)
 }
 
 func (crdt *TopKRmvCrdt) GetCRDT() CRDT { return crdt }

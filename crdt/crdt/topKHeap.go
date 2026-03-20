@@ -4,16 +4,20 @@ package crdt
 
 import (
 	"container/heap"
+	"fmt"
 	"math"
 
 	"potionDB/crdt/clocksi"
 	"potionDB/crdt/proto"
+	"potionDB/shared/shared"
+
+	"github.com/AndreRijo/go-tools/src/tools"
 )
 
 type TopKHeapCrdt struct {
 	CRDTVM
 	vc        clocksi.Timestamp
-	replicaID int16
+	replicaID uint16
 
 	//Max number of elements that can be in TopK
 	maxElems int
@@ -33,8 +37,23 @@ type TopKHeapCrdt struct {
 
 type TopKHeapElement struct {
 	TopKElement
-	pos    int            //Position in the heap.
-	notTop setTopKElement //Other adds
+	pos    int               //Position in the heap.
+	notTop oldSetTopKElement //Other adds
+}
+
+type oldSetTopKElement map[TopKElement]struct{}
+
+// Adds an element to the set. This hides the internal representation of the set
+func (set oldSetTopKElement) add(elem TopKElement) {
+	set[elem] = struct{}{}
+}
+
+func (set oldSetTopKElement) copy() (newSet oldSetTopKElement) {
+	newSet = make(oldSetTopKElement)
+	for id, elem := range set {
+		newSet[id] = elem
+	}
+	return
 }
 
 type setTopKHeapElement struct {
@@ -42,6 +61,9 @@ type setTopKHeapElement struct {
 	max TopKElement //Highest element in this set; needed for the heap's scoring.
 	pos int         //Position in the heap
 }
+
+func (elem *TopKHeapElement) GetScore() int32 { return elem.Score }
+func (elem *TopKHeapElement) GetId() int32    { return elem.Id }
 
 func makeSetTopKHeapElement() *setTopKHeapElement {
 	return &setTopKHeapElement{set: make(map[TopKElement]struct{})}
@@ -160,16 +182,17 @@ func (h NotInTopHeap) Pop() interface{} {
 var minTopKElement = TopKElement{Id: math.MinInt32, Score: math.MinInt32} //For comparison purposes
 
 func (crdt *TopKHeapCrdt) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPK_RMV }
+func (crdt *TopKHeapCrdt) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 
-func (crdt *TopKHeapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
+func (crdt *TopKHeapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	return crdt.InitializeWithSize(startTs, replicaID, defaultTopKSize)
 }
 
-func (crdt *TopKHeapCrdt) InitializeWithSize(startTs *clocksi.Timestamp, replicaID int16, size int) (newCrdt CRDT) {
+func (crdt *TopKHeapCrdt) InitializeWithSize(startTs *clocksi.Timestamp, replicaID uint16, size int) (newCrdt CRDT) {
 	crdt = &TopKHeapCrdt{
-		CRDTVM:       (&genericInversibleCRDT{}).initialize(startTs, nil, nil, nil), //TODO
-		vc:           clocksi.NewClockSiTimestamp(),
-		replicaID:    replicaID,
+		CRDTVM:       (&genericInversibleCRDT{}).initialize(crdt),
+		vc:           clocksi.NewSliceTimestamp(),
+		replicaID:    shared.SortedReplicaID,
 		maxElems:     size,
 		elems:        make(map[int32]*TopKHeapElement),
 		elemsHeap:    TopHeap{values: make([]*TopKHeapElement, size), nEntries: new(int)},
@@ -182,8 +205,8 @@ func (crdt *TopKHeapCrdt) InitializeWithSize(startTs *clocksi.Timestamp, replica
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *TopKHeapCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID int16) (sameCRDT *TopKHeapCrdt) {
-	crdt.CRDTVM, crdt.replicaID = (&genericInversibleCRDT{}).initialize(startTs, nil, nil, nil), replicaID //TODO
+func (crdt *TopKHeapCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *TopKHeapCrdt) {
+	crdt.CRDTVM, crdt.replicaID = (&genericInversibleCRDT{}).initialize(crdt), replicaID
 	return crdt
 }
 
@@ -214,17 +237,25 @@ func (crdt *TopKHeapCrdt) Update(args UpdateArguments) (downstreamArgs Downstrea
 	//In this case, the 2nd add would then be relevant and need to be propagated.
 
 	/*
-		switch opType := args.(type) {
-		case TopKAdd:
-			downstreamArgs = crdt.getTopKAddDownstreamArgs(&opType)
-		case TopKRemove:
-			//Ensuring that the VC of the update and of the CRDT are different instances in order to avoid modifying the upd's accidentally.
-			downstreamArgs = crdt.getTopKRemoveDownstreamArgs(&opType)
-		case TopKAddAll:
-			downstreamArgs = crdt.getTopKAddAllDownstreamArgs(&opType)
-		case TopKRemoveAll:
-			downstreamArgs = crdt.getTopKRemoveAllDownstreamArgs(&opType)
-		}
+			switch opType := args.(type) {
+			case TopKAdd:
+				downstreamArgs = crdt.getTopKAddDownstreamArgs(&opType)
+			case TopKRemove:
+				//Ensuring that the VC of the update and of the CRDT are different instances in order to avoid modifying the upd's accidentally.
+				downstreamArgs = crdt.getTopKRemoveDownstreamArgs(&opType)
+			case TopKAddAll:
+				downstreamArgs = crdt.getTopKAddAllDownstreamArgs(&opType)
+			case TopKRemoveAll:
+				downstreamArgs = crdt.getTopKRemoveAllDownstreamArgs(&opType)
+		case MultiUpd:
+			multiDowns := make(MultiUpd, len(opType))
+			for i, innerUpd := range opType {
+				multiDowns[i] = crdt.Update(innerUpd)
+			}
+			return multiDowns
+		default:
+			fmt.Printf("[TopKHeap][Update]Unknown update type: %v (%T)\n", args, args)
+			}
 	*/
 	return
 }
@@ -251,6 +282,8 @@ func (crdt *TopKHeapCrdt) applyDownstream(downstreamArgs UpdateArguments) (effec
 		effect, otherDownstreamArgs = crdt.applyAddAll(&opType)
 	case DownstreamTopKRemoveAll:
 		effect, otherDownstreamArgs = crdt.applyRemoveAll(&opType)
+	default:
+		fmt.Printf("[TopKHeap][Downstream]Unsupported downstream type %v (%T)\n", downstreamArgs, downstreamArgs)
 	}
 	return
 }
@@ -259,15 +292,17 @@ func (crdt *TopKHeapCrdt) applyDownstream(downstreamArgs UpdateArguments) (effec
 // Effect addToNotTop
 func (crdt *TopKHeapCrdt) applyAdd(op *DownstreamTopKAdd) (effect *Effect, otherDownstreamArgs DownstreamArguments) {
 	//fmt.Println("Applying topK add")
+	//TODO: Effects.
 	var effectValue Effect
-	oldTs := crdt.vc.GetPos(op.ReplicaID)
+	opReplicaID, opTs := op.TsId.getReplicaID(), op.TsId.getTs()
+	oldTs := crdt.vc.GetPos(opReplicaID)
 	if op.Data == nil {
 		op.Data = &[]byte{}
 	}
 
-	crdt.vc.UpdatePos(op.ReplicaID, op.Ts)
+	crdt.vc.UpdatePos(opReplicaID, opTs)
 	remsVc, hasEntry := crdt.rems[op.Id]
-	if !hasEntry || remsVc.GetPos(op.ReplicaID) < op.Ts {
+	if !hasEntry || remsVc.GetPos(opReplicaID) < opTs {
 		elem, hasId := crdt.elems[op.Id]
 		if hasId {
 			//Check if the "new elem" is > elem. If it is, add it.
@@ -278,13 +313,13 @@ func (crdt *TopKHeapCrdt) applyAdd(op *DownstreamTopKAdd) (effect *Effect, other
 				elem.TopKElement = op.TopKElement
 				heap.Fix(crdt.elemsHeap, elem.pos) //Update position of element in the heap
 				//Different replicas, so we'll keep the old entry (as it might be relevant again depending on concurrent removes)
-				if old.ReplicaID != op.TopKElement.ReplicaID {
+				if old.TsId.getReplicaID() != opReplicaID {
 					elem.notTop.add(old)
 				}
 				crdt.sortedElems = nil
 			} else {
 				//fmt.Printf("[TOPK][ADD]Id already exists but new value is lower, number elems %d, max elems %d, min score %d\n", len(crdt.elems), crdt.maxElems, crdt.smallestScore.Score)
-				effectValue = TopKRmvAddNotTopEffect{TopKRmvAddEffect: TopKRmvAddEffect{TopKElement: op.TopKElement, oldTs: oldTs}}
+				effectValue = TopKRmvAddNotTopEffect{newElem: op.TopKElement, oldTs: oldTs}
 				//Store as it might be relevant later on
 				elem.notTop.add(op.TopKElement)
 			}
@@ -292,16 +327,16 @@ func (crdt *TopKHeapCrdt) applyAdd(op *DownstreamTopKAdd) (effect *Effect, other
 			//Check if it should belong to topK (i.e. there's space or its score is > min)
 			if len(crdt.elems) < crdt.maxElems {
 				//fmt.Printf("[TOPK][ADD]Still has space for more elements, number elems %d, max elems %d, min score %d\n", len(crdt.elems), crdt.maxElems, crdt.smallestScore.Score)
-				newEntry := &TopKHeapElement{TopKElement: op.TopKElement, notTop: make(setTopKElement)}
+				newEntry := &TopKHeapElement{TopKElement: op.TopKElement, notTop: make(oldSetTopKElement)}
 				crdt.elems[op.Id] = newEntry
 				heap.Push(crdt.elemsHeap, newEntry)
-				effectValue = TopKRmvAddEffect{TopKElement: op.TopKElement, oldTs: oldTs}
+				//effectValue = TopKRmvAddEffect{TopKElement: op.TopKElement, oldTs: oldTs}
 				crdt.sortedElems = nil
 			} else if min := crdt.elemsHeap.Peek(); op.TopKElement.isHigher(min) {
 				//fmt.Printf("[TOPK][ADD]Doesn't have space for more elements, but new is higher than smallest score. Number elems %d, max elems %d, min score %d\n", len(crdt.elems), crdt.maxElems, crdt.smallestScore.Score)
 				delete(crdt.elems, min.Id)
 				minEntry := heap.Pop(crdt.elemsHeap).(*TopKHeapElement)
-				effectValue = TopKRmvReplaceEffect{newElem: op.TopKElement, oldElem: min, oldMin: min, oldTs: oldTs}
+				//effectValue = TopKRmvReplaceEffect{newElem: op.TopKElement, oldElem: min, oldMin: min, oldTs: oldTs}
 				//Take min out of top (and store in notInTop) to give space to the new elem with higher score
 				minEntry.notTop.add(min) //Need to add the min itself to the set
 				crdt.moveToNotInTop(minEntry)
@@ -314,14 +349,14 @@ func (crdt *TopKHeapCrdt) applyAdd(op *DownstreamTopKAdd) (effect *Effect, other
 					heap.Remove(crdt.notInTopHeap, notTopEntry.pos)
 					notTopEntry = nil
 				} else {
-					newElem.notTop = make(setTopKElement)
+					newElem.notTop = make(oldSetTopKElement)
 				}
 				crdt.elems[op.Id] = newElem
 				heap.Push(crdt.elemsHeap, newElem)
 				crdt.sortedElems = nil
 			} else {
 				//fmt.Printf("[TOPK][ADD]Doesn't have space for more elements and new is smaller than smallest score. Number elems %d, max elems %d, min score %d\n", len(crdt.elems), crdt.maxElems, crdt.smallestScore.Score)
-				effectValue = TopKRmvAddNotTopEffect{TopKRmvAddEffect: TopKRmvAddEffect{TopKElement: op.TopKElement, oldTs: oldTs}}
+				effectValue = TopKRmvAddNotTopEffect{newElem: op.TopKElement, oldTs: oldTs}
 				//effectValue = TopKAddEffect{TopKElement: op.TopKElement}
 				//Add to notInTop
 				crdt.addToNotInTop(op.TopKElement)
@@ -352,7 +387,7 @@ Variants for element removed:
 */
 func (crdt *TopKHeapCrdt) applyRemove(op *DownstreamTopKRemove) (effect *Effect, otherDownstreamArgs DownstreamArguments) {
 	//Must be <= as the remove's clk is a copy without incrementing.
-	remEffect := TopKRmvRemoveEffect{id: op.Id, notTopRemoved: make(setTopKElement)}
+	remEffect := TopKRmvRemoveEffect{id: op.Id, notTopRemoved: tools.NewSliceSet[TopKElement](int(NReplicas))}
 	rems, hasRems := crdt.rems[op.Id]
 	if !hasRems {
 		remEffect.previousVc = nil
@@ -366,9 +401,9 @@ func (crdt *TopKHeapCrdt) applyRemove(op *DownstreamTopKRemove) (effect *Effect,
 	hiddenForId := crdt.notInTop[op.Id]
 	if hiddenForId != nil {
 		for elem := range hiddenForId.set {
-			if elem.Ts <= op.Vc.GetPos(elem.ReplicaID) {
+			if elem.TsId.getTs() <= op.Vc.GetPos(elem.TsId.getReplicaID()) {
 				delete(hiddenForId.set, elem)
-				remEffect.notTopRemoved.add(elem)
+				remEffect.notTopRemoved.Add(elem)
 			}
 		}
 		//Id was totally removed
@@ -387,12 +422,12 @@ func (crdt *TopKHeapCrdt) applyRemove(op *DownstreamTopKRemove) (effect *Effect,
 	if elem, hasElem := crdt.elems[op.Id]; hasElem {
 		//Do the same procedure as in "hiddenForId"
 		for otherElem := range elem.notTop {
-			if otherElem.Ts <= op.Vc.GetPos(otherElem.ReplicaID) {
+			if otherElem.TsId.getTs() <= op.Vc.GetPos(otherElem.TsId.getReplicaID()) {
 				delete(elem.notTop, otherElem)
-				remEffect.notTopRemoved.add(otherElem)
+				remEffect.notTopRemoved.Add(otherElem)
 			}
 		}
-		if elem.Ts <= op.Vc.GetPos(elem.ReplicaID) {
+		if elem.TsId.getTs() <= op.Vc.GetPos(elem.TsId.getReplicaID()) {
 			delete(crdt.elems, op.Id)
 			heap.Remove(crdt.elemsHeap, elem.pos)
 			remEffect.remElem = elem.TopKElement
@@ -498,5 +533,23 @@ func (crdt *TopKHeapCrdt) moveToNotInTop(entry *TopKHeapElement) {
 	entry = nil
 	heap.Push(crdt.notInTopHeap, notTopEntry)
 }
+
+//TODO: VM
+
+func (crdt *TopKHeapCrdt) Copy() (copyCRDT InversibleCRDT) {
+	return crdt
+}
+
+func (crdt *TopKHeapCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
+	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
+}
+
+func (crdt *TopKHeapCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+	return nil
+}
+
+func (crdt *TopKHeapCrdt) undoEffect(effect *Effect) {}
+
+func (crdt *TopKHeapCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
 
 func (crdt *TopKHeapCrdt) GetCRDT() CRDT { return crdt }

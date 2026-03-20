@@ -7,6 +7,7 @@ import (
 
 	"potionDB/crdt/clocksi"
 	"potionDB/crdt/proto"
+	"potionDB/shared/shared"
 
 	//pb "github.com/golang/protobuf/proto"
 	pb "google.golang.org/protobuf/proto"
@@ -43,35 +44,31 @@ type DisableEWEffect struct {
 	Removed UniqueSet //Contans only the uniques that were actually removed
 }
 
-func (crdt *EwFlagCrdt) GetCRDTType() proto.CRDTType { return proto.CRDTType_FLAG_EW }
-
-func (args EnableFlag) GetCRDTType() proto.CRDTType { return proto.CRDTType_FLAG_EW }
-
-func (args DisableFlag) GetCRDTType() proto.CRDTType { return proto.CRDTType_FLAG_EW }
-
-func (args DownstreamEnableFlagEW) GetCRDTType() proto.CRDTType { return proto.CRDTType_FLAG_EW }
-
+func (crdt *EwFlagCrdt) GetCRDTType() proto.CRDTType             { return proto.CRDTType_FLAG_EW }
+func (crdt *EwFlagCrdt) GetDATAType() proto.DATAType             { return proto.DATAType_DEFAULT }
+func (args EnableFlag) GetCRDTType() proto.CRDTType              { return proto.CRDTType_FLAG_EW }
+func (args EnableFlag) GetDATAType() proto.DATAType              { return proto.DATAType_DEFAULT }
+func (args DisableFlag) GetCRDTType() proto.CRDTType             { return proto.CRDTType_FLAG_EW }
+func (args DisableFlag) GetDATAType() proto.DATAType             { return proto.DATAType_DEFAULT }
+func (args DownstreamEnableFlagEW) GetCRDTType() proto.CRDTType  { return proto.CRDTType_FLAG_EW }
+func (args DownstreamEnableFlagEW) GetDATAType() proto.DATAType  { return proto.DATAType_DEFAULT }
 func (args DownstreamDisableFlagEW) GetCRDTType() proto.CRDTType { return proto.CRDTType_FLAG_EW }
+func (args DownstreamDisableFlagEW) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
+func (args DownstreamEnableFlagEW) MustReplicate() bool          { return true }
+func (args DownstreamDisableFlagEW) MustReplicate() bool         { return true }
+func (args FlagState) GetCRDTType() proto.CRDTType               { return proto.CRDTType_FLAG_EW }
+func (args FlagState) GetDATAType() proto.DATAType               { return proto.DATAType_DEFAULT }
+func (args FlagState) GetREADType() proto.READType               { return proto.READType_FULL }
 
-func (args DownstreamEnableFlagEW) MustReplicate() bool { return true }
-
-func (args DownstreamDisableFlagEW) MustReplicate() bool { return true }
-
-func (args FlagState) GetCRDTType() proto.CRDTType { return proto.CRDTType_FLAG_EW }
-
-func (args FlagState) GetREADType() proto.READType { return proto.READType_FULL }
-
-func (crdt *EwFlagCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
-	return &EwFlagCrdt{
-		CRDTVM:  (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete),
-		enables: makeUniqueSet(),
-		random:  rand.NewSource(time.Now().Unix()),
-	}
+func (crdt *EwFlagCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+	return &EwFlagCrdt{enables: makeUniqueSet(), random: rand.NewSource(time.Now().Unix())}
+	//crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
+	//return crdt
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *EwFlagCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID int16) (sameCRDT *EwFlagCrdt) {
-	crdt.CRDTVM, crdt.random = (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete),
+func (crdt *EwFlagCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *EwFlagCrdt) {
+	crdt.CRDTVM, crdt.random = (&genericInversibleCRDT{}).initialize(crdt),
 		rand.NewSource(time.Now().Unix())
 	return crdt
 }
@@ -79,7 +76,7 @@ func (crdt *EwFlagCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, repli
 func (crdt *EwFlagCrdt) IsBigCRDT() bool { return false }
 
 func (crdt *EwFlagCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
-	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+	if len(updsNotYetApplied) == 0 {
 		return crdt.GetValue()
 	}
 	//Correct value is always the one in the last update
@@ -99,16 +96,30 @@ func (crdt *EwFlagCrdt) GetValue() (state State) {
 
 func (crdt *EwFlagCrdt) Update(args UpdateArguments) (downstreamArgs DownstreamArguments) {
 	fmt.Println("[EWFlag[Update]", args)
-	switch args.(type) {
+	switch typedArgs := args.(type) {
 	case EnableFlag:
 		return DownstreamEnableFlagEW{Unique: Unique(crdt.random.Int63())}
 	case DisableFlag:
 		return DownstreamDisableFlagEW{Seen: crdt.enables.copy()}
+	case MultiUpd:
+		multiDowns := make(MultiUpd, len(typedArgs))
+		for i, innerUpd := range typedArgs {
+			multiDowns[i] = crdt.Update(innerUpd)
+		}
+		return multiDowns
+	default:
+		fmt.Printf("[EWFlag][Update]Unknown update type: %v (%T)\n", args, args)
 	}
 	return
 }
 
 func (crdt *EwFlagCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs DownstreamArguments) (otherDownstreamAgs DownstreamArguments) {
+	if multiUpd, ok := downstreamArgs.(MultiUpd); ok {
+		for _, upd := range multiUpd {
+			crdt.Downstream(updTs, upd.(DownstreamArguments))
+		}
+		return nil
+	}
 	crdt.addToHistory(&updTs, &downstreamArgs, crdt.applyDownstream(downstreamArgs))
 	return nil
 }
@@ -120,6 +131,8 @@ func (crdt *EwFlagCrdt) applyDownstream(downstreamArgs DownstreamArguments) (eff
 		return crdt.applyEnableFlag(opType)
 	case DownstreamDisableFlagEW:
 		return crdt.applyDisableFlag(opType)
+	default:
+		fmt.Printf("[EWFlag][Downstream]Unsupported downstream type: %v (%T)\n", downstreamArgs, downstreamArgs)
 	}
 	return
 }
@@ -176,7 +189,7 @@ func (crdtOp EnableFlag) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (o
 }
 
 func (crdtOp EnableFlag) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	return &proto.ApbUpdateOperation{Flagop: &proto.ApbFlagUpdate{Value: pb.Bool(true)}}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Flagop{Flagop: &proto.ApbFlagUpdate{Value: shared.TRUE_POINTER}}}
 }
 
 func (crdtOp DisableFlag) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -184,7 +197,7 @@ func (crdtOp DisableFlag) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (
 }
 
 func (crdtOp DisableFlag) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	return &proto.ApbUpdateOperation{Flagop: &proto.ApbFlagUpdate{Value: pb.Bool(false)}}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Flagop{Flagop: &proto.ApbFlagUpdate{Value: shared.FALSE_POINTER}}}
 }
 
 func (crdtState FlagState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
@@ -193,7 +206,7 @@ func (crdtState FlagState) FromReadResp(protobuf *proto.ApbReadObjectResp) (stat
 }
 
 func (crdtState FlagState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
-	return &proto.ApbReadObjectResp{Flag: &proto.ApbGetFlagResp{Value: pb.Bool(crdtState.Flag)}}
+	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Flag{Flag: &proto.ApbGetFlagResp{Value: pb.Bool(crdtState.Flag)}}}
 }
 
 func (downOp DownstreamEnableFlagEW) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
@@ -202,9 +215,8 @@ func (downOp DownstreamEnableFlagEW) FromReplicatorObj(protobuf *proto.ProtoOpDo
 }
 
 func (downOp DownstreamEnableFlagEW) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	return &proto.ProtoOpDownstream{FlagOp: &proto.ProtoFlagDownstream{EnableEW: &proto.ProtoEnableEWDownstream{
-		Unique: pb.Uint64(uint64(downOp.Unique)),
-	}}}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_FlagOp{FlagOp: &proto.ProtoFlagDownstream{
+		EnableEW: &proto.ProtoEnableEWDownstream{Unique: pb.Uint64(uint64(downOp.Unique))}}}}
 }
 
 func (downOp DownstreamDisableFlagEW) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
@@ -213,16 +225,15 @@ func (downOp DownstreamDisableFlagEW) FromReplicatorObj(protobuf *proto.ProtoOpD
 }
 
 func (downOp DownstreamDisableFlagEW) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	return &proto.ProtoOpDownstream{FlagOp: &proto.ProtoFlagDownstream{DisableEW: &proto.ProtoDisableEWDownstream{
-		SeenUniques: UniqueSetToUInt64Array(downOp.Seen),
-	}}}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_FlagOp{FlagOp: &proto.ProtoFlagDownstream{
+		DisableEW: &proto.ProtoDisableEWDownstream{SeenUniques: UniqueSetToUInt64Array(downOp.Seen)}}}}
 }
 
 func (crdt *EwFlagCrdt) ToProtoState() (protobuf *proto.ProtoState) {
-	return &proto.ProtoState{Flag: &proto.ProtoFlagState{Ew: &proto.ProtoFlagEWState{Uniques: UniqueSetToUInt64Array(crdt.enables)}}}
+	return &proto.ProtoState{State: &proto.ProtoState_Flag{Flag: &proto.ProtoFlagState{Ew: &proto.ProtoFlagEWState{Uniques: UniqueSetToUInt64Array(crdt.enables)}}}}
 }
 
-func (crdt *EwFlagCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID int16) (newCRDT CRDT) {
+func (crdt *EwFlagCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	return (&EwFlagCrdt{enables: UInt64ArrayToUniqueSet(proto.GetFlag().GetEw().GetUniques())}).initializeFromSnapshot(ts, replicaID)
 }
 

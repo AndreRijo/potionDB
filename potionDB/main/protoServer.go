@@ -49,6 +49,7 @@ var (
 	in               = bufio.NewReader(os.Stdin)
 	profileCPU       bool
 	profileMem       bool
+	profileDur       int
 	protobufTestMode int
 
 	crdtTestMap        map[uint64]crdt.CRDT
@@ -69,6 +70,7 @@ const (
 	//Keys for configs
 	PORT_KEY                     = "protoPort"
 	MEM_DEBUG                    = "memDebug"
+	MEM_DEBUG_PERIOD             = "memDebugPeriod"
 	DO_JOIN                      = "doJoin"
 	DO_TPCH_DATALOAD             = "doDataload"
 	CPU_PROFILE_KEY              = "withCPUProfile"
@@ -93,13 +95,16 @@ func main() {
 	signal.Notify(cancelChan, syscall.SIGTERM, syscall.SIGINT)
 	readyChan := make(chan bool, 1)
 	go checkSigtermUntilStartupFinishes(cancelChan, readyChan)
+	//go forceGC()
 
 	rand.Seed(time.Now().UTC().UnixNano())
 	configs := loadConfigs()
-	trash = make([]byte, configs.GetIntConfig("initialMem", 0))
+	trash = make([]byte, configs.GetIntConfig("initialMem", 0)) //TODO: Maybe can just clear this after a short while.
 	floatSize := float64(len(trash))
 	fmt.Printf("[PS]Setting an initial empty array of size %.4f GB\n", floatSize/1000000000)
 	startProfiling(configs)
+	stopProfiling(configs)
+	go debugMemory(configs)
 
 	portString := configs.GetOrDefault(PORT_KEY, "8887")
 	ports := strings.Split(portString, " ")
@@ -109,7 +114,7 @@ func main() {
 	//tmpId2, _ := strconv.ParseInt(configs.GetConfig("potionDBID"), 10, 64)
 	//id := int16((tmpId + tmpId2) % math.MaxInt16)
 	tmpId, _ := strconv.ParseInt(configs.GetConfig("potionDBID"), 10, 64)
-	id := int16(tmpId % (math.MaxInt16 * 2))
+	id := uint16(tmpId % math.MaxUint16)
 	shared.ReplicaID = id
 
 	antidote.SetVMToUse()
@@ -176,8 +181,7 @@ func main() {
 			go startListener(port, id, tm)
 		}
 	}*/
-	go debugMemory(configs)
-	stopProfiling(configs)
+	//stopProfiling(configs)
 
 	//startListener(ports[0], id, tm)
 
@@ -212,7 +216,7 @@ func main() {
 			}
 		}
 		crdts := ic.DoGetCRDTs(reads)
-		txnId, clientClk := antidote.TransactionId(1), clocksi.NewClockSiTimestamp()
+		txnId, clientClk := antidote.TransactionId(1), clocksi.NewSliceTimestamp()
 		for i, currCRDT := range crdts {
 			crdtTestMap[getHash(reads[i])] = currCRDT
 			state := currCRDT.Read(crdt.StateReadArguments{}, []crdt.UpdateArguments{})
@@ -257,6 +261,7 @@ func main() {
 	//Block so that the server does not close
 	//select {}
 	readyChan <- true //No longer need the other goroutine to look into cancelChan.
+	trash = nil       //We no longer need this block of memory, it already served its purpose.
 	fmt.Printf("[PS]Listening for shutdown signal at %s...\n", time.Now().String())
 	sig := <-cancelChan
 	fmt.Printf("[PS]Caught signal %v at %s: sending shut down signal to TM.\n", sig, time.Now().String())
@@ -275,7 +280,7 @@ func main() {
 }
 
 // Listens to new connections on ports other than the main one while PotionDB isn't ready.
-func listenBeforePotionDBStart(port string, id int16, tm *antidote.TransactionManager, sqlP *antidote.SQLProcessor, ready chan bool) {
+func listenBeforePotionDBStart(port string, id uint16, tm *antidote.TransactionManager, sqlP *antidote.SQLProcessor, ready chan bool) {
 	server, err := net.Listen("tcp", "0.0.0.0:"+strings.TrimSpace(port))
 	utilities.CheckErr(utilities.PORT_ERROR, err)
 	waitingConns := make([]net.Conn, 0, 10)
@@ -295,11 +300,11 @@ func listenBeforePotionDBStart(port string, id int16, tm *antidote.TransactionMa
 	listenToConnections(server, port, id, tm)
 }
 
-func listenToConnections(server net.Listener, port string, id int16, tm *antidote.TransactionManager) {
+func listenToConnections(server net.Listener, port string, id uint16, tm *antidote.TransactionManager) {
 	fmt.Println("PotionDB started at port", port, "with ReplicaID", id)
 }
 
-func startS2SListener(port string, id int16, tm *antidote.TransactionManager) {
+func startS2SListener(port string, id uint16, tm *antidote.TransactionManager) {
 	server, err := net.Listen("tcp", "0.0.0.0:"+strings.TrimSpace(port))
 	utilities.CheckErr(utilities.PORT_ERROR, err)
 	//Stop listening to port on shutdown
@@ -315,7 +320,7 @@ func startS2SListener(port string, id int16, tm *antidote.TransactionManager) {
 	}
 }
 
-func startListener(port string, id int16, tm *antidote.TransactionManager, connChan chan net.Conn, listenerChan chan bool, sqlP *antidote.SQLProcessor) {
+func startListener(port string, id uint16, tm *antidote.TransactionManager, connChan chan net.Conn, listenerChan chan bool, sqlP *antidote.SQLProcessor) {
 	server, err := net.Listen("tcp", "0.0.0.0:"+strings.TrimSpace(port))
 	utilities.CheckErr(utilities.PORT_ERROR, err)
 	//Stop listening to port on shutdown
@@ -360,9 +365,9 @@ func startListener(port string, id int16, tm *antidote.TransactionManager) {
 }
 */
 
-func processS2SConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID int16) {
+func processS2SConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID uint16) {
 	defer conn.Close()
-	tmChan := tm.CreateClientHandler()
+	tmChan := tm.CreateClientHandler(antidote.TM_SERVER_CLIENT)
 	var s2sChan chan antidote.TMS2SReply
 
 	for {
@@ -394,10 +399,10 @@ Note that this is the same interaction type as in antidote.
 
 conn - the TCP connection between the client and this server.
 */
-func processConnection(conn net.Conn, tm *antidote.TransactionManager, sqlP *antidote.SQLProcessor, replicaID int16) {
+func processConnection(conn net.Conn, tm *antidote.TransactionManager, sqlP *antidote.SQLProcessor, replicaID uint16) {
 	utilities.FancyDebugPrint(utilities.PROTO_PRINT, replicaID, "Accepted connection.")
 	defer conn.Close()
-	tmChan := tm.CreateClientHandler()
+	tmChan := tm.CreateClientHandler(antidote.TM_NORMAL_CLIENT)
 	//TODO: Change this to a random ID generated inside the transaction. This ID should be different from transaction to transaction
 	//The current solution can give problems in the Materializer when a commited transaction is put on hold and another transaction from the same client arrives
 	var clientId antidote.ClientId = antidote.ClientId(rand.Uint64())
@@ -851,7 +856,7 @@ func handleResetServer(tm *antidote.TransactionManager) (respProto *proto.ApbRes
 
 func handleServerConnReplicaID(protobuf *proto.ApbServerConnReplicaID, tmChan chan antidote.TransactionManagerRequest, conn net.Conn) chan antidote.TMS2SReply {
 	fmt.Printf("[PS]Got ServerConnReplicaID from %d at %s\n", protobuf.GetReplicaID(), time.Now().Format("15:04:05:000"))
-	tmChan <- createTMRequest(antidote.TMReplicaID{ReplicaID: int16(protobuf.GetReplicaID()), IP: protobuf.GetMyIP(), Buckets: protobuf.GetMyBuckets()}, 0, nil)
+	tmChan <- createTMRequest(antidote.TMReplicaID{ReplicaID: uint16(protobuf.GetReplicaID()), IP: protobuf.GetMyIP(), Buckets: protobuf.GetMyBuckets()}, 0, nil)
 	return handleServerConn(tmChan, conn)
 }
 
@@ -1242,6 +1247,7 @@ func startProfiling(configs *tools.ConfigLoader) {
 		if profileCPU {
 			file, err := os.Create(configs.GetConfig(CPU_FILE_KEY))
 			utilities.CheckErr("Failed to create CPU profile file: ", err)
+			fmt.Println("CPU profile file created at: ", file.Name())
 			pprof.StartCPUProfile(file)
 			fmt.Println("Started CPU profiling")
 		}
@@ -1266,12 +1272,13 @@ func stopProfiling(configs *tools.ConfigLoader) {
 			}
 			if profileMem {
 				file, err := os.Create(configs.GetConfig(MEM_FILE_KEY))
-				defer file.Close()
 				utilities.CheckErr("Failed to create Memory profile file: ", err)
+				defer file.Close()
+				fmt.Println("Created memory profile file at ", file.Name())
 				pprof.WriteHeapProfile(file)
 			}
 			fmt.Println("Profiles saved, closing...")
-			os.Exit(0)
+			//os.Exit(0)
 		}()
 	}
 }
@@ -1287,6 +1294,8 @@ func loadConfigs() (configs *tools.ConfigLoader) {
 	stringBuckets := flag.String("buckets", "none", "list of buckets for the server to replicate.")
 	disableRepl := flag.String("disableReplicator", "none", "if replicator should be disabled. False by default.")
 	disableLog := flag.String("disableLog", "none", "if logging of operations should be disabled. False by default.")
+	disableVM := flag.String("disableVM", "none", "if VM (Version Management) should be disabled. Mostly useful for measuring memory overhead. False by default")
+	disableGC := flag.String("disableGC", "none", "if GC (Garbage Collection) should be disabled. False by default")
 	disableReadWaiting := flag.String("disableReadWaiting", "none", "if reads should wait until the materializer's clock is >= to the read's")
 	useTC := flag.String("useTC", "none", "defines if traffic control should be applied to the connections."+
 		"If true, the IPs and latencies must be defined in the configuration file.")
@@ -1311,6 +1320,10 @@ func loadConfigs() (configs *tools.ConfigLoader) {
 	queryNumbers := flag.String("queryNumbers", "none", "list of TPC-H queries to create views for. By default views for all TPC-H queries are loaded.")
 	protoTestMode := flag.String("protoTestMode", "none", "if true, queries return a default answer in order to evaluate protobuf's performance.")
 	fastSingleRead := flag.String("fastSingleRead", "none", "if true, static reads for a single CRDT skip clock verification, thus avoiding a lock.")
+	cpuProfile := flag.String("cpuProfiling", "none", "if true, a Go log profile will be created regarding CPU usage.")
+	memoryProfile := flag.String("memProfiling", "none", "if true, a Go log profile will be created regarding memory usage.")
+	memDebug := flag.String("memDebug", "none", "if true, prints some debug info regarding memory usage. Alternatively, can also specify the interval (in ms) for printing this info.")
+	dataloadType := flag.String("dataloadType", "none", "if doing tpch dataload, whenever to use compressed (default) or raw dataload. This is mostly for debugging/testing purposes.")
 
 	flag.Parse()
 	configs = &tools.ConfigLoader{}
@@ -1377,6 +1390,12 @@ func loadConfigs() (configs *tools.ConfigLoader) {
 	if isFlagValid(*disableLog, "none") {
 		configs.ReplaceConfig("disableLog", *disableLog)
 	}
+	if isFlagValid(*disableVM, "none") {
+		configs.ReplaceConfig("disableVM", *disableVM)
+	}
+	if isFlagValid(*disableGC, "none") {
+		configs.ReplaceConfig("disableGC", *disableGC)
+	}
 	if isFlagValid(*disableReadWaiting, "none") {
 		configs.ReplaceConfig("disableReadWaiting", *disableReadWaiting)
 	}
@@ -1441,15 +1460,39 @@ func loadConfigs() (configs *tools.ConfigLoader) {
 	if isFlagValid(*fastSingleRead, "none") {
 		configs.ReplaceConfig("fastSingleRead", *fastSingleRead)
 	}
+	if isFlagValid(*cpuProfile, "none") {
+		configs.ReplaceConfig(CPU_PROFILE_KEY, *cpuProfile)
+	}
+	if isFlagValid(*memoryProfile, "none") {
+		configs.ReplaceConfig(MEM_PROFILE_KEY, *memoryProfile)
+	}
+	if isFlagValid(*memDebug, "none") {
+		if _, err := strconv.ParseInt(*memDebug, 10, 64); err == nil {
+			configs.ReplaceConfig(MEM_DEBUG_PERIOD, *memDebug)
+			configs.ReplaceConfig(MEM_DEBUG, "true")
+			fmt.Printf("[PS][LoadConfigs]Set MEM_DEBUG and MEM_DEBUG_PERIOD to %v %v.\n", configs.GetConfig(MEM_DEBUG), configs.GetConfig(MEM_DEBUG_PERIOD))
+		} else {
+			configs.ReplaceConfig(MEM_DEBUG, *memDebug)
+			fmt.Printf("[PS][LoadConfigs]Set only MEM_DEBUG: no int detected. MEM_DEBUG set to %v.\n", configs.GetConfig(MEM_DEBUG))
+		}
+	}
+	if isFlagValid(*dataloadType, "none") {
+		tpch.DataloadType = *dataloadType
+	}
 	fmt.Printf("[PS]DoDataload: %s; SF: %s; DataLoc: %s; Region: %s.\n", *doDataload, *sf, *dataLoc, *region)
 	//fmt.Println(*doDataload)
 	//fmt.Println(*sf)
 	//fmt.Println(*dataLoc)
 	//fmt.Println(*region)
-	shared.IsReplDisabled = configs.GetBoolConfig("disableReplicator", false)
-	shared.IsLogDisabled = configs.GetBoolConfig("disableLog", false)
-	shared.IsReadWaitingDisabled = configs.GetBoolConfig("disableReadWaiting", false)
+	shared.IsReplDisabled = configs.GetBoolConfig("disableReplicator", shared.IsReplDisabled)
+	shared.IsLogDisabled = configs.GetBoolConfig("disableLog", shared.IsLogDisabled)
+	shared.IsReadWaitingDisabled = configs.GetBoolConfig("disableReadWaiting", shared.IsReadWaitingDisabled)
+	shared.IsVMDisabled = configs.GetBoolConfig("disableVM", shared.IsVMDisabled)
+	shared.IsGCDisabled = configs.GetBoolConfig("disableGC", shared.IsGCDisabled)
 	protobufTestMode = configs.GetIntConfig("protoTestMode", 0)
+
+	fmt.Printf("[PS]Disables: Repl: %v, Log: %v, ReadW: %v, VM: %v, GC: %v\n", shared.IsReplDisabled, shared.IsLogDisabled,
+		shared.IsReadWaitingDisabled, shared.IsVMDisabled, shared.IsGCDisabled)
 
 	return
 }
@@ -1472,6 +1515,20 @@ func handleTC(configs *tools.ConfigLoader) {
 			configs.GetStringSliceConfig("tcLatency", "10 10 10 10 10"))
 		tc.FireTcCommands()
 	}
+}
+
+func forceGC() {
+	fmt.Printf("[PS][WARNING]Forced GC is on!!!\n")
+	go func() {
+		var start, end int64
+		for {
+			time.Sleep(30 * time.Second)
+			start = time.Now().UnixNano()
+			runtime.GC()
+			end = time.Now().UnixNano()
+			fmt.Printf("[PS]Forced GC; waiting another 30s. GC took %d ms\n", (end-start)/int64(time.Millisecond))
+		}
+	}()
 }
 
 /*
@@ -1515,10 +1572,13 @@ func ignore(any interface{}) {
 }
 
 func debugMemory(configs *tools.ConfigLoader) {
-	shouldDebug, err := false, error(nil)
+	shouldDebug, err, sleepTime := false, error(nil), 10000
 	if debugMem, has := configs.GetAndHasConfig(MEM_DEBUG); has {
 		shouldDebug, err = strconv.ParseBool(debugMem)
+		sleepTime = configs.GetIntConfig(MEM_DEBUG_PERIOD, sleepTime)
+
 	}
+	fmt.Printf("[PS][DebugMemory]Values: MEM_DEBUG: %v; MEM_DEBUG_PERIOD: %v.\n", shouldDebug, sleepTime)
 	if err != nil || !shouldDebug {
 		return
 	}
@@ -1548,23 +1608,41 @@ func debugMemory(configs *tools.ConfigLoader) {
 			}
 		*/
 
-		time.Sleep(10000 * time.Millisecond)
+		time.Sleep(time.Duration(sleepTime) * time.Millisecond)
 	}
 }
 
 func printMemStats(memStats *runtime.MemStats, maxAlloc uint64) {
 	runtime.ReadMemStats(memStats)
 	const MB = 1048576
-	fmt.Printf("Total mem stolen from OS: %d MB\n", memStats.Sys/MB)
+	/*fmt.Printf("Total mem stolen from OS: %d MB\n", memStats.Sys/MB)
 	if maxAlloc != 0 {
+		maxAlloc = tools.Max(maxAlloc, memStats.Alloc)
 		fmt.Printf("Max alloced: %d MB\n", maxAlloc/MB)
 	}
 	fmt.Printf("Currently alloced: %d MB\n", memStats.Alloc/MB)
 	fmt.Printf("Mem that could be returned to OS: %d MB\n", (memStats.HeapIdle-memStats.HeapReleased)/MB)
+	fmt.Printf("Heap stats: heap use %dMB; heap alloc %dMB; heap alloced but not used: %dMB; alloc %dMB; heap idle %dMB\n",
+		memStats.HeapInuse/MB, memStats.HeapAlloc/MB, (memStats.HeapInuse-memStats.HeapAlloc)/MB, memStats.Alloc/MB, memStats.HeapIdle/MB)
 	fmt.Printf("Number of objs still malloced: %d\n", memStats.HeapObjects)
 	fmt.Printf("Largest heap size: %d MB\n", memStats.HeapSys/MB)
 	fmt.Printf("Stack size stolen from OS: %d MB\n", memStats.StackSys/MB)
 	fmt.Printf("Stack size in use: %d MB\n", memStats.StackInuse/MB)
+	fmt.Printf("Number of goroutines: %d\n", runtime.NumGoroutine())
+	fmt.Printf("Number of GC cycles: %d\n", memStats.NumGC)
+	fmt.Println()
+	*/
+	if maxAlloc != 0 {
+		maxAlloc = tools.Max(maxAlloc, memStats.Alloc)
+		fmt.Printf("Curr/max/requested mem: %d/%d/%d MB\n", memStats.Alloc/MB, maxAlloc/MB, memStats.Sys/MB)
+	} else {
+		fmt.Printf("Curr/requested mem: %d/%d MB\n", memStats.Alloc/MB, memStats.Sys/MB)
+	}
+	fmt.Printf("Mem that could be returned to OS: %d MB\n", (memStats.HeapIdle-memStats.HeapReleased)/MB)
+	fmt.Printf("Heap use/alloc: %d/%dMB; heap alloced unused: %dMB; heap idle %dMB\n",
+		memStats.HeapInuse/MB, memStats.HeapAlloc/MB, (memStats.HeapInuse-memStats.HeapAlloc)/MB, memStats.HeapIdle/MB)
+	fmt.Printf("Number of objs still malloced: %d. \t Largest heap size: %d MB\n", memStats.HeapObjects, memStats.HeapSys/MB)
+	fmt.Printf("Stack size stolen from OS: %d MB. \t Stack size in use: %d MB\n", memStats.StackSys/MB, memStats.StackInuse/MB)
 	fmt.Printf("Number of goroutines: %d\n", runtime.NumGoroutine())
 	fmt.Printf("Number of GC cycles: %d\n", memStats.NumGC)
 	fmt.Println()
@@ -1577,7 +1655,9 @@ func getHash(keyParams crdt.KeyParams) uint64 {
 func checkSigtermUntilStartupFinishes(cancelChan chan os.Signal, readyChan chan bool) {
 	select {
 	case <-cancelChan:
-		fmt.Println("[PS]Received SIGTERM before startup finished. Shutting down forcefully.")
+		fmt.Println("[PS]Received SIGTERM before startup finished. Shutting down forcefully after a brief delay.")
+		//Wait a bit for possible profiling or similars
+		time.Sleep(200 * time.Millisecond)
 		os.Exit(1)
 	case <-readyChan: //Nothing, just finish goroutine.
 

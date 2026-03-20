@@ -15,6 +15,7 @@ import (
 	"potionDB/potionDB/utilities"
 
 	//pb "github.com/golang/protobuf/proto"
+
 	"github.com/streadway/amqp"
 	pb "google.golang.org/protobuf/proto"
 )
@@ -25,24 +26,37 @@ import (
 //TODO: I shouldn't mix Publish and Consume on the same connection, according to this: https://godoc.org/github.com/streadway/amqp
 
 type RemoteConn struct {
-	conn          *amqp.Connection
-	sendCh        *amqp.Channel
-	recCh         <-chan amqp.Delivery
-	listenerChan  chan ReplicatorMsg
-	replicaID     int16  //Replica ID of the server, not of the connection itself.
-	replicaString string //Used for rabbitMQ headers in order to signal from who the msg is
+	conn            *amqp.Connection
+	sendCh          *amqp.Channel
+	recCh           <-chan amqp.Delivery
+	listenerChan    chan ReplicatorMsg //Channel to forward the received txns/msgs to Replicator
+	replicaID       uint16             //Replica ID of the server, not of the connection itself.
+	connID          uint16             //Uniquely identifies this connection. This should not be confused with the connected replica's replicaID
+	allBuckets      bool               //True if the replica's buckets has the wildcard '*' (i.e., replicates every bucket)
+	connEstablished bool
+	replicaString   string //Used for rabbitMQ headers in order to signal from who the msg is
 	//holdOperations   map[int16]*HoldOperations
 	HoldTxn
-	nBucketsToListen int
+	nBucketsToListen int32
 	buckets          map[string]struct{}
-	connID           int16 //Uniquely identifies this connection. This should not be confused with the connected replica's replicaID
 	txnCount         int32 //Used to uniquely identify the transactions when sending. It does not match TxnId and overflows are OK.
 	debugCount       int32
-	allBuckets       bool        //True if the replica's buckets has the wildcard '*' (i.e., replicates every bucket)
-	workChan         chan RCWork //Channel to send requests of marshalling.
+	workChan         chan RCWork //Channel to send marshalling requests.
 	//SendMsgLock      NillMutex   //sync.Mutex
-	sendHoldCh      chan HoldSendMsg //Channel to hold messages until the connection to RabbitMQ is established
-	connEstablished bool
+	sendHoldCh chan HoldSendMsg //Channel to hold messages until the connection to RabbitMQ is established
+
+	//New vars added
+	replReqChan chan RCWork //Channel to receive replication requests from the Replicator.
+}
+
+type GroupTxnsWork struct {
+	txns          []RemoteTxn
+	txnCountStart int32
+}
+
+type IndividualTxnsWork struct {
+	txns          []RemoteTxn
+	txnCountStart int
 }
 
 /*type NillMutex struct{}
@@ -61,8 +75,8 @@ func (m NillMutex) Unlock() {}*/
 type HoldTxn struct {
 	onHold    []ReplicatorMsg //May receive up to 1 RemoteTxn/Group per bucket
 	txnID     int32
-	nReceived int
 	isGroup   bool
+	nReceived int
 }
 
 type HoldSendMsg struct {
@@ -108,7 +122,7 @@ var (
 	basePrefix, baseVHost string
 )
 
-func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16, connID int16, isSelfConn bool, workChan chan RCWork) (remote *RemoteConn) {
+func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID uint16, connID uint16, isSelfConn bool, workChan chan RCWork) (remote *RemoteConn) {
 	remote = createRemoteConnStructHelper(ip, bucketsToListen, replicaID, connID, isSelfConn, workChan)
 	prefix := basePrefix + ":" + basePrefix + "@"
 	link := protocol + prefix + ip + "/" + baseVHost
@@ -117,7 +131,7 @@ func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID int16
 	return
 }
 
-func createRemoteConnStructHelper(ip string, bucketsToListen []string, replicaID int16, connID int16, isSelfConn bool, workChan chan RCWork) (remote *RemoteConn) {
+func createRemoteConnStructHelper(ip string, bucketsToListen []string, replicaID uint16, connID uint16, isSelfConn bool, workChan chan RCWork) (remote *RemoteConn) {
 	allBuckets := false
 	//conn, err := amqp.Dial(protocol + prefix + ip)
 	bucketsMap := make(map[string]struct{})
@@ -132,18 +146,19 @@ func createRemoteConnStructHelper(ip string, bucketsToListen []string, replicaID
 		replicaID:        replicaID,
 		replicaString:    fmt.Sprint(replicaID),
 		HoldTxn:          HoldTxn{onHold: make([]ReplicatorMsg, len(bucketsToListen))},
-		nBucketsToListen: len(bucketsToListen),
+		nBucketsToListen: int32(len(bucketsToListen)),
 		buckets:          bucketsMap,
 		connID:           connID,
 		allBuckets:       allBuckets,
 		workChan:         workChan,
 		sendHoldCh:       make(chan HoldSendMsg, 100),
 		connEstablished:  false,
+		replReqChan:      make(chan RCWork, 100),
 	}
 }
 
 // Only returns after the connection is established
-func CreateRemoteConnStructWithWait(ip string, bucketsToListen []string, replicaID int16, connID int16, isSelfConn bool, workChan chan RCWork) (remote *RemoteConn) {
+func CreateRemoteConnStructWithWait(ip string, bucketsToListen []string, replicaID uint16, connID uint16, isSelfConn bool, workChan chan RCWork) (remote *RemoteConn) {
 	remote = createRemoteConnStructHelper(ip, bucketsToListen, replicaID, connID, isSelfConn, workChan)
 	prefix := basePrefix + ":" + basePrefix + "@"
 	link := protocol + prefix + ip + "/" + baseVHost
@@ -155,7 +170,7 @@ func (remote *RemoteConn) connectToRabbitMQ(link, ip string, isSelfConn, checkHo
 	timeString := time.Now().Format("15:04:05.000")
 	fmt.Printf("[RC][%s]Connecting to %s\n", timeString, link)
 	conn, err := amqp.DialConfig(link, amqp.Config{Dial: scalateTimeout})
-	nAttempts, nSleepTime := 0, 50+time.Millisecond
+	nAttempts, nSleepTime := 0, 50*time.Millisecond
 	for err != nil { //It actually managed to connect but RabbitMQ throw an error. Try again quickly. However, given this always happens to local, also add a small delay each time.
 		timeString = time.Now().Format("15:04:05.000")
 		nAttempts++
@@ -175,6 +190,7 @@ func (remote *RemoteConn) connectToRabbitMQ(link, ip string, isSelfConn, checkHo
 	if checkHold {
 		remote.handleHoldSendMsgs()
 	}
+	go remote.handleReplicatorReqs()
 }
 
 func (remote *RemoteConn) finishInitialization(isSelfConn bool, ip string) {
@@ -389,7 +405,7 @@ func (remote *RemoteConn) finishInitialization(isSelfConn bool, ip string) {
 }*/
 
 func scalateTimeout(network, addr string) (conn net.Conn, err error) {
-	//Also control the timeout locally due to the localhost case which returns immediatell
+	//Also control the timeout locally due to the localhost case which returns immediatelly
 	nextTimeout := 100 * time.Millisecond
 	lastAttempt := time.Now().UnixNano()
 	timeSincePrint := int64(0)
@@ -417,8 +433,8 @@ func scalateTimeout(network, addr string) (conn net.Conn, err error) {
 			} else {
 				nextTimeout += (nextTimeout / 4)
 			}
-			if timeSincePrint > 1500 {
-				fmt.Printf("[RC][ScalateTimeout function]Failed to connect to %s already %d times. Still retrying to connect...\n", addr, nAttempts)
+			if timeSincePrint > 5000 {
+				fmt.Printf("[RC][ScalateTimeout function]Failed to connect to %s %d times. Retrying...\n", addr, nAttempts)
 				timeSincePrint = 0
 			}
 			//fmt.Println("[RC][ScalateTimeout function]Failed to connect to", addr, ". Retrying to connect...")
@@ -462,6 +478,50 @@ func (remote *RemoteConn) handleHoldSendMsgs() {
 type groupReplicateInfo struct {
 	bucketOps map[string][]map[int][]crdt.UpdateObjectParams
 
+}*/
+
+//This change was incorporated directly into the new remoteConnection.
+/*func (remote *RemoteConn) SendGroupTxnNew(txns []RemoteTxn) {
+	work := GroupTxnsWork{txns: txns, txnCountStart: remote.txnCount}
+	remote.txnCount += int32(len(txns))
+	remote.replReqChan <- work
+}
+
+func (remote *RemoteConn) SendIndividualIndexNew(txns []RemoteTxn) {
+	work := IndividualTxnsWork{txns: txns, txnCountStart: int(remote.txnCount)}
+	remote.txnCount += int32(len(txns))
+	remote.replReqChan <- work
+}
+
+// Should not be called externally
+func (remote *RemoteConn) handleReplicatorReqs() {
+	nRoutines := tools.Max(2, tools.Min(10, runtime.NumCPU()/16))
+	for i := 0; i < nRoutines; i++ {
+		go remote.handleReplicatorReqsRoutine()
+	}
+}
+
+func (remote *RemoteConn) handleReplicatorReqsRoutine() {
+	for req := range remote.replReqChan {
+		switch typedReq := req.(type) {
+		case GroupTxnsWork:
+			remote.PrepareGroupTxn(typedReq)
+		case IndividualTxnsWork:
+			remote.PrepareTxns(typedReq)
+		}
+	}
+}
+
+// Just for signature.
+func (gt GroupTxnsWork) DoWork(replicaID uint16)      {}
+func (it IndividualTxnsWork) DoWork(replicaID uint16) {}
+
+func (remote *RemoteConn) PrepareGroupTxn(req GroupTxnsWork) {
+	currCount, txns := req.txnCountStart, req.txns
+	for i := range txns {
+		txns[i].TxnID = currCount
+		currCount++
+	}
 }*/
 
 func (remote *RemoteConn) SendGroupTxn(txns []RemoteTxn) {
@@ -666,7 +726,7 @@ func (remote *RemoteConn) SendTxn(txn RemoteTxn) {
 // Idea: can send any message through a special "big data" interface
 // On the first message, we also include the total size of the protobuf
 // The idea is that the client, after receiving the first big message, he can keep track of how much more he has received
-// So after first msg, wait for the next ones. Make some kind of cache perserver/church.
+// So after first msg, wait for the next ones. Make some kind of cache per server/church.
 func (remote *RemoteConn) sendMsg(key string, data []byte) {
 	//start := time.Now()
 	if len(data) <= MAX_MSG_SIZE {
@@ -760,6 +820,30 @@ func (remote *RemoteConn) txnToBuckets(txn RemoteTxn) (bucketOps map[string]map[
 	}
 	return
 }
+
+//This (unfinished) change was incorporated directly into the redesigned remoteConnection
+/*func (remote *RemoteConn) txnsToBuckets(txns []RemoteTxn) {
+	if remote.allBuckets { //We don't know which buckets we have.
+
+	} else {
+		var txnBuckets tools.CommonMap[string, tools.SliceWithCounter[RemoteTxn]]
+		if len(remote.buckets) <= 10 {
+			txnBuckets = tools.NewSliceMapPointer[string, tools.SliceWithCounter[RemoteTxn]](len(remote.buckets))
+		} else {
+			txnBuckets = tools.NewGoMapWithSize[string, tools.SliceWithCounter[RemoteTxn]](len(remote.buckets))
+		}
+		for bkt := range remote.buckets {
+			txnBuckets.Set(bkt, tools.NewSliceWithCounter[RemoteTxn](len(txns)))
+		}
+		var currRemoteTxn RemoteTxn
+		for _, txn := range txns {
+			currRemoteTxn = RemoteTxn{}
+			for _, upd := range txn.Upds {
+
+			}
+		}
+	}
+}*/
 
 /*
 func (remote *RemoteConn) SendPartTxn(request *NewReplicatorRequest) {
@@ -1060,7 +1144,7 @@ func (remote *RemoteConn) handleReceivedStableClock(data []byte) {
 		utilities.FancyErrPrint(utilities.REMOTE_PRINT, remote.replicaID, "Failed to decode bytes of received stableClock. Error:", err)
 	}
 	clkReq := protoToStableClock(protobuf)
-	utilities.FancyInfoPrint(utilities.REMOTE_PRINT, remote.replicaID, "Received remote stableClock:", *clkReq)
+	utilities.FancyInfoPrint(utilities.REMOTE_PRINT, remote.replicaID, "Received remote stableClock:", clkReq)
 	if clkReq.SenderID == remote.replicaID {
 		fmt.Println("[RC]Received clock from self - is localrabbitmq correctly configured?")
 		utilities.FancyInfoPrint(utilities.REMOTE_PRINT, remote.replicaID, "Ignored received stableClock as it was sent by myself.")
@@ -1231,7 +1315,7 @@ func (remote *RemoteConn) handleReceivedJoinTopic(msgType string, data []byte) {
 func (remote *RemoteConn) handleRemoteID(data []byte) {
 	protobuf := &proto.ProtoRemoteID{}
 	remote.decodeProtobuf(protobuf, data, "Failed to decode bytes of received protoRemoteID. Error:")
-	senderID := int16(protobuf.GetReplicaID())
+	senderID := uint16(protobuf.GetReplicaID())
 	fmt.Println("[RC]Join msg is a remoteID. RemoteID from:", senderID, remote.connID, "at", time.Now().Format("15:04:05.000"))
 	remote.listenerChan <- &RemoteID{SenderID: senderID, Buckets: protobuf.GetMyBuckets(), IP: protobuf.GetMyIP()}
 }
@@ -1253,7 +1337,7 @@ func (remote *RemoteConn) handleJoin(data []byte) {
 	commonBkts = commonBkts[:nCommon]
 	if len(commonBkts) > 0 {
 		//fmt.Println("RemoteConnID:", remote.connID)
-		remote.listenerChan <- &Join{SenderID: int16(senderID), ReplyID: remote.connID, CommonBkts: commonBkts, ReqIP: ip}
+		remote.listenerChan <- &Join{SenderID: senderID, ReplyID: remote.connID, CommonBkts: commonBkts, ReqIP: ip}
 	} else {
 		//TODO: Ask group to send empty
 	}
@@ -1308,6 +1392,6 @@ func (remote *RemoteConn) checkProtoError(err error, msg pb.Message, upds map[in
 		fmt.Println("[RC]Error creating ProtoReplicateTxn.")
 		fmt.Printf("%+v\n", typedProto)
 		fmt.Println(upds)
-		fmt.Println("[RC]Timestamp:", (clocksi.ClockSiTimestamp{}.FromBytes(typedProto.GetTimestamp())).ToSortedString())
+		fmt.Println("[RC]Timestamp:", (clocksi.SliceTimestamp{}.FromBytes(typedProto.GetTimestamp())).ToSortedString())
 	}
 }

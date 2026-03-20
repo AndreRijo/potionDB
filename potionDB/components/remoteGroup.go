@@ -2,13 +2,16 @@ package components
 
 import (
 	fmt "fmt"
+	"math"
 	"os"
+	"runtime"
+	"time"
 
 	"potionDB/crdt/clocksi"
-	"potionDB/crdt/crdt"
 	"potionDB/potionDB/utilities"
 
 	//pb "github.com/golang/protobuf/proto"
+	"github.com/AndreRijo/go-tools/src/tools"
 	pb "google.golang.org/protobuf/proto"
 )
 
@@ -19,9 +22,9 @@ type RemoteGroup struct {
 	ourConn   *RemoteConn        //connection to this replica's/datacenter's RabbitMQ instance
 	conns     []*RemoteConn      //groups to listen msgs from (includes ourConn)
 	groupChan chan ReplicatorMsg //Groups requests sent by each remoteConnection.
-	replicaID int16              //For msgs purposes
-	nReplicas int16              //This counter is incremented as soon as a connection is attempted to be established. Helps with uniquely identifying the connections.
-	knownIPs  map[string]int16   //Used to verify if a received join corresponds to an already known replica or not. Stores the position in conns of each replica.
+	replicaID uint16             //For msgs purposes
+	nReplicas uint16             //This counter is incremented as soon as a connection is attempted to be established. Helps with uniquely identifying the connections.
+	knownIPs  map[string]uint16  //Used to verify if a received join corresponds to an already known replica or not. Stores the position in conns of each replica.
 	workChan  chan RCWork
 }
 
@@ -32,13 +35,10 @@ type GroupOrErr struct {
 }
 
 type RCWork interface {
-	DoWork(replicaID int16)
+	DoWork(replicaID uint16)
 }
 
-type MarshallWork struct {
-	/*Bucket string
-	Upds   map[int][]crdt.UpdateObjectParams
-	ReplyChan */
+/*type MarshallWork struct {
 	BucketOps map[string]map[int][]crdt.UpdateObjectParams
 	Txn       RemoteTxn
 	ReplyChan chan MarshallWorkReply
@@ -54,6 +54,13 @@ type GroupMarshallWork struct {
 	Txns      []RemoteTxn
 	BktTxns   []RemoteTxn
 	ReplyChan chan PairKeyBytes //Actually stores bucket, data
+}*/
+
+type ReplMarshallWork struct {
+	Bucket    string
+	Txn       RemoteTxn
+	ReplyChan chan PairKeyBytes //Pair of Key (bucket), data (proto bytes)
+	DebugChan chan any          //TODO: Comment.
 }
 
 const (
@@ -64,7 +71,7 @@ var othersIPList []string
 
 //docker run -d --hostname RMQ1 --name rabbitmq1 -p 5672:5672 rabbitmq:latest
 
-func CreateRemoteGroupStruct(bucketsToListen []string, replicaID int16) (group *RemoteGroup) {
+func CreateRemoteGroupStruct(bucketsToListen []string, replicaID uint16) (group *RemoteGroup) {
 	//myInstanceIP := tools.SharedConfig.GetOrDefault("localRabbitMQAddress", "localhost:5672")
 	//othersIPList := strings.Split(tools.SharedConfig.GetConfig("remoteRabbitMQAddresses"), " ")
 	if len(othersIPList) == 1 && len(othersIPList[0]) < 2 {
@@ -72,19 +79,18 @@ func CreateRemoteGroupStruct(bucketsToListen []string, replicaID int16) (group *
 	}
 	fmt.Println("[RG]Remote conns:", othersIPList, "(size:", len(othersIPList), ")")
 
-	group = &RemoteGroup{conns: make([]*RemoteConn, len(othersIPList)), nReplicas: int16(len(othersIPList)), workChan: make(chan RCWork, 100),
-		groupChan: make(chan ReplicatorMsg, defaultListenerSize*len(othersIPList)), replicaID: replicaID, knownIPs: make(map[string]int16)}
+	group = &RemoteGroup{conns: make([]*RemoteConn, len(othersIPList)), nReplicas: uint16(len(othersIPList)), workChan: make(chan RCWork, 100),
+		groupChan: make(chan ReplicatorMsg, defaultListenerSize*len(othersIPList)), replicaID: replicaID, knownIPs: make(map[string]uint16)}
 
 	fmt.Printf("[RG]Self ip: %s. Remote ips: %v\n", localRabbitMQIP, othersIPList)
-	group.ourConn = CreateRemoteConnStruct(localRabbitMQIP, bucketsToListen, replicaID, -1, true, group.workChan)
+	group.ourConn = CreateRemoteConnStruct(localRabbitMQIP, bucketsToListen, replicaID, math.MaxUint16, true, group.workChan)
 
 	for i, ip := range othersIPList {
-		group.conns[i] = CreateRemoteConnStruct(ip, bucketsToListen, replicaID, int16(i), false, group.workChan)
+		group.conns[i] = CreateRemoteConnStruct(ip, bucketsToListen, replicaID, uint16(i), false, group.workChan)
 	}
 
 	group.prepareMsgListener()
 	group.prepareWorkerRoutines()
-	//TODO: Update other files to be aware of the connection not being established yet (maybe nothing to do?
 	return
 }
 
@@ -144,7 +150,7 @@ func connectToIp(ip string, index int, bucketsToListen []string, replicaID int16
 }*/
 
 // Adds a replica if it isn't already known - a joining replica might be already known e.g. when two new replicas start at the same time, aware of each other.
-func (group *RemoteGroup) AddReplica(ip string, bucketsToListen []string, joiningReplicaID int16) (connID int16) {
+func (group *RemoteGroup) AddReplica(ip string, bucketsToListen []string, joiningReplicaID uint16) (connID uint16) {
 	if id, has := group.knownIPs[ip]; has {
 		fmt.Println("Didn't add replica as it is already known.", ip)
 		//Already known replica, nothing to do
@@ -173,16 +179,16 @@ func (group *RemoteGroup) SendPartTxn(request *NewReplicatorRequest) {
 }
 */
 
-func (group *RemoteGroup) SendGroupTxn(txns []RemoteTxn) {
+/*func (group *RemoteGroup) SendGroupTxn(txns []RemoteTxn) {
 	group.ourConn.SendGroupTxn(txns)
 }
 
-/*func (group *RemoteGroup) SendTxn(txn RemoteTxn) {
-	group.ourConn.SendTxn(txn)
-}*/
-
 func (group *RemoteGroup) SendTxnsIndividually(txns []RemoteTxn) {
 	group.ourConn.SendTxnsIndividually(txns)
+}*/
+
+func (group *RemoteGroup) SendTxn(txn RemoteTxn) {
+	group.ourConn.SendTxn(txn)
 }
 
 func (group *RemoteGroup) SendStableClk(ts int64) {
@@ -222,7 +228,7 @@ func (group *RemoteGroup) sendReplicaID(buckets []string, ip string) {
 	}
 }
 
-func (group *RemoteGroup) SendJoin(buckets []string, replicaID int16) {
+func (group *RemoteGroup) SendJoin(buckets []string, replicaID uint16) {
 	//Same msg for everyone, so we prepare it here
 	protobuf := createProtoJoin(buckets, replicaID, localRabbitMQIP)
 	data, err := pb.Marshal(protobuf)
@@ -235,7 +241,7 @@ func (group *RemoteGroup) SendJoin(buckets []string, replicaID int16) {
 	}
 }
 
-func (group *RemoteGroup) SendReplyJoin(req ReplyJoin, replicaTo int16) {
+func (group *RemoteGroup) SendReplyJoin(req ReplyJoin, replicaTo uint16) {
 	group.conns[replicaTo].SendReplyJoin(req)
 }
 
@@ -248,12 +254,18 @@ func (group *RemoteGroup) SendReplyBucket(req ReplyBucket, replicaToIP string) {
 	group.conns[group.knownIPs[replicaToIP]].SendReplyBucket(req)
 }
 
-func (group *RemoteGroup) SendReplyEmpty(replicaTo int16) {
+func (group *RemoteGroup) SendReplyEmpty(replicaTo uint16) {
 	group.conns[replicaTo].SendReplyEmpty()
 }
 
 func (group *RemoteGroup) prepareWorkerRoutines() {
-	for i := 0; i < minTxnsToGroup; i++ {
+	//We use minTxnsToGroup as, if more txns than this are sent for replication,
+	//they will be grouped in a single proto (and thus single work)
+	/*for i := 0; i < minTxnsToGroup; i++ {
+		go group.listenForWork()
+	}*/
+	marshallWorkers := tools.Max(2, tools.Min(20, runtime.NumCPU()/8))
+	for i := 0; i < marshallWorkers; i++ {
 		go group.listenForWork()
 	}
 }
@@ -266,7 +278,22 @@ func (group *RemoteGroup) listenForWork() {
 	}
 }
 
-func (work MarshallWork) DoWork(replicaID int16) {
+func (work ReplMarshallWork) DoWork(replicaID uint16) {
+	start := time.Now().UnixNano()
+	protobuf := createProtoReplicateTxn(replicaID, work.Txn.Clk, work.Txn.Upds, work.Txn.TxnID)
+	endProto := time.Now().UnixNano()
+	data, err := pb.Marshal(protobuf)
+	endMarshall := time.Now().UnixNano()
+	if err != nil {
+		fmt.Printf("[RC]Error creating ProtoReplicateTxn (error: %v). Timestamp: %s.\n", err,
+			(clocksi.SliceTimestamp{}.FromBytes(protobuf.GetTimestamp())).ToSortedString())
+		os.Exit(0)
+	}
+	work.ReplyChan <- PairKeyBytes{Key: work.Bucket, Data: data}
+	work.DebugChan <- StatisticsMarshall{protoCreationTime: endProto - start, marshallTime: endMarshall - endProto}
+}
+
+/*func (work MarshallWork) DoWork(replicaID uint16) {
 	//start := time.Now()
 	results, i := make([]PairKeyBytes, len(work.BucketOps)), 0
 	for bucket, upds := range work.BucketOps {
@@ -281,7 +308,7 @@ func (work MarshallWork) DoWork(replicaID int16) {
 			//fmt.Printf("[RC]Error creating ProtoReplicateTxn (error: %v). Proto: %v. Upds: %v. Timestamp: %s.\n", err, protobuf, upds,
 			//(clocksi.ClockSiTimestamp{}.FromBytes(protobuf.GetTimestamp())).ToSortedString())
 			fmt.Printf("[RC]Error creating ProtoReplicateTxn (error: %v). Timestamp: %s.\n", err,
-				(clocksi.ClockSiTimestamp{}.FromBytes(protobuf.GetTimestamp())).ToSortedString())
+				(clocksi.SliceTimestamp{}.FromBytes(protobuf.GetTimestamp())).ToSortedString())
 			os.Exit(0)
 		}
 		results[i] = PairKeyBytes{Key: bucketTopicPrefix + bucket, Data: data}
@@ -291,9 +318,9 @@ func (work MarshallWork) DoWork(replicaID int16) {
 		//work.Txn.Clk.ToSortedString(), start.Format("2006-01-02 15:04:05.000"), end.Format("2006-01-02 15:04:05.000"), (end.UnixNano()-start.UnixNano())/1000000)
 	}
 	work.ReplyChan <- MarshallWorkReply{Result: results, TxnSendId: work.Txn.TxnID}
-}
+}*/
 
-func (work GroupMarshallWork) DoWork(replicaID int16) {
+/*func (work GroupMarshallWork) DoWork(replicaID uint16) {
 	protobuf := createProtoReplicateGroupTxn(replicaID, work.Txns, work.BktTxns)
 	data, err := pb.Marshal(protobuf)
 	if err != nil {
@@ -301,4 +328,4 @@ func (work GroupMarshallWork) DoWork(replicaID int16) {
 		os.Exit(0)
 	}
 	work.ReplyChan <- PairKeyBytes{Key: work.Bucket, Data: data}
-}
+}*/

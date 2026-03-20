@@ -41,14 +41,12 @@ func InitializeSQLProcessor(tm *TransactionManager) (sqlP *SQLProcessor) {
 }
 
 func (sqlP *SQLProcessor) handleRequests() {
-	for {
-		/*
+	/*for {
 			req := <-sqlP.sqlPChan
 			switch typedReq := req.(type) {
 
 			}
-		*/
-	}
+	}*/
 }
 
 func (sqlP *SQLProcessor) ProcessCreateTable(listener *sql.ListenerCreateTable) {

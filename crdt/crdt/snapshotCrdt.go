@@ -20,3 +20,7 @@ func (crdt *SnapshotCrdt) addToHistory(ts *clocksi.Timestamp, updArgs *Downstrea
 func (crdt *SnapshotCrdt) GC(safeClk clocksi.Timestamp) {
 
 }
+
+func (crdt *SnapshotCrdt) GetLatestClk() clocksi.Timestamp {
+	return clocksi.DummyTs
+}

@@ -25,7 +25,6 @@ import (
 type SnapshotVM struct {
 	crdt.CRDT
 	snaps          map[clocksi.TimestampKey]crdt.CRDT
-	replicaID      int16
 	updatedSinceGC bool              //Keeps track if this CRDT needs to be GC
 	currVersion    clocksi.Timestamp //Version of crdt.CRDT
 }
@@ -35,9 +34,8 @@ func (vm *SnapshotVM) Initialize(newCrdt crdt.CRDT, currTs clocksi.Timestamp) (n
 		return &SnapshotVM{CRDT: newCrdt}
 	}
 	newVmS := &SnapshotVM{
-		CRDT:      newCrdt,
-		snaps:     make(map[clocksi.TimestampKey]crdt.CRDT),
-		replicaID: shared.ReplicaID,
+		CRDT:  newCrdt,
+		snaps: make(map[clocksi.TimestampKey]crdt.CRDT),
 	}
 	newVmS.snaps[currTs.GetMapKey()] = newCrdt.(crdt.InversibleCRDT).Copy()
 	return newVmS
@@ -52,7 +50,7 @@ func (vm *SnapshotVM) ReadOld(readArgs crdt.ReadArguments, readTs clocksi.Timest
 		return oldCRDT.Read(readArgs, updsNotYetApplied)
 	}
 	//CRDT didn't exist at that time, we'll create an empty one.
-	oldCRDT = crdt.InitializeCrdt(vm.CRDT.GetCRDTType(), vm.replicaID)
+	oldCRDT = crdt.InitializeCrdt(vm.CRDT.GetCRDTType(), vm.CRDT.GetDATAType(), shared.ReplicaID)
 	vm.snaps[readTs.GetMapKey()] = oldCRDT
 	return oldCRDT.Read(readArgs, updsNotYetApplied)
 }

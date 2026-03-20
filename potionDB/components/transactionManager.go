@@ -12,7 +12,6 @@ package components
 //This'll have to be dealt it in some special way...
 
 import (
-	"container/heap"
 	fmt "fmt"
 	"math"
 	"math/rand"
@@ -81,6 +80,12 @@ type TMStaticUpdateArgs struct {
 	ReplyChan    chan TMStaticUpdateReply
 }
 
+// Used for setting the initial database state. Only accessible through internal client. It sends updates directly to Materializer, without any coordination or timestamp management.
+type TMInitialDataArgs struct {
+	UpdateParams []crdt.UpdateObjectParams
+	ReplyChan    chan bool //In this case, it does not make sense to share the Timestamp/TransactionID.
+}
+
 type TMStaticReadArgs struct {
 	ReadParams     []crdt.ReadObjectParams
 	ProcReadParams []crdt.ReadProcessingObjectParams
@@ -112,6 +117,10 @@ type TMGetTriggersArgs struct {
 	ReplyChan chan *TriggerDB
 }
 
+type TMManualGCArgs struct {
+	ReplyChan chan bool
+}
+
 type TMS2SRequest struct {
 	ClientID int32
 	Args     TMRequestArgs
@@ -130,7 +139,7 @@ type TMServerConn struct {
 
 type TMBCPermsArgs struct {
 	Perms        []map[crdt.KeyParams]int32
-	ReqReplicaID int16
+	ReqReplicaID uint16
 }
 
 type TMMultiClientReply struct {
@@ -144,32 +153,20 @@ type TMMultiClientReply struct {
 //Used by the Replication Layer. Use a different thread to handle this
 /*
 type TMRemoteTxn struct {
-	ReplicaID int16
+	ReplicaID uint16
 	Upds      []NewRemoteTxns
 	StableTs  int64
 }
 */
 
 type TMRemoteMsg interface {
-	getReplicaID() int16
+	getReplicaID() uint16
 }
 
 type TMRemoteClk struct {
-	ReplicaID int16
+	ReplicaID uint16
 	StableTs  int64
 }
-
-/*
-type TMRemoteTxn struct {
-	ReplicaID int16
-	Clk       clocksi.Timestamp
-	Upds      map[int][]crdt.UpdateObjectParams
-}
-
-type TMRemoteTxnGroup struct {
-	ReplicaID int16
-	Txns []
-}*/
 
 type TMGetSnapshot struct {
 	Buckets   map[string]struct{}
@@ -182,7 +179,7 @@ type TMApplySnapshot struct {
 }
 
 type TMReplicaID struct {
-	ReplicaID int16
+	ReplicaID uint16
 	IP        string
 	Buckets   []string
 }
@@ -289,13 +286,40 @@ type ongoingRemote struct {
 type ongoingTxn struct {
 	TransactionId
 	//partSet
-	partitions []bool //true: partition participates; false: partition doesn't participate.
-	debugID    int    //random ID just for debbuging purposes
+	//partitions []bool //true: partition participates; false: partition doesn't participate.
+	partitions tools.BitSet
+	debugID    int //random ID just for debbuging purposes
 	//conns      []net.Conn //connection to other replicas that have been created by this transaction
 	ongoingRemote
 }
 
+// Used by each client goroutine in TM to hold re-usable buffers for updating, avoiding constant allocation during updates
+// Buffers inside are initialized on the first time clients do an update.
+type tmUpdBuffers struct {
+	replyChan        chan clocksi.Timestamp
+	updsPerPartition []tools.SliceWithCounter[crdt.UpdateObjectParams] //Index: partitionID.
+	reqsPerServer    []tools.SliceWithCounter[crdt.UpdateObjectParams] //Index: serverIndex.
+	partitionBitSet  tools.BitSet
+}
+
 //type partSet map[uint64]struct{}
+
+// We use atomics, as they're much faster than sync.Mutex. We focus on read performance, as we can also reduce write frequency if needed.
+// Idea: two buffers. Readers always read from the buf pointed by readPtr. The writter writes to the other buffer, and then swaps the pointer.
+/*type ProtectedClock struct {
+	bufA    clocksi.Timestamp
+	bufB    clocksi.Timestamp
+	readPtr atomic.Pointer[clocksi.Timestamp]
+}*/
+
+// We use atomics, as they're much faster than sync.Mutex. We focus on read performance, as we can also reduce write frequency if needed.
+// We can't use the idea of two (or more) buffers, as then readers would be forced to copy the clock and, even then, it's not safe (a reader could get the Pointer, then block for a long time before the Copy finishes, leading to an incorrect read)
+// Furthermore, forcing readers to always copy is non-optimal.
+// So, instead, reads are direct and writting will always allocate a new clock. This is preferred, as not only it is safe, we also reduce allocation rate.
+// Note that our writter attempts to compact multiple local updates into a single update, thus reducing write pressure.
+type ProtectedClock struct {
+	readPtr atomic.Pointer[clocksi.Timestamp]
+}
 
 /*
 	type ProtectedClock struct {
@@ -303,10 +327,10 @@ type ongoingTxn struct {
 		sync.Mutex
 	}
 */
-type ProtectedClock struct {
+/*type ProtectedClock struct {
 	clocksi.Timestamp
 	sync.Mutex
-}
+}*/
 
 type ProtectedTriggerDB struct {
 	TriggerDB
@@ -315,15 +339,17 @@ type ProtectedTriggerDB struct {
 
 type TransactionManager struct {
 	mat              *Materializer
+	gc               *GarbageCollector
 	remoteChan       chan TMRemoteMsg
 	localClock       ProtectedClock
 	txnsSinceCompact int //Number of txns done since the last time history was compacted. Also protected by the above mutex.
-	downstreamQueue  map[int16][]TMRemoteMsg
-	replicator       *Replicator
-	replicaID        int16
-	downstreamOpsCh  chan TMTxnForRemote //Channel for handling ops that are generated when applying remote downstreams.
-	waitStartChan    chan PotionDBStatus //Channel for notifying ProtoServer when is TM ready to start processing requests
-	triggerDB        ProtectedTriggerDB
+	//downstreamQueue  map[uint16][]TMRemoteMsg
+	downstreamQueue []tools.SliceWithHideable[TMRemoteMsg]
+	replicator      *Replicator
+	replicaID       uint16
+	downstreamOpsCh chan TMTxnForRemote //Channel for handling ops that are generated when applying remote downstreams.
+	waitStartChan   chan PotionDBStatus //Channel for notifying ProtoServer when is TM ready to start processing requests
+	triggerDB       ProtectedTriggerDB
 	//Only used if doCompactHistory=true
 	ongoingReads map[TransactionId]int //TxnID -> position in circular array
 	clocksArray  *utilities.CircularArray
@@ -332,22 +358,32 @@ type TransactionManager struct {
 	commitChan chan TMCommitInfo //Clock updates go to this channel. When a client needs to wait for a clock, the request also goes here
 	TMIdsInfo
 	//TxnStartTime map[TransactionId]int64 //TODO: Delete, only for debug
-	replicaIDs []int16
+	replicaIDs           []uint16
+	matRemoteUpdsChan    chan tools.Pair[int64, []crdt.UpdateObjectParams] //Chan to receive extra upds generated by applying remote upds on NuCRDTs.
+	bufPendingRemoteTxns []tools.SliceWithHideable[MatRemoteTxn]           //Buffer used by checkPendingRemoteTxns, to temporarely hold txns that are ready to be sent to the partitions. Index if partitionID.
+	remoteClock          clocksi.Timestamp                                 //The goroutine that handles remote messages keeps its own updated clock. This prevents remote txns from blocking/being queued due to localClock not having been updated yet.
 }
 
 type RemoteInfo struct {
 	remoteBks       [][]string //Note: This gets turned to nil after all replicas are known
 	remoteIPs       []string
 	bucketToIndex   map[string][]int
-	remoteIDToIndex map[int16]int
+	remoteIDToIndex map[uint16]int
 	ownBuckets      []string
 	hasAll          bool //In case server is replicating "*"
+	sync.Mutex           //This lock is needed as with S2S, we may receive replicaIDs concurrently and concurrently write to remoteIDToIndex
 }
+
+type TMClientID uint64 //Highest bit is a boolean stating if this is a re-used ID. This is important to avoid incrementing maxIDInUse.
+
+func (tmId TMClientID) GetId() int { return int(tmId & (0x7FFFFFFFFFFFFFFF)) }
+
+func (tmId TMClientID) IsReused() bool { return (tmId&(1<<63) != 0) }
 
 type TMIdsInfo struct {
 	clksInUse      []clocksi.Timestamp //For each client, contains the read clock of the ongoing txn
 	maxIDInUse     int64               //(atomic int) The last position in clksInUse that is relevant
-	newIDChan      chan int            //Channel from which new clients get their TM's IDs
+	newIDChan      chan TMClientID     //Channel from which new clients get their TM's IDs. //TODO: Some way to reset this safely.
 	canReuseIDChan chan int            //When a connection closes, the ID must be sent to this channel for later re-use
 }
 
@@ -358,6 +394,53 @@ type TMClientBuffers struct {
 	reqsPerServer    [][]crdt.ReadObjectParams
 	remoteReqsToChan [][]int
 }
+
+type ClockHeap struct {
+	entries  []TMWaitClock
+	nEntries *int
+}
+
+type TMCommitInfo interface{}
+
+// Sent by each partition of the materializer
+type TMPartCommitReply struct {
+	txnId TransactionId
+}
+
+// Sent by the goroutine who asked for the commit
+type TMCommitNPartitions struct {
+	nPartitions int
+	txnId       TransactionId
+	clk         clocksi.Timestamp
+}
+
+type TMCommitReplClk struct {
+	stableTs        int64
+	sortedReplicaID uint16
+}
+
+// Issued by checkPendingRemoteTxns, as in that situation we may update several positions.
+type TMCommitReplFullClk struct {
+	clk clocksi.Timestamp
+}
+
+/*type TMCommitReplTxn struct {
+	Clk       clocksi.Timestamp
+	replicaID uint16
+}*/
+
+// Message sent by StaticRead() and StartTransaction() when the client's clock is too new.
+type TMWaitClock struct {
+	targetClk clocksi.Timestamp
+	replyChan chan clocksi.Timestamp //Replies with the actual clock of TM
+}
+
+// Used to get a copy of the TM's current clock
+type TMGetClock struct {
+	replyChan chan clocksi.Timestamp
+}
+
+type TM_CLIENT_TYPE byte //TM_NORMAL_CLIENT, TM_SERVER_CLIENT, TM_INTERNAL_CLIENT.
 
 /////*****************CONSTANTS AND VARIABLES***********************/////
 
@@ -374,13 +457,17 @@ const (
 	bcPermsTMRequest       TMRequestType = 9
 	getCRDTTMRequest       TMRequestType = 10
 	readSingleTMRequest    TMRequestType = 11
+	initialDataTMRequest   TMRequestType = 12
+	manualGCTMRequest      TMRequestType = 13
 	serverConnRequest      TMRequestType = 80
 	serverReplicaIDRequest TMRequestType = 81
 	lostConnRequest        TMRequestType = 255
 
 	downstreamOpsChBufferSize int = 100 //Default buffer size for the downstreamOpsCh
+	DOWN_QUEUE_STARTING_LEN   int = 20
 
-	TM_READY, REPL_READY, BOTH_READY = PotionDBStatus(1), PotionDBStatus(2), PotionDBStatus(3)
+	TM_READY, REPL_READY, BOTH_READY                       = PotionDBStatus(1), PotionDBStatus(2), PotionDBStatus(3)
+	TM_NORMAL_CLIENT, TM_SERVER_CLIENT, TM_INTERNAL_CLIENT = TM_CLIENT_TYPE(0), TM_CLIENT_TYPE(1), TM_CLIENT_TYPE(2)
 )
 
 // Both are filled from configs
@@ -396,114 +483,52 @@ var (
 
 //TransactionManagerRequest
 
-func (args TMStaticReadArgs) getRequestType() (requestType TMRequestType) {
-	return readStaticTMRequest
-}
-
+func (args TMStaticReadArgs) getRequestType() (requestType TMRequestType) { return readStaticTMRequest }
 func (args TMStaticUpdateArgs) getRequestType() (requestType TMRequestType) {
 	return updateStaticTMRequest
 }
-
-func (args TMReadArgs) getRequestType() (requestType TMRequestType) {
-	return readTMRequest
+func (args TMInitialDataArgs) getRequestType() (requestType TMRequestType) {
+	return initialDataTMRequest
 }
-
-func (args TMSingleReadArgs) getRequestType() (requestType TMRequestType) {
-	return readSingleTMRequest
-}
-
-func (args TMUpdateArgs) getRequestType() (requestType TMRequestType) {
-	return updateTMRequest
-}
-
-func (args TMConnLostArgs) getRequestType() (requestType TMRequestType) {
-	return lostConnRequest
-}
-
-func (args TMStartTxnArgs) getRequestType() (requestType TMRequestType) {
-	return startTxnTMRequest
-}
-
-func (args TMCommitArgs) getRequestType() (requestType TMRequestType) {
-	return commitTMRequest
-}
-
-func (args TMAbortArgs) getRequestType() (requestType TMRequestType) {
-	return abortTMRequest
-}
-
-func (args TMNewTriggerArgs) getRequestType() (requestType TMRequestType) {
-	return newTriggerTMRequest
-}
-
+func (args TMReadArgs) getRequestType() (requestType TMRequestType)       { return readTMRequest }
+func (args TMSingleReadArgs) getRequestType() (requestType TMRequestType) { return readSingleTMRequest }
+func (args TMUpdateArgs) getRequestType() (requestType TMRequestType)     { return updateTMRequest }
+func (args TMConnLostArgs) getRequestType() (requestType TMRequestType)   { return lostConnRequest }
+func (args TMStartTxnArgs) getRequestType() (requestType TMRequestType)   { return startTxnTMRequest }
+func (args TMCommitArgs) getRequestType() (requestType TMRequestType)     { return commitTMRequest }
+func (args TMAbortArgs) getRequestType() (requestType TMRequestType)      { return abortTMRequest }
+func (args TMNewTriggerArgs) getRequestType() (requestType TMRequestType) { return newTriggerTMRequest }
 func (args TMGetTriggersArgs) getRequestType() (requestType TMRequestType) {
 	return getTriggersTMRequest
 }
-
-func (args TMServerConn) getRequestType() (requestType TMRequestType) {
-	return serverConnRequest
-}
-
+func (args TMManualGCArgs) getRequestType() (requestType TMRequestType) { return manualGCTMRequest }
+func (args TMServerConn) getRequestType() (requestType TMRequestType)   { return serverConnRequest }
 func (args TMS2SRequest) getRequestType() (requestType TMRequestType) {
 	return args.Args.getRequestType()
 }
-
-func (args TMBCPermsArgs) getRequestType() (requestType TMRequestType) {
-	return bcPermsTMRequest
-}
-
-func (args TMGetCRDTArgs) getRequestType() (requestType TMRequestType) {
-	return getCRDTTMRequest
-}
-
-func (args TMReplicaID) getRequestType() (requestType TMRequestType) {
-	return serverReplicaIDRequest
-}
+func (args TMBCPermsArgs) getRequestType() (requestType TMRequestType) { return bcPermsTMRequest }
+func (args TMGetCRDTArgs) getRequestType() (requestType TMRequestType) { return getCRDTTMRequest }
+func (args TMReplicaID) getRequestType() (requestType TMRequestType)   { return serverReplicaIDRequest }
 
 //TMRemoteMsg
 
-func (req TMRemoteClk) getReplicaID() (id int16) {
-	return req.ReplicaID
-}
+// RemoteTxn and RemoteTxnGroup are shared with replicator
+func (req RemoteTxn) getReplicaID() (id uint16) { return req.SenderID }
 
-// Shared with replicator
-func (req RemoteTxn) getReplicaID() (id int16) {
-	return req.SenderID
-}
+// func (req RemoteTxnGroup) getReplicaID() (id uint16)   { return req.SenderID }
+func (req TMRemoteClk) getReplicaID() (id uint16)      { return req.ReplicaID }
+func (args TMGetSnapshot) getReplicaID() (id uint16)   { return 0 } //Irrelevant
+func (args TMApplySnapshot) getReplicaID() (id uint16) { return 0 } //Irrelevant
+func (args TMStart) getReplicaID() (id uint16)         { return 0 } //Irrelevant
+func (args TMReplicaID) getReplicaID() (id uint16)     { return args.ReplicaID }
+func (args TMRemoteTrigger) getReplicaID() (id uint16) { return 0 } //Irrelevant
 
-// Shared with replicator
-func (req RemoteTxnGroup) getReplicaID() (id int16) {
-	return req.SenderID
-}
-
-func (args TMGetSnapshot) getReplicaID() (id int16) {
-	return 0 //Irrelevant
-}
-
-func (args TMApplySnapshot) getReplicaID() (id int16) {
-	return 0 //Irrelevant
-}
-
-func (args TMStart) getReplicaID() (id int16) {
-	return 0 //Irrelevant
-}
-
-func (args TMReplicaID) getReplicaID() (id int16) {
-	return args.ReplicaID
-}
-
-// ReplicaID is irrelevant. It's only here for interface
-func (args TMRemoteTrigger) getReplicaID() (id int16) {
-	return 0
-}
-
-func (req RemoteTxnGroup) getMinClk() (clk clocksi.Timestamp) {
+/*func (req RemoteTxnGroup) getMinClk() (clk clocksi.Timestamp) {
 	return req.Txns[0].Clk
 }
-
 func (req RemoteTxnGroup) getMaxClk() (clk clocksi.Timestamp) {
 	return req.Txns[len(req.Txns)-1].Clk
-}
+}*/
 
 //Others
 
@@ -521,13 +546,108 @@ func (set partSet) add(partId uint64) {
 func (txnPartitions *ongoingTxn) reset() {
 	txnPartitions.TransactionId = 0
 	//txnPartitions.partSet = nil
-	txnPartitions.partitions = make([]bool, nGoRoutines)
+	//txnPartitions.partitions = make([]bool, nGoRoutines)
+	//clear(txnPartitions.partitions)
+	txnPartitions.partitions.Reset()
 	//txnPartitions.ongoingRemote = ongoingRemote{}
 	txnPartitions.ongoingRemote.reset()
 }
 
 func (remote *ongoingRemote) reset() {
 	remote.originalClk, remote.txnDataToUse, remote.nTxnsStarted = nil, nil, 0
+}
+
+func (buf *tmUpdBuffers) resetBufsExceptBitset() {
+	for i := range buf.updsPerPartition {
+		buf.updsPerPartition[i].Clear()
+	}
+	for i := range buf.reqsPerServer {
+		buf.reqsPerServer[i].Clear()
+	}
+}
+
+func (buf *tmUpdBuffers) reset() {
+	buf.resetBufsExceptBitset()
+	buf.partitionBitSet.Reset()
+}
+
+func TMWaitClockLess(a, b TMWaitClock) bool {
+	return a.targetClk.IsLowerOrEqualTotalOrder(b.targetClk)
+}
+
+func (c ClockHeap) Len() int { return *c.nEntries }
+
+// We want the heap's Pop() to return the lowest element, so we use < on "less". The smallest element is on h[0].
+func (c ClockHeap) Less(i, j int) bool {
+	return c.entries[i].targetClk.IsLowerOrEqualTotalOrder(c.entries[j].targetClk)
+}
+
+func (c ClockHeap) Swap(i, j int) {
+	c.entries[i], c.entries[j] = c.entries[j], c.entries[i]
+}
+
+func (c ClockHeap) Push(value interface{}) {
+	convValue := value.(TMWaitClock)
+	if *c.nEntries == cap(c.entries) {
+		c.entries = append(c.entries, convValue)
+		c.entries = c.entries[:cap(c.entries)] //Extending to capacity
+		*c.nEntries += 1
+	} else {
+		c.entries[*c.nEntries], *c.nEntries = convValue, *c.nEntries+1
+	}
+
+}
+
+func (c ClockHeap) Pop() interface{} {
+	if *c.nEntries == 0 {
+		return nil
+	}
+	old := c.entries[*c.nEntries-1]
+	c.entries[*c.nEntries-1] = TMWaitClock{}
+	*c.nEntries--
+	return old
+}
+
+// Returns the lowest value, but does not remove it.
+func (c ClockHeap) PeekMin() TMWaitClock {
+	if *c.nEntries == 0 {
+		return TMWaitClock{}
+	}
+	return c.entries[0]
+}
+
+/*type ProtectedClock struct {
+	readPtr atomic.Pointer[clocksi.Timestamp]
+}*/
+
+func (pc *ProtectedClock) GetClock() clocksi.Timestamp {
+	return *pc.readPtr.Load()
+}
+
+func (pc *ProtectedClock) GetValue(replicaID uint16) int64 {
+	return (*pc.readPtr.Load()).GetPos(replicaID)
+}
+
+// No need to check if the value is higher, as the writer routine already ensures that.
+func (pc *ProtectedClock) UpdatePos(replicaID uint16, value int64) {
+	clk := *pc.readPtr.Load()
+	newClk := clk.Copy()
+	newClk.UpdatePos(replicaID, value)
+	pc.readPtr.Store(&newClk)
+}
+
+func (pc *ProtectedClock) UpdateTwoPos(replicaID1 uint16, value1 int64, replicaID2 uint16, value2 int64) {
+	clk := *pc.readPtr.Load()
+	newClk := clk.Copy()
+	newClk.UpdatePos(replicaID1, value1)
+	newClk.UpdatePos(replicaID2, value2)
+	pc.readPtr.Store(&newClk)
+}
+
+func (pc *ProtectedClock) Update(otherClk clocksi.Timestamp) {
+	clk := *pc.readPtr.Load()
+	newClk := clk.Merge(otherClk) //This returns a new clock, so it's safe.
+	pc.readPtr.Store(&newClk)
 }
 
 /////*****************TRANSACTION MANAGER CODE***********************/////
@@ -544,14 +664,20 @@ func (tm *TransactionManager) ResetServer() {
 	tm.replicator.Reset()
 	tm.remoteChan = make(chan TMRemoteMsg)
 	//tm.localClock = ProtectedClock{Mutex: sync.Mutex{}, SliceTimestamp: clocksi.NewSliceTimestamp()}
-	tm.downstreamQueue = make(map[int16][]TMRemoteMsg)
+	//tm.downstreamQueue = make(map[uint16][]TMRemoteMsg)
+	for i := range tm.downstreamQueue {
+		tm.downstreamQueue[i].DeepClear()
+	}
+	for i := range tm.bufPendingRemoteTxns {
+		tm.bufPendingRemoteTxns[i].DeepClear()
+	}
 	for i := 0; i < len(tm.mat.channels); i++ {
 		<-matChan
 	}
 	fmt.Println("[TM]Reset complete.")
 }
 
-func Initialize(replicaID int16) (tm *TransactionManager) {
+func Initialize(replicaID uint16) (tm *TransactionManager) {
 	setConfigs()
 	clocksi.AddNewID(replicaID)
 	downstreamOpsCh := make(chan TMTxnForRemote, downstreamOpsChBufferSize)
@@ -563,23 +689,28 @@ func Initialize(replicaID int16) (tm *TransactionManager) {
 		mat:        mat,
 		remoteChan: make(chan TMRemoteMsg, 100), //TODO: Make that 100 a variable too
 		//localClock:       ProtectedClock{Mutex: sync.Mutex{}, SliceTimestamp: clocksi.NewSliceTimestamp()},
-		localClock:       ProtectedClock{Mutex: sync.Mutex{}, Timestamp: clocksi.NewClockSiTimestamp()},
+		//localClock:       ProtectedClock{Mutex: sync.Mutex{}, Timestamp: clocksi.NewSliceTimestamp()},
 		txnsSinceCompact: 0,
-		downstreamQueue:  make(map[int16][]TMRemoteMsg),
-		replicator:       &Replicator{},
-		replicaID:        replicaID,
-		downstreamOpsCh:  downstreamOpsCh,
-		waitStartChan:    make(chan PotionDBStatus, 2), //2: msg from TM and msg from Replicator (forwarded by TM)
-		triggerDB:        ProtectedTriggerDB{RWMutex: sync.RWMutex{}, TriggerDB: InitializeTriggerDB()},
-		RemoteInfo:       RemoteInfo{bucketToIndex: make(map[string][]int), remoteIDToIndex: make(map[int16]int), hasAll: false},
-		commitChan:       commitCh,
+		//downstreamQueue:  make(map[uint16][]TMRemoteMsg),
+		replicator:      &Replicator{},
+		replicaID:       replicaID,
+		downstreamOpsCh: downstreamOpsCh,
+		waitStartChan:   make(chan PotionDBStatus, 2), //2: msg from TM and msg from Replicator (forwarded by TM)
+		triggerDB:       ProtectedTriggerDB{RWMutex: sync.RWMutex{}, TriggerDB: InitializeTriggerDB()},
+		RemoteInfo:      RemoteInfo{bucketToIndex: make(map[string][]int), remoteIDToIndex: make(map[uint16]int), hasAll: false},
+		commitChan:      commitCh,
 		TMIdsInfo: TMIdsInfo{
-			clksInUse:      make([]clocksi.Timestamp, 100, 100),
+			clksInUse:      make([]clocksi.Timestamp, 100),
 			maxIDInUse:     0,
-			newIDChan:      make(chan int, 10),
+			newIDChan:      make(chan TMClientID, 10),
 			canReuseIDChan: make(chan int, 100),
 		},
+		matRemoteUpdsChan: make(chan tools.Pair[int64, []crdt.UpdateObjectParams], nGoRoutines),
 		//TxnStartTime: make(map[TransactionId]int64),
+	}
+	tm.bufPendingRemoteTxns = make([]tools.SliceWithHideable[MatRemoteTxn], nGoRoutines)
+	for i := uint64(0); i < nGoRoutines; i++ {
+		tm.bufPendingRemoteTxns[i] = tools.NewSliceWithHideable[MatRemoteTxn](DOWN_QUEUE_STARTING_LEN)
 	}
 	tm.ownBuckets = buckets
 	//Check if server replicates all buckets
@@ -603,7 +734,7 @@ func Initialize(replicaID int16) (tm *TransactionManager) {
 		//go tm.doHistoryCompact(waitRoutinesStart)		//Not implemented.
 	}
 	go tm.replicator.Initialize(tm, loggers, buckets, replicaID)
-	go tm.handleCommitReplies()
+	//go tm.handleCommitReplies() //We now start it only after TMStart{}, so that we can obtain an initial copy of the clock already with all replicas.
 	go tm.handleRemoteMsgs()
 	nDownGenHandlers := 8 //TODO: Put this as some variable that can be configured.
 	for i := 0; i < nDownGenHandlers; i++ {
@@ -613,7 +744,8 @@ func Initialize(replicaID int16) (tm *TransactionManager) {
 	if debugMode {
 		go tm.sanityCheck()
 	}
-	InitializeGarbageCollector(tm)
+	tm.gc = InitializeGarbageCollector(tm)
+	//tm.gc.StartGCTimer()
 	MAX_POOL_PER_SERVER = tools.SharedConfig.GetIntConfig("poolMax", 100)
 
 	//All the extra goroutines are quick to initialize (i.e., they are all fors that go forever and don't have much preparatory work)
@@ -624,14 +756,14 @@ func Initialize(replicaID int16) (tm *TransactionManager) {
 
 func setConfigs() {
 	//TM
-	fmt.Println("[TM]TopKSize defined in configs:", tools.SharedConfig.GetIntConfig("topKSize", 100))
+	fmt.Println("[TM]Default TopKSize defined in configs:", tools.SharedConfig.GetIntConfig("topKSize", 100))
 	crdt.SetTopKSize(tools.SharedConfig.GetIntConfig("topKSize", 100))
 	FAST_SINGLE_READ = tools.SharedConfig.GetBoolConfig("fastSingleRead", false)
 	//MAT
 	nGoRoutines = uint64(tools.SharedConfig.GetIntConfig("nPartitions", 1))
 	requestQueueSize = tools.SharedConfig.GetIntConfig("requestChannelSize", 50)
 	expectedNewDownstreamSize = tools.SharedConfig.GetIntConfig("newDownstreamSize", 10)
-	keyRangeSize = math.MaxUint64 / nGoRoutines
+	keyRangeSize = math.MaxUint64/nGoRoutines + 1 //We add +1 to force all hashes to be < nGoRoutines.
 	//RC
 	basePrefix = tools.SharedConfig.GetOrDefault("rabbitMQUser", "guest")
 	baseVHost = tools.SharedConfig.GetOrDefault("rabbitVHost", "/crdts")
@@ -658,11 +790,14 @@ func (tm *TransactionManager) WaitUntilReady() PotionDBStatus {
 }
 
 // Starts a goroutine to handle the client requests. Returns a channel to communicate with that goroutine
-func (tm *TransactionManager) CreateClientHandler() (channel chan TransactionManagerRequest) {
+func (tm *TransactionManager) CreateClientHandler(clientType TM_CLIENT_TYPE) (channel chan TransactionManagerRequest) {
 	channel = make(chan TransactionManagerRequest)
 	id := <-tm.newIDChan
-	atomic.AddInt64(&tm.maxIDInUse, 1)
-	go tm.listenForProtobufRequests(channel, id)
+	//atomic.AddInt64(&tm.maxIDInUse, 1)
+	if !id.IsReused() {
+		atomic.AddInt64(&tm.maxIDInUse, 1)
+	}
+	go tm.listenForProtobufRequests(channel, id.GetId(), clientType)
 	return
 }
 
@@ -673,8 +808,11 @@ func (tm *TransactionManager) UpgradeHandlerToMultiClient(channel chan Transacti
 	for i := 0; i < nClients; i++ {
 		channels[i] = make(chan TransactionManagerRequest, 1)
 		id := <-tm.newIDChan
-		atomic.AddInt64(&tm.maxIDInUse, 1)
-		go tm.listenForProtobufRequestMultiClient(channels[i], id, int(i), replyChan)
+		//atomic.AddInt64(&tm.maxIDInUse, 1)
+		if !id.IsReused() {
+			atomic.AddInt64(&tm.maxIDInUse, 1)
+		}
+		go tm.listenForProtobufRequestMultiClient(channels[i], id.GetId(), int(i), replyChan)
 	}
 	return
 }
@@ -683,26 +821,40 @@ func (tm *TransactionManager) SendRemoteMsg(msg TMRemoteMsg) {
 	tm.remoteChan <- msg
 }
 
-func (tm *TransactionManager) listenForProtobufRequests(channel chan TransactionManagerRequest, id int) {
-	stop := false
+func (tm *TransactionManager) listenForProtobufRequests(channel chan TransactionManagerRequest, id int, clientType TM_CLIENT_TYPE) {
+	//stop := false
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	var txnPartitions *ongoingTxn = &ongoingTxn{}
-	txnPartitions.partitions = make([]bool, nGoRoutines)
-	txnPartitions.debugID = rand.Intn(10)
+	//txnPartitions.partitions = make([]bool, nGoRoutines)
+	txnPartitions.partitions = tools.NewBitSet(int(nGoRoutines))
+	txnPartitions.debugID = rng.Intn(10)
 	txnPartitions.ongoingRemote = ongoingRemote{}
 	txnPartitions.lockChans = make([]chan msgToSend, len(tm.remoteIPs))
 	txnPartitions.replyChans = make([]chan msgReply, len(tm.remoteIPs))
 
-	firstReq := <-channel
-
-	if firstReq.Args.getRequestType() == serverConnRequest {
-		tm.handleServerRequests(channel, firstReq.Args.(TMServerConn).ReplyChan, id)
-		return //If it ever breaks due to a lost connection, just return.
-	}
-	if firstReq.Args.getRequestType() == serverReplicaIDRequest {
-		tm.handleRemoteReplicaID(firstReq.Args.(TMReplicaID))
-		firstReq = <-channel //Next request will be TMServerConn
-		tm.handleServerRequests(channel, firstReq.Args.(TMServerConn).ReplyChan, id)
-		return //If it ever breaks due to a lost connection, just return.
+	//TODO: This doesn't work, as we actually don't know the type of client at the start.
+	//Because S2S clients connect initially as normal clients... :(
+	//I guess no other way than processing separately the first request. Just define an extra method that handles all possible requests, including server ones.
+	//And it only processes one request. Then, if it returns, it is a normal client and goes to the normal loop.
+	/*if clientType == TM_SERVER_CLIENT { //Server requests start with a special first request, that we process differently.
+		firstReq := <-channel
+		if firstReq.Args.getRequestType() == serverConnRequest {
+			tm.handleServerRequests(channel, firstReq.Args.(TMServerConn).ReplyChan, rng, id)
+			return //If it ever breaks due to a lost connection, just return.
+		}
+		if firstReq.Args.getRequestType() == serverReplicaIDRequest {
+			tm.handleRemoteReplicaID(firstReq.Args.(TMReplicaID))
+			firstReq = <-channel //Next request will be TMServerConn
+			tm.handleServerRequests(channel, firstReq.Args.(TMServerConn).ReplyChan, rng, id)
+			return //If it ever breaks due to a lost connection, just return.
+		}
+		//Will never get here.
+	}*/
+	//First request may be special, as it may be a server connection/server replicaID request.
+	stop, updBuf := tm.handleFirstRequest(txnPartitions, id, rng, channel)
+	if stop { //Server-conn that dropped, or client somehow crashed before we got any proper request.
+		close(channel)
+		return
 	}
 	/*
 		if firstReq.Args.getRequestType() != serverConnRequest {
@@ -728,12 +880,13 @@ func (tm *TransactionManager) listenForProtobufRequests(channel chan Transaction
 			request := <-channel
 			stop = tm.handleTMRequest(request, txnPartitions, &bufs, id)
 		}*/
-	tm.connPool.newConn()
-	stop = tm.handleTMRequest(firstReq, txnPartitions, id)
+	//tm.connPool.newConn()
+	tm.handleTMRequests(txnPartitions, id, rng, channel, updBuf) //Will return on lostConnRequest.
+	/*stop = tm.handleTMRequest(firstReq, txnPartitions, rng, id)
 	for !stop {
 		request := <-channel
-		stop = tm.handleTMRequest(request, txnPartitions, id)
-	}
+		stop = tm.handleTMRequest(request, txnPartitions, rng, id)
+	}*/
 	close(channel)
 
 	utilities.FancyDebugPrint(utilities.TM_PRINT, tm.replicaID, "connection lost, shutting down goroutine for client.")
@@ -741,40 +894,55 @@ func (tm *TransactionManager) listenForProtobufRequests(channel chan Transaction
 
 // Note: This only handles one client. However, it is used for multi-client purposes, as it funnels all replies to a shared reply buffer.
 func (tm *TransactionManager) listenForProtobufRequestMultiClient(channel chan TransactionManagerRequest, internalId, clientId int, replyChan chan TMMultiClientReply) {
-	stop := false
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	var txnPartitions *ongoingTxn = &ongoingTxn{}
-	txnPartitions.partitions = make([]bool, nGoRoutines)
-	txnPartitions.debugID = rand.Intn(10)
+	//txnPartitions.partitions = make([]bool, nGoRoutines)
+	txnPartitions.partitions = tools.NewBitSet(int(nGoRoutines))
+	txnPartitions.debugID = rng.Intn(10)
 	txnPartitions.ongoingRemote = ongoingRemote{}
 	txnPartitions.lockChans = make([]chan msgToSend, len(tm.remoteIPs))
 	txnPartitions.replyChans = make([]chan msgReply, len(tm.remoteIPs))
 
 	tm.connPool.newConn()
 
-	for !stop {
-		request := <-channel
-		stop = tm.handleTMRequestMultiClient(request, txnPartitions, internalId, clientId, replyChan)
-	}
+	tm.handleTMRequestsMultiClient(txnPartitions, internalId, clientId, replyChan, channel, rng) //Will return on lostConnRequest.
 	close(channel)
 
 	utilities.FancyDebugPrint(utilities.TM_PRINT, tm.replicaID, "connection lost, shutting down goroutine for client.")
 }
 
-func (tm *TransactionManager) handleTMRequest(request TransactionManagerRequest,
-	txnPartitions *ongoingTxn /*bufs *TMClientBuffers, */, id int) (shouldStop bool) {
-	shouldStop = false
-
+func (tm *TransactionManager) handleFirstRequest(txnPartitions *ongoingTxn, id int, rng *rand.Rand, channel chan TransactionManagerRequest) (lostConn bool, updBuf *tmUpdBuffers) {
+	request := <-channel
+	//First check if it is a special request and handle it appropriately (server connection or a lost connection)
+	switch request.Args.getRequestType() {
+	case serverConnRequest:
+		tm.handleServerRequests(channel, request.Args.(TMServerConn).ReplyChan, rng, id)
+		return true, nil
+	case serverReplicaIDRequest:
+		tm.handleRemoteReplicaID(request.Args.(TMReplicaID))
+		request = <-channel //Next request will be TMServerConn
+		tm.handleServerRequests(channel, request.Args.(TMServerConn).ReplyChan, rng, id)
+		return true, nil
+	case lostConnRequest:
+		*txnPartitions = ongoingTxn{}
+		tm.clksInUse[id] = nil
+		tm.canReuseIDChan <- id
+		return true, nil
+	}
+	//Client connection.
+	updBuf = &tmUpdBuffers{} //We only initialize this in handleStaticTMUpdate, as clients may be read-only
+	tm.connPool.newConn()
 	switch request.Args.getRequestType() {
 	case readStaticTMRequest:
-		tm.handleStaticTMReadWithReply(request, id)
+		tm.handleTMStaticReadWithReply(request, id)
 	case updateStaticTMRequest:
-		tm.handleStaticTMUpdateWithReply(request)
+		tm.handleTMStaticUpdateWithReply(request, rng, updBuf)
 	case readTMRequest:
 		tm.handleTMReadWithReply(request, txnPartitions)
 	case updateTMRequest:
-		tm.handleTMUpdateWithReply(request, txnPartitions)
+		tm.handleTMUpdateWithReply(request, txnPartitions, updBuf)
 	case startTxnTMRequest:
-		tm.handleTMStartTxnWithReply(request, txnPartitions, id)
+		tm.handleTMStartTxnWithReply(request, txnPartitions, id, rng)
 	case commitTMRequest:
 		tm.handleTMCommitWithReply(request, txnPartitions, id)
 	case abortTMRequest:
@@ -785,48 +953,141 @@ func (tm *TransactionManager) handleTMRequest(request TransactionManagerRequest,
 		tm.handleGetTriggers(request)
 	case getCRDTTMRequest:
 		tm.handleGetCRDTWithReply(request)
+	case initialDataTMRequest:
+		tm.handleInitialDataWithReply(request, rng)
+	case manualGCTMRequest:
+		tm.gc.RequestManualGC(request.Args.(TMManualGCArgs).ReplyChan)
+		//default:
+		//fmt.Printf("[TM]Received unknown/unexpected request type %d from client %d, on method handleTMRequest.\n", request.Args.getRequestType(), id)
+	}
+	return false, updBuf
+}
+
+func (tm *TransactionManager) handleTMRequests(txnPartitions *ongoingTxn, id int, rng *rand.Rand, channel chan TransactionManagerRequest, updBuf *tmUpdBuffers) {
+	stop := false
+	var request TransactionManagerRequest
+	//fmt.Printf("[TM][handleTMRequests]Starting to handle requests for client %d.\n", id)
+	for !stop {
+		request = <-channel
+		switch request.Args.getRequestType() {
+		case readStaticTMRequest:
+			tm.handleTMStaticReadWithReply(request, id)
+		case updateStaticTMRequest:
+			tm.handleTMStaticUpdateWithReply(request, rng, updBuf)
+		case readTMRequest:
+			tm.handleTMReadWithReply(request, txnPartitions)
+		case updateTMRequest:
+			tm.handleTMUpdateWithReply(request, txnPartitions, updBuf)
+		case startTxnTMRequest:
+			tm.handleTMStartTxnWithReply(request, txnPartitions, id, rng)
+		case commitTMRequest:
+			tm.handleTMCommitWithReply(request, txnPartitions, id)
+		case abortTMRequest:
+			tm.handleTMAbort(request, txnPartitions, id)
+		case newTriggerTMRequest:
+			tm.handleNewTrigger(request)
+		case getTriggersTMRequest:
+			tm.handleGetTriggers(request)
+		case getCRDTTMRequest:
+			tm.handleGetCRDTWithReply(request)
+		case initialDataTMRequest:
+			tm.handleInitialDataWithReply(request, rng)
+		case manualGCTMRequest:
+			tm.gc.RequestManualGC(request.Args.(TMManualGCArgs).ReplyChan)
+		case lostConnRequest:
+			stop = true
+			*txnPartitions = ongoingTxn{}
+			tm.clksInUse[id] = nil
+			tm.canReuseIDChan <- id
+		default:
+			fmt.Printf("[TM]Received unknown/unexpected request type %d from client %d, on method handleTMRequest.\n", request.Args.getRequestType(), id)
+		}
+		//remoteTxnRequest is handled separatelly
+	}
+}
+
+/*func (tm *TransactionManager) handleTMRequest(request TransactionManagerRequest,
+	txnPartitions *ongoingTxn, rng *rand.Rand, id int) (shouldStop bool) {
+	shouldStop = false
+
+	switch request.Args.getRequestType() {
+	case readStaticTMRequest:
+		tm.handleTMStaticReadWithReply(request, id)
+	case updateStaticTMRequest:
+		tm.handleTMStaticUpdateWithReply(request, rng)
+	case readTMRequest:
+		tm.handleTMReadWithReply(request, txnPartitions)
+	case updateTMRequest:
+		tm.handleTMUpdateWithReply(request, txnPartitions)
+	case startTxnTMRequest:
+		tm.handleTMStartTxnWithReply(request, txnPartitions, id, rng)
+	case commitTMRequest:
+		tm.handleTMCommitWithReply(request, txnPartitions, id)
+	case abortTMRequest:
+		tm.handleTMAbort(request, txnPartitions, id)
+	case newTriggerTMRequest:
+		tm.handleNewTrigger(request)
+	case getTriggersTMRequest:
+		tm.handleGetTriggers(request)
+	case getCRDTTMRequest:
+		tm.handleGetCRDTWithReply(request)
+	case initialDataTMRequest:
+		tm.handleInitialDataWithReply(request, rng)
+	case manualGCTMRequest:
+		tm.gc.RequestManualGC(request.Args.(TMManualGCArgs).ReplyChan)
 	case lostConnRequest:
 		shouldStop = true
-		txnPartitions = nil
+		*txnPartitions = ongoingTxn{}
 		tm.clksInUse[id] = nil
 		tm.canReuseIDChan <- id
+	default:
+		fmt.Printf("[TM]Received unknown/unexpected request type %d from client %d, on method handleTMRequest.\n", request.Args.getRequestType(), id)
 	}
 	//remoteTxnRequest is handled separatelly
 
 	return
-}
+}*/
 
-func (tm *TransactionManager) handleTMRequestMultiClient(request TransactionManagerRequest,
-	txnPartitions *ongoingTxn, id, clientId int, replyChan chan TMMultiClientReply) (shouldStop bool) {
-	shouldStop = false
+func (tm *TransactionManager) handleTMRequestsMultiClient(txnPartitions *ongoingTxn,
+	id, clientId int, replyChan chan TMMultiClientReply, reqChan chan TransactionManagerRequest, rng *rand.Rand) (shouldStop bool) {
+	stop := false
+	var request TransactionManagerRequest
+	updBuf := &tmUpdBuffers{} //We only initialize this in handleStaticTMUpdate, as clients may be read-only
 
 	var result interface{} = nil
 	//Trigger-related requests are not supported here (nor intended to be created under multi-client - should be a separate client creating them.)
-	switch request.Args.getRequestType() {
-	case readStaticTMRequest:
-		result = tm.handleStaticTMRead(request, id)
-	case updateStaticTMRequest:
-		result = tm.handleStaticTMUpdate(request)
-	case readTMRequest:
-		result = tm.handleTMRead(request, txnPartitions)
-	case updateTMRequest:
-		result = tm.handleTMUpdate(request, txnPartitions)
-	case startTxnTMRequest:
-		result = tm.handleTMStartTxn(request, txnPartitions, id)
-	case commitTMRequest:
-		result = tm.handleTMCommit(request, txnPartitions, id)
-	case abortTMRequest:
-		tm.handleTMAbort(request, txnPartitions, id)
-	case getCRDTTMRequest:
-		result = tm.handleGetCRDT(request)
-	case lostConnRequest:
-		shouldStop = true
-		txnPartitions = nil
-		tm.clksInUse[id] = nil
-		tm.canReuseIDChan <- id
-	}
-	if result != nil {
-		replyChan <- TMMultiClientReply{ClientID: clientId, TxnId: request.TransactionId, Reply: result}
+	for !stop {
+		request = <-reqChan
+		isUpdReq := false
+		switch request.Args.getRequestType() {
+		case readStaticTMRequest:
+			result = tm.handleStaticTMRead(request, id)
+		case updateStaticTMRequest:
+			result, isUpdReq = tm.handleStaticTMUpdate(request, rng, updBuf), true
+		case readTMRequest:
+			result = tm.handleTMRead(request, txnPartitions)
+		case updateTMRequest:
+			result, isUpdReq = tm.handleTMUpdate(request, txnPartitions, updBuf), true
+		case startTxnTMRequest:
+			result = tm.handleTMStartTxn(request, txnPartitions, id, rng)
+		case commitTMRequest:
+			result = tm.handleTMCommit(request, txnPartitions, id)
+		case abortTMRequest:
+			tm.handleTMAbort(request, txnPartitions, id)
+		case getCRDTTMRequest:
+			result = tm.handleGetCRDT(request)
+		case lostConnRequest:
+			shouldStop = true
+			*txnPartitions = ongoingTxn{}
+			tm.clksInUse[id] = nil
+			tm.canReuseIDChan <- id
+		}
+		if result != nil {
+			replyChan <- TMMultiClientReply{ClientID: clientId, TxnId: request.TransactionId, Reply: result}
+		}
+		if isUpdReq { //Idea: we clean the buffers after replying to the client, thus allowing PotionDB to reply to the client in the meantime.
+			updBuf.reset()
+		}
 	}
 
 	return
@@ -835,6 +1096,7 @@ func (tm *TransactionManager) handleTMRequestMultiClient(request TransactionMana
 func (tm *TransactionManager) handleRemoteMsgs() {
 	/*lastTs, currTs, minDiff := int64(0), int64(0), int64(time.Millisecond)*500
 	ignore(lastTs, currTs, minDiff)*/
+	nTxnsSinceClean := 0
 	for {
 		//currTs = time.Now().UnixNano()
 		request := <-tm.remoteChan
@@ -844,12 +1106,14 @@ func (tm *TransactionManager) handleRemoteMsgs() {
 			tm.applyRemoteClk(&typedReq)
 		case RemoteTxn:
 			tm.applyRemoteTxn(&typedReq)
-		case RemoteTxnGroup:
-			tm.applyRemoteTxnGroup(&typedReq)
-			/*if currTs-lastTs > minDiff {
-				fmt.Printf("[TM]Finished RemoteTxnGroup at %s.\n", time.Unix(0, currTs).Format("2006-01-02 15:04:05.000"))
-				lastTs = currTs
-			}*/
+			nTxnsSinceClean++
+		/*case RemoteTxnGroup:
+		tm.applyRemoteTxnGroup(&typedReq)
+		nTxnsSinceClean++*/
+		/*if currTs-lastTs > minDiff {
+			fmt.Printf("[TM]Finished RemoteTxnGroup at %s.\n", time.Unix(0, currTs).Format("2006-01-02 15:04:05.000"))
+			lastTs = currTs
+		}*/
 		case TMGetSnapshot:
 			tm.handleTMGetSnapshot(&typedReq)
 		case TMApplySnapshot:
@@ -861,12 +1125,19 @@ func (tm *TransactionManager) handleRemoteMsgs() {
 		case TMStart:
 			tm.handleTMStart(&typedReq)
 		}
+		if nTxnsSinceClean > 0 && len(tm.remoteChan) == 0 { //We opportunistically clean buffers.
+			nTxnsSinceClean = 0
+			for i := range tm.bufPendingRemoteTxns {
+				tm.bufPendingRemoteTxns[i].DeepClear()
+			}
+		}
 		//fmt.Println("[TM]Finished request from Replicator")
 	}
 }
 
 func (tm *TransactionManager) handleRemoteReplicaID(req TMReplicaID) {
 	remoteID := req.ReplicaID
+	tm.RemoteInfo.Lock()
 	if _, has := tm.RemoteInfo.remoteIDToIndex[remoteID]; !has {
 		fmt.Printf("[TM]Adding replicaID %d via S2S at %s\n", remoteID, time.Now().Format("15:04:05.000"))
 		clocksi.AddNewID(remoteID)
@@ -874,12 +1145,16 @@ func (tm *TransactionManager) handleRemoteReplicaID(req TMReplicaID) {
 		tm.RemoteInfo.remoteIPs = append(tm.RemoteInfo.remoteIPs, req.IP)
 		tm.RemoteInfo.remoteIDToIndex[remoteID] = len(tm.RemoteInfo.remoteIPs) - 1
 		if len(othersIPList) == len(tm.RemoteInfo.remoteIPs) { //All replicaIDs are known.
+			tm.RemoteInfo.Unlock()
 			fmt.Printf("[TM]Finishing TM initialization via S2S at %s.\n", time.Now().Format("15:04:05.000"))
 			tm.finishTMInitialialization()
 			tm.waitStartChan <- TM_READY
+		} else {
+			tm.RemoteInfo.Unlock()
 		}
 	} else {
 		//else: ignore.
+		tm.RemoteInfo.Unlock()
 		fmt.Printf("[TM]Ignored replicaID %d via S2S at %s as we already know that replicaID.\n", remoteID, time.Now().Format("15:04:05.000"))
 	}
 }
@@ -890,9 +1165,10 @@ func (tm *TransactionManager) handleRemoteReplicaID(req TMReplicaID) {
 	That is, TM can still be single threaded - receive request -> process -> reply.
 */
 
-func (tm *TransactionManager) handleServerRequests(channel chan TransactionManagerRequest, replyChan chan TMS2SReply, id int) {
+func (tm *TransactionManager) handleServerRequests(channel chan TransactionManagerRequest, replyChan chan TMS2SReply, rng *rand.Rand, id int) {
 	stop := false
-	ongoingInfo := make(map[int32]*ongoingTxn)
+	ongoingInfo := make(map[int32]*ongoingTxn) //TODO: This could be a slice if we ensure clientIDs are incremental?
+	updBuf := &tmUpdBuffers{}                  //One buffer is enough, as for each request we wait for the reply before processing the next request.
 	/*bufs := TMClientBuffers{
 		readChans:        make([]chan crdt.State, 1),
 		states:           make([]crdt.State, 1),
@@ -925,17 +1201,17 @@ func (tm *TransactionManager) handleServerRequests(channel chan TransactionManag
 			/*go func(clientID int32, txnID TransactionId, channel chan TMStaticReadReply) {
 				replyChan <- TMS2SReply{ClientID: clientID, TxnID: txnID, ReplyType: proto.WrapperType_STATIC_READ_OBJS, Reply: <-channel}
 			}(clientID, txnID, innerArgs.Args.(TMStaticReadArgs).ReplyChan)*/
-			tm.handleStaticTMReadWithReply(TransactionManagerRequest{TransactionId: txnID,
+			tm.handleTMStaticReadWithReply(TransactionManagerRequest{TransactionId: txnID,
 				Timestamp: request.Timestamp, Args: innerArgs.Args}, id)
 		case readSingleTMRequest:
 			singleReadArgs := innerArgs.Args.(TMSingleReadArgs)
-			tm.handleSingleRead(txnID, singleReadArgs.ReadParams, singleReadArgs.ReplyChan, id)
+			tm.handleSingleRead(txnID, singleReadArgs.ReadParams)
 		case updateStaticTMRequest:
 			/*go func(clientID int32, txnID TransactionId, channel chan TMStaticUpdateReply) {
 				replyChan <- TMS2SReply{ClientID: clientID, TxnID: txnID, ReplyType: proto.WrapperType_COMMIT, Reply: <-channel}
 			}(clientID, txnID, innerArgs.Args.(TMStaticUpdateArgs).ReplyChan)*/
-			tm.handleStaticTMUpdateWithReply(TransactionManagerRequest{TransactionId: txnID,
-				Timestamp: request.Timestamp, Args: innerArgs.Args})
+			tm.handleTMStaticUpdateWithReply(TransactionManagerRequest{TransactionId: txnID,
+				Timestamp: request.Timestamp, Args: innerArgs.Args}, rng, updBuf)
 		case readTMRequest:
 			/*go func(clientID int32, txnID TransactionId, channel chan []crdt.State) {
 				replyChan <- TMS2SReply{ClientID: clientID, TxnID: txnID, ReplyType: proto.WrapperType_READ_OBJS, Reply: <-channel}
@@ -947,16 +1223,22 @@ func (tm *TransactionManager) handleServerRequests(channel chan TransactionManag
 				replyChan <- TMS2SReply{ClientID: clientID, TxnID: txnID, ReplyType: proto.WrapperType_UPD, Reply: <-channel}
 			}(clientID, txnID, innerArgs.Args.(TMUpdateArgs).ReplyChan)*/
 			tm.handleTMUpdateWithReply(TransactionManagerRequest{TransactionId: txnID,
-				Timestamp: request.Timestamp, Args: innerArgs.Args}, ongoingInfo[clientID])
+				Timestamp: request.Timestamp, Args: innerArgs.Args}, ongoingInfo[clientID], updBuf)
 		case startTxnTMRequest:
-			var txnPartitions *ongoingTxn = &ongoingTxn{}
-			txnPartitions.partitions, txnPartitions.debugID, txnPartitions.ongoingRemote = make([]bool, nGoRoutines), rand.Intn(10), ongoingRemote{}
-			txnPartitions.lockChans, txnPartitions.replyChans = make([]chan msgToSend, len(tm.remoteIPs)), make([]chan msgReply, len(tm.remoteIPs))
+			txnPartitions, has := ongoingInfo[clientID]
+			if !has {
+				txnPartitions = &ongoingTxn{}
+				ongoingInfo[clientID] = txnPartitions
+				txnPartitions.partitions, txnPartitions.debugID, txnPartitions.ongoingRemote = tools.NewBitSet(int(nGoRoutines)), rng.Intn(10), ongoingRemote{}
+				txnPartitions.lockChans, txnPartitions.replyChans = make([]chan msgToSend, len(tm.remoteIPs)), make([]chan msgReply, len(tm.remoteIPs))
+			} else {
+				txnPartitions.reset()
+			}
 			/*go func(clientID int32, txnID TransactionId, channel chan TMStartTxnReply) {
 				replyChan <- TMS2SReply{ClientID: clientID, TxnID: txnID, ReplyType: proto.WrapperType_START_TXN, Reply: <-channel}
 			}(clientID, txnID, innerArgs.Args.(TMStartTxnArgs).ReplyChan)*/
 			tm.handleTMStartTxnWithReply(TransactionManagerRequest{TransactionId: txnID,
-				Timestamp: request.Timestamp, Args: innerArgs.Args}, ongoingInfo[clientID], id)
+				Timestamp: request.Timestamp, Args: innerArgs.Args}, txnPartitions, id, rng)
 		case commitTMRequest:
 			/*go func(clientID int32, txnID TransactionId, channel chan TMCommitReply) {
 				replyChan <- TMS2SReply{ClientID: clientID, TxnID: txnID, ReplyType: proto.WrapperType_COMMIT, Reply: <-channel}
@@ -969,6 +1251,9 @@ func (tm *TransactionManager) handleServerRequests(channel chan TransactionManag
 			//Doesn't need reply
 		case bcPermsTMRequest:
 			tm.handleTMBCPerms(innerArgs.Args.(TMBCPermsArgs))
+		case initialDataTMRequest:
+			tm.handleInitialDataWithReply(TransactionManagerRequest{TransactionId: txnID,
+				Timestamp: request.Timestamp, Args: innerArgs.Args}, rng)
 		default:
 			fmt.Println("[TM]Unknown request type for S2S:", innerArgs.Args.getRequestType())
 		}
@@ -982,12 +1267,12 @@ type ProcessReadsBuffer struct {
 	crdt.ReadProcessingObjectParams     //Original read
 }
 
-func (tm *TransactionManager) handleStaticTMReadWithReply(request TransactionManagerRequest, id int) {
+func (tm *TransactionManager) handleTMStaticReadWithReply(request TransactionManagerRequest, id int) {
 	request.Args.(TMStaticReadArgs).ReplyChan <- tm.handleStaticTMRead(request, id)
 }
 
-func (tm *TransactionManager) handleSingleRead(txnID TransactionId, readArgs crdt.ReadObjectParams, replyChan chan TMStaticReadReply, id int) (result TMStaticReadReply) {
-	readChan, states := make(chan StateClockPair, 1), make([]crdt.State, 1)
+func (tm *TransactionManager) handleSingleRead(txnID TransactionId, readArgs crdt.ReadObjectParams) (result TMStaticReadReply) {
+	readChan := make(chan StateClockPair, 1)
 	isRemote, serverIndex := tm.getReadLocation(readArgs.Bucket)
 
 	if !isRemote {
@@ -999,15 +1284,14 @@ func (tm *TransactionManager) handleSingleRead(txnID TransactionId, readArgs crd
 
 	reply := <-readChan
 	close(readChan)
-	states[0] = reply.State
-	return TMStaticReadReply{States: states, Timestamp: reply.Timestamp}
+	return TMStaticReadReply{States: []crdt.State{reply.State}, Timestamp: reply.Timestamp}
 }
 
 // func (tm *TransactionManager) handleStaticTMRead(request TransactionManagerRequest, bufs *TMClientBuffers, id int) {
 func (tm *TransactionManager) handleStaticTMRead(request TransactionManagerRequest, id int) (reply TMStaticReadReply) {
 	readArgs := request.Args.(TMStaticReadArgs)
 	if FAST_SINGLE_READ && len(readArgs.ReadParams) == 1 {
-		return tm.handleSingleRead(request.TransactionId, readArgs.ReadParams[0], readArgs.ReplyChan, id)
+		return tm.handleSingleRead(request.TransactionId, readArgs.ReadParams[0])
 	}
 	//tsToUse := request.Timestamp
 	tsToUse := tm.getClockToUse(request.Timestamp, id)
@@ -1019,12 +1303,15 @@ func (tm *TransactionManager) handleStaticTMRead(request TransactionManagerReque
 	}
 
 	var currRequest MaterializerRequest
-	readChans := make([]chan crdt.State, len(readArgs.ReadParams))
+	//readChans := make([]chan crdt.State, len(readArgs.ReadParams))
+	readChan := make(chan tools.Pair[int, crdt.State], len(readArgs.ReadParams))
 	states := make([]crdt.State, len(readArgs.ReadParams))
 	//processReads := make([]ProcessReadsBuffer, 0, 1)
 
-	reqsPerServer := make([][]crdt.ReadObjectParams, len(tm.remoteIPs))
-	remoteReqsToChan := make([][]int, len(tm.remoteIPs))
+	//reqsPerServer := make([][]crdt.ReadObjectParams, len(tm.remoteIPs))
+	//remoteReqsToChan := make([][]int, len(tm.remoteIPs))
+	var reqsPerServer [][]crdt.ReadObjectParams
+	var remoteReqsToChan [][]int
 	/*if len(readArgs.ReadParams) > len(bufs.readChans) {
 		bufs.readChans = make([]chan crdt.State, len(readArgs.ReadParams))
 		bufs.states = make([]crdt.State, len(readArgs.ReadParams))
@@ -1042,7 +1329,7 @@ func (tm *TransactionManager) handleStaticTMRead(request TransactionManagerReque
 			procRead.ReadProcessingObjectParams = procParams
 			processReads = append(processReads, procRead)
 		}*/
-		readChans[i] = make(chan crdt.State, 1)
+		//readChans[i] = make(chan crdt.State, 1)
 		isRemote, serverIndex = tm.getReadLocation(currRead.Bucket)
 
 		if !isRemote {
@@ -1052,7 +1339,9 @@ func (tm *TransactionManager) handleStaticTMRead(request TransactionManagerReque
 				MatRequestArgs: MatStaticReadArgs{MatReadCommonArgs: MatReadCommonArgs{
 					Timestamp:        tsToUse,
 					ReadObjectParams: currRead,
-					ReplyChan:        readChans[i],
+					ReplyChan:        readChan,
+					ReplyIndex:       i,
+					//ReplyChan:        readChans[i],
 					//ReplyChan:        bufs.readChans[i],
 					//HashKey: new(uint64),
 				}},
@@ -1061,6 +1350,9 @@ func (tm *TransactionManager) handleStaticTMRead(request TransactionManagerReque
 		} else {
 			/*bufs.reqsPerServer[serverIndex] = append(bufs.reqsPerServer[serverIndex], currRead)
 			bufs.remoteReqsToChan[serverIndex] = append(bufs.remoteReqsToChan[serverIndex], i)*/
+			if !hasRemote { //First time we see a remote read, initialize the slices. Most often, there won't be reads to other replicas, thus the conservative approach.
+				reqsPerServer, remoteReqsToChan = make([][]crdt.ReadObjectParams, len(tm.remoteIPs)), make([][]int, len(tm.remoteIPs))
+			}
 			reqsPerServer[serverIndex] = append(reqsPerServer[serverIndex], currRead)
 			remoteReqsToChan[serverIndex] = append(remoteReqsToChan[serverIndex], i)
 			hasRemote = true
@@ -1068,7 +1360,7 @@ func (tm *TransactionManager) handleStaticTMRead(request TransactionManagerReque
 	}
 
 	if hasRemote {
-		go tm.handleRemoteStaticReads(request.TransactionId, tsToUse, reqsPerServer, remoteReqsToChan, readChans)
+		go tm.handleRemoteStaticReads(request.TransactionId, tsToUse, reqsPerServer, remoteReqsToChan, readChan)
 		//go tm.handleRemoteStaticReads(request.TransactionId, tsToUse, bufs)
 	}
 
@@ -1083,11 +1375,17 @@ func (tm *TransactionManager) handleStaticTMRead(request TransactionManagerReque
 		processReads[i] = tm.processStaticReadHelper(processRead.PostReads, tsToUse)
 	}*/
 
-	for i, readChan := range readChans {
+	/*for i, readChan := range readChans {
 		states[i] = <-readChan
 		//fmt.Printf("[TM]Read %+v, State %+v\n", readArgs.ReadParams[i], states[i])
 		close(readChan)
+	}*/
+	var curr tools.Pair[int, crdt.State]
+	for i := 0; i < len(readArgs.ReadParams); i++ {
+		curr = <-readChan
+		states[curr.First] = curr.Second
 	}
+	close(readChan)
 	//tsEnd := time.Now().UnixNano()
 	//fmt.Printf("[TM]Static read took %d microseconds.\n", (tsEnd-tsStart)/int64(time.Duration(time.Microsecond)))
 
@@ -1213,7 +1511,7 @@ func (tm *TransactionManager) aggregateStates(states []crdt.State, aggregType cr
 }
 
 // Sends the preReads in a ReadProcessingObjectParams to the materializer's partitions
-func (tm *TransactionManager) processStaticReadHelper(reads []crdt.ReadObjectParams, tsToUse clocksi.Timestamp) (buf ProcessReadsBuffer) {
+/*func (tm *TransactionManager) processStaticReadHelper(reads []crdt.ReadObjectParams, tsToUse clocksi.Timestamp) (buf ProcessReadsBuffer) {
 	buf.states, buf.readChans = make([]crdt.State, len(reads)), make([]chan crdt.State, len(reads))
 	buf.nRepliesReceived = 0
 	var currRequest MaterializerRequest
@@ -1229,17 +1527,83 @@ func (tm *TransactionManager) processStaticReadHelper(reads []crdt.ReadObjectPar
 		tm.mat.SendRequest(currRequest)
 	}
 	return buf
+}*/
+
+func (tm *TransactionManager) handleInitialDataWithReply(request TransactionManagerRequest, rng *rand.Rand) {
+	tm.handleInitialData(request, rng)
+	//fmt.Printf("[TM][InitData]Replying to client informing that initial data request is complete.\n")
+	request.Args.(TMInitialDataArgs).ReplyChan <- true
 }
 
-func (tm *TransactionManager) handleStaticTMUpdateWithReply(request TransactionManagerRequest) {
-	request.Args.(TMStaticUpdateArgs).ReplyChan <- tm.handleStaticTMUpdate(request)
+// This request will wait until Materializer finishes applying the commit. This is useful for initialization and GC purposes.
+// This will however NOT wait for updates forwarded to remote replicas. While those *should* work, it is not intended for this method to forward requests.
+// TM's clock is still updated normally, to ensure PotionDB's GC works properly
+// IMPORTANT NOTE: This is really for initialization of data. There is no coordination between partitions. As such, concurrent initializations to the same CRDT may break causality.
+func (tm *TransactionManager) handleInitialData(request TransactionManagerRequest, rng *rand.Rand) {
+	//fmt.Printf("[TM][InitData]Received request to insert initial data.\n")
+	initArgs := request.Args.(TMInitialDataArgs)
+
+	fmt.Printf("[TM][InitialData]Received request to insert initial data with %d updates.\n", len(initArgs.UpdateParams))
+	//No need to use buffers, as handleInitialData will only be used for initialization.
+	updsPerPartition, reqsPerServer, hasRemote := tm.groupWritesNoBuf(initArgs.UpdateParams)
+	replyChan := make(chan int, len(updsPerPartition))
+	waitFor := 0
+
+	/*var copyData []int64 = make([]int64, len(tm.replicaIDs))
+	tm.localClock.Lock()
+	tm.localClock.FastCopyInto(copyData)
+	tm.localClock.Unlock()
+	txnClk := clocksi.FromSliceValuesToSliceTimestamp(copyData)*/
+	txnClk := tm.localClock.GetClock().NextTimestamp(shared.SortedReplicaID)
+	txnId := TransactionId(rng.Uint64())
+
+	reqs := make([]MaterializerRequest, len(updsPerPartition))
+	for _, partUpdates := range updsPerPartition {
+		if partUpdates != nil {
+			reqs[waitFor] = MaterializerRequest{
+				MatRequestArgs: MatInitialDataArgs{
+					TransactionId: txnId,
+					Updates:       partUpdates,
+					ReplyChan:     replyChan,
+					Timestamp:     txnClk,
+				},
+			}
+			waitFor++
+		}
+	}
+	tm.commitChan <- TMCommitNPartitions{nPartitions: waitFor, txnId: txnId, clk: txnClk}
+
+	//No coordination. We just send the request directly.
+	for i := 0; i < waitFor; i++ {
+		//fmt.Printf("[TM][InitialData]Sending initial data to partition %d\n", reqs[i].getChannel())
+		tm.mat.SendRequest(reqs[i])
+	}
+
+	if hasRemote {
+		tm.handleRemoteStaticUpds(request.TransactionId, clocksi.DummyTs, reqsPerServer)
+	}
+
+	//Wait for each partition to finish applying the updates.
+	//fmt.Printf("[TM][InitialData]Waiting for %d partitions to finish applying initial data.\n", waitFor)
+	for i := 0; i < waitFor; i++ {
+		<-replyChan
+	}
+	fmt.Printf("[TM][InitialData]Finished applying initial data of %d updates.\n", len(initArgs.UpdateParams))
+}
+
+func (tm *TransactionManager) handleTMStaticUpdateWithReply(request TransactionManagerRequest, rng *rand.Rand, updBuf *tmUpdBuffers) {
+	request.Args.(TMStaticUpdateArgs).ReplyChan <- tm.handleStaticTMUpdate(request, rng, updBuf)
+	updBuf.reset() //We reset the buffer after replying to the client, thus allowing PotionDB to reply to the client in the meantime.
 }
 
 // TODO: Separate in parts?
-func (tm *TransactionManager) handleStaticTMUpdate(request TransactionManagerRequest) (reply TMStaticUpdateReply) {
-	updateArgs := request.Args.(TMStaticUpdateArgs)
+func (tm *TransactionManager) handleStaticTMUpdate(request TransactionManagerRequest, rng *rand.Rand, updBuf *tmUpdBuffers) (reply TMStaticUpdateReply) {
+	//return TMStaticUpdateReply{TransactionId: 0, Timestamp: nil, Err: nil}
 
-	newTxnId := TransactionId(rand.Uint64())
+	updateArgs := request.Args.(TMStaticUpdateArgs)
+	fmt.Printf("[TM][StaticUpdate]Received %d updates.\n", len(updateArgs.UpdateParams))
+
+	newTxnId := TransactionId(rng.Uint64())
 	/*tm.localClock.Lock()
 	tm.TxnStartTime[newTxnId] = time.Now().UnixNano()
 	tm.localClock.Unlock()*/
@@ -1249,14 +1613,23 @@ func (tm *TransactionManager) handleStaticTMUpdate(request TransactionManagerReq
 		fmt.Print(currUpdate.KeyParams, ", ")
 	}
 	fmt.Println("]")*/
-	updsPerPartition, reqsPerServer, hasRemote := tm.groupWrites(updateArgs.UpdateParams)
+	//updsPerPartition, reqsPerServer, hasRemote := tm.groupWrites(updateArgs.UpdateParams)
+	hasRemote := tm.groupWrites(updateArgs.UpdateParams, updBuf)
+	updsPerPartition, reqsPerServer, replyChan, partBitSet := updBuf.updsPerPartition, updBuf.reqsPerServer, updBuf.replyChan, updBuf.partitionBitSet
 
-	replyChan := make(chan clocksi.Timestamp, len(updsPerPartition))
-	var currRequest MaterializerRequest
-	waitFor := 0
+	//replyChan := make(chan clocksi.Timestamp, len(updsPerPartition))
+	//var currRequest MaterializerRequest
+	waitFor, args := 0, MatStaticUpdateArgs{TransactionId: newTxnId, ReplyChan: replyChan}
+	for i := 0; i < len(updsPerPartition); i++ {
+		if partBitSet.GetBit(i) {
+			//args.Updates = updsPerPartition[i].ToSlice()
+			waitFor++
+			tm.mat.SendRequestToChannel(MaterializerRequest{MatRequestArgs: args}, uint64(i))
+		}
+	}
 
 	//2nd step: send update operations to each involved partition
-	for partId, partUpdates := range updsPerPartition {
+	/*for partId, partUpdates := range updsPerPartition {
 		if partUpdates != nil {
 			waitFor++
 			currRequest = MaterializerRequest{
@@ -1268,28 +1641,12 @@ func (tm *TransactionManager) handleStaticTMUpdate(request TransactionManagerReq
 			}
 			tm.mat.SendRequestToChannel(currRequest, uint64(partId))
 		}
-	}
+	}*/
 
 	var maxTimestamp clocksi.Timestamp = clocksi.DummyTs
 	//timer := time.NewTimer(time.Second * 7)
 	//Also 2nd step: wait for reply of each partition
 	for i := 0; i < waitFor; i++ {
-		/*select {
-		case reply := <-replyChan:
-			if reply.IsHigherOrEqual(maxTimestamp) {
-				maxTimestamp = reply
-			}
-			timer.Stop()
-		case <-timer.C:
-			fmt.Printf("[TM]Timeout waiting for static update reply. TxnID: %d. Number of replies received: %d/%d\n", newTxnId, i, waitFor)
-			time.Sleep(time.Second * 2)
-			updateArgs.ReplyChan <- TMStaticUpdateReply{
-				TransactionId: newTxnId,
-				Timestamp:     maxTimestamp,
-			}
-			return
-		}*/
-
 		reply := <-replyChan
 		if reply.IsHigherOrEqual(maxTimestamp) {
 			maxTimestamp = reply
@@ -1301,13 +1658,20 @@ func (tm *TransactionManager) handleStaticTMUpdate(request TransactionManagerReq
 
 	//3rd step: send commit to involved partitions
 	//TODO: Should I not assume that the 2nd phase of commit is fail-safe?
-	commitReq := MaterializerRequest{MatRequestArgs: MatCommitArgs{
+	/*commitReq := MaterializerRequest{MatRequestArgs: MatCommitArgs{
 		TransactionId:   newTxnId,
 		CommitTimestamp: maxTimestamp,
-	}}
-	for partId, partUpdates := range updsPerPartition {
+	}}*/
+	/*for partId, partUpdates := range updsPerPartition {
 		if partUpdates != nil {
 			tm.mat.SendRequestToChannel(commitReq, uint64(partId))
+		}
+	}*/
+	commitArgs := MatCommitArgs{TransactionId: newTxnId, CommitTimestamp: maxTimestamp}
+	for i := 0; i < int(nGoRoutines); i++ {
+		if partBitSet.GetBit(i) {
+			commitArgs.Upds = updsPerPartition[i].ToSlice()
+			tm.mat.SendRequestToChannel(MaterializerRequest{MatRequestArgs: commitArgs}, uint64(i))
 		}
 	}
 
@@ -1316,6 +1680,7 @@ func (tm *TransactionManager) handleStaticTMUpdate(request TransactionManagerReq
 		//fmt.Println("[TM][StaticWrite]Has remote upds!!!")
 		tm.handleRemoteStaticUpds(request.TransactionId, maxTimestamp, reqsPerServer)
 	}
+	fmt.Printf("[TM][StaticUpdate]Finished handling static update with %d updates.\n", len(updateArgs.UpdateParams))
 
 	//4th step: send ok to client
 	return TMStaticUpdateReply{TransactionId: newTxnId, Timestamp: maxTimestamp, Err: nil}
@@ -1374,15 +1739,18 @@ func (tm *TransactionManager) handleTMRead(request TransactionManagerRequest, tx
 	*/
 
 	var currRequest MaterializerRequest
-	readChans := make([]chan crdt.State, len(readArgs.ReadParams))
+	//readChans := make([]chan crdt.State, len(readArgs.ReadParams))
+	readChan := make(chan tools.Pair[int, crdt.State], len(readArgs.ReadParams))
 	states = make([]crdt.State, len(readArgs.ReadParams))
 
-	reqsPerServer := make([][]crdt.ReadObjectParams, len(tm.remoteIPs))
-	remoteReqsToChan := make([][]int, len(tm.remoteIPs))
+	var reqsPerServer [][]crdt.ReadObjectParams
+	var remoteReqsToChan [][]int
+	//reqsPerServer := make([][]crdt.ReadObjectParams, len(tm.remoteIPs))
+	//remoteReqsToChan := make([][]int, len(tm.remoteIPs))
 	isRemote, serverIndex, hasRemote := true, 0, false
 
 	for i, currRead := range readArgs.ReadParams {
-		readChans[i] = make(chan crdt.State, 1)
+		//readChans[i] = make(chan crdt.State, 1)
 		isRemote, serverIndex = tm.getReadLocation(currRead.Bucket)
 
 		if !isRemote {
@@ -1390,12 +1758,17 @@ func (tm *TransactionManager) handleTMRead(request TransactionManagerRequest, tx
 				MatRequestArgs: MatReadArgs{MatReadCommonArgs: MatReadCommonArgs{
 					Timestamp:        tsToUse,
 					ReadObjectParams: currRead,
-					ReplyChan:        readChans[i],
+					ReplyChan:        readChan,
+					ReplyIndex:       i,
+					//ReplyChan:        readChans[i],
 					//HashKey:          new(uint64),
 				}, TransactionId: request.TransactionId},
 			}
 			tm.mat.SendRequest(currRequest)
 		} else {
+			if !hasRemote { //First time we see a remote read, initialize the slices. Most often, there won't be reads to other replicas, thus the conservative approach.
+				reqsPerServer, remoteReqsToChan = make([][]crdt.ReadObjectParams, len(tm.remoteIPs)), make([][]int, len(tm.remoteIPs))
+			}
 			reqsPerServer[serverIndex] = append(reqsPerServer[serverIndex], currRead)
 			remoteReqsToChan[serverIndex] = append(remoteReqsToChan[serverIndex], i)
 			hasRemote = true
@@ -1403,29 +1776,32 @@ func (tm *TransactionManager) handleTMRead(request TransactionManagerRequest, tx
 	}
 
 	if hasRemote {
-		go tm.handleRemoteReads(txnPartitions, reqsPerServer, remoteReqsToChan, readChans)
+		go tm.handleRemoteReads(txnPartitions, reqsPerServer, remoteReqsToChan, readChan)
 	}
 
-	for i, readChan := range readChans {
+	/*for i, readChan := range readChans {
 		states[i] = <-readChan
 		close(readChan)
-	}
+	}*/
 
 	return states
 	//++fmt.Println(tm.replicaID, "TM - finished handling read.")
 }
 
-func (tm *TransactionManager) handleTMUpdateWithReply(request TransactionManagerRequest, txnPartitions *ongoingTxn) {
-	request.Args.(TMUpdateArgs).ReplyChan <- tm.handleTMUpdate(request, txnPartitions)
+func (tm *TransactionManager) handleTMUpdateWithReply(request TransactionManagerRequest, txnPartitions *ongoingTxn, updBuf *tmUpdBuffers) {
+	request.Args.(TMUpdateArgs).ReplyChan <- tm.handleTMUpdate(request, txnPartitions, updBuf)
+	updBuf.reset()
 }
 
-func (tm *TransactionManager) handleTMUpdate(request TransactionManagerRequest, txnPartitions *ongoingTxn) (reply TMUpdateReply) {
+func (tm *TransactionManager) handleTMUpdate(request TransactionManagerRequest, txnPartitions *ongoingTxn, updBuf *tmUpdBuffers) (reply TMUpdateReply) {
 	//++fmt.Printf("%d TM%d - Started handling update.\n", tm.replicaID, txnPartitions.debugID)
 	updateArgs := request.Args.(TMUpdateArgs)
 
-	updsPerPartition, reqsPerServer, hasRemote := tm.groupWrites(updateArgs.UpdateParams)
+	//updsPerPartition, reqsPerServer, hasRemote := tm.groupWrites(updateArgs.UpdateParams)
+	hasRemote := tm.groupWrites(updateArgs.UpdateParams, updBuf)
+	updsPerPartition, reqsPerServer, partBitSet := updBuf.updsPerPartition, updBuf.reqsPerServer, updBuf.partitionBitSet
 
-	var currRequest MaterializerRequest
+	/*var currRequest MaterializerRequest
 	var partId uint64
 
 	for id, partUpdates := range updsPerPartition {
@@ -1442,11 +1818,21 @@ func (tm *TransactionManager) handleTMUpdate(request TransactionManagerRequest, 
 			tm.mat.SendRequestToChannel(currRequest, partId)
 			//++fmt.Printf("%d TM%d - Upds list sent.\n", tm.replicaID, txnPartitions.debugID)
 		}
+	}*/
+	var partId uint64
+	txnId := request.TransactionId
+	for i := 0; i < len(updsPerPartition); i++ {
+		if partBitSet.GetBit(i) {
+			partId = uint64(i)
+			tm.mat.SendRequestToChannel(MaterializerRequest{MatRequestArgs: MatUpdateArgs{TransactionId: txnId, Updates: updsPerPartition[i].ToSlice()}}, partId)
+		}
 	}
 
 	if hasRemote {
 		tm.handleRemoteUpds(txnPartitions, reqsPerServer)
 	}
+
+	updBuf.reset()
 
 	return TMUpdateReply{Success: true, Err: nil}
 	//++fmt.Printf("%d TM%d - Finished handling update.\n", tm.replicaID, txnPartitions.debugID)
@@ -1468,7 +1854,7 @@ func (tm *TransactionManager) handleNewTrigger(request TransactionManagerRequest
 	args.ReplyChan <- true
 	tm.triggerDB.DebugPrint("[TM@NewT]")
 	tm.triggerDB.Unlock()
-	tm.replicator.remoteConn.SendTrigger(AutoUpdate{Trigger: src, Target: target}, args.IsGeneric)
+	tm.replicator.remote.SendTrigger(AutoUpdate{Trigger: src, Target: target}, args.IsGeneric)
 }
 
 func (tm *TransactionManager) handleGetTriggers(request TransactionManagerRequest) {
@@ -1503,6 +1889,7 @@ func (tm *TransactionManager) handleGetCRDT(request TransactionManagerRequest) (
 /*
 Returns an array in which each index corresponds to one partition.
 Associated to each index is the list of reads that belong to the referred partition
+(Unused as of now.)
 */
 func groupReads(reads []crdt.KeyParams) (readsPerPartition [][]crdt.KeyParams) {
 	readsPerPartition = make([][]crdt.KeyParams, nGoRoutines)
@@ -1524,8 +1911,8 @@ Returns an array in which each index corresponds to one partition.
 Associated to each index is the list of writes that belong to the referred partition
 It also separates local updates from updates for objects non-locally replicated
 */
-func (tm *TransactionManager) groupWrites(updates []crdt.UpdateObjectParams) (updsPerPartition [][]crdt.UpdateObjectParams, reqsPerServer [][]crdt.UpdateObjectParams, hasRemote bool) {
-	updsPerPartition, reqsPerServer = make([][]crdt.UpdateObjectParams, nGoRoutines), make([][]crdt.UpdateObjectParams, len(tm.remoteIPs))
+func (tm *TransactionManager) groupWritesNoBuf(updates []crdt.UpdateObjectParams) (updsPerPartition [][]crdt.UpdateObjectParams, reqsPerServer []tools.SliceWithCounter[crdt.UpdateObjectParams], hasRemote bool) {
+	updsPerPartition, reqsPerServer = make([][]crdt.UpdateObjectParams, nGoRoutines), make([]tools.SliceWithCounter[crdt.UpdateObjectParams], len(tm.remoteIPs))
 	var currChanKey uint64
 	isRemote, serverIndex, hasRemote := true, 0, false
 
@@ -1535,12 +1922,12 @@ func (tm *TransactionManager) groupWrites(updates []crdt.UpdateObjectParams) (up
 		if !isRemote {
 			currChanKey = GetChannelKey(upd.KeyParams)
 			if updsPerPartition[currChanKey] == nil {
-				updsPerPartition[currChanKey] = make([]crdt.UpdateObjectParams, 0, len(updates)*2/int(nGoRoutines))
+				updsPerPartition[currChanKey] = make([]crdt.UpdateObjectParams, 0, tools.Min(len(updates)*2/int(nGoRoutines), 1))
 			}
 			updsPerPartition[currChanKey] = append(updsPerPartition[currChanKey], upd)
 		} else {
 			//fmt.Printf("[TM][GroupWrites]Found a remote update! Key: %v\n", upd.KeyParams)
-			reqsPerServer[serverIndex] = append(reqsPerServer[serverIndex], upd)
+			reqsPerServer[serverIndex].Append(upd) //This works even with unitialized SliceWithCounter.
 			hasRemote = true
 		}
 	}
@@ -1548,19 +1935,53 @@ func (tm *TransactionManager) groupWrites(updates []crdt.UpdateObjectParams) (up
 	return
 }
 
-func (tm *TransactionManager) handleTMStartTxnWithReply(request TransactionManagerRequest, txnPartitions *ongoingTxn, id int) {
-	request.Args.(TMStartTxnArgs).ReplyChan <- tm.handleTMStartTxn(request, txnPartitions, id)
+func (tm *TransactionManager) groupWrites(updates []crdt.UpdateObjectParams, buf *tmUpdBuffers) (hasRemote bool) {
+	localBuf := *buf
+	var currChanKey uint64
+	if len(localBuf.updsPerPartition) == 0 { //First time the client is doing updates, initialize buf.
+		localBuf.updsPerPartition, localBuf.reqsPerServer = make([]tools.SliceWithCounter[crdt.UpdateObjectParams], nGoRoutines), make([]tools.SliceWithCounter[crdt.UpdateObjectParams], len(tm.remoteIPs))
+		localBuf.partitionBitSet, localBuf.replyChan = tools.NewBitSet(int(nGoRoutines)), make(chan clocksi.Timestamp, nGoRoutines)
+		for i := 0; i < int(nGoRoutines); i++ {
+			localBuf.updsPerPartition[i] = tools.NewSliceWithCounter[crdt.UpdateObjectParams](5)
+		} /*
+			for i := 0; i < len(tm.remoteIPs); i++ {
+				localBuf.reqsPerServer[i] = tools.NewSliceWithCounter[crdt.UpdateObjectParams](10)
+			}*/
+		//We don't initialize remoteIPs as in most common PotionDB usage scenarios, we won't have to forward updates.
+		//Regardless, it'll work correctly without initialization.
+	}
+
+	for _, upd := range updates {
+		isRemote, serverIndex := tm.getReadLocation(upd.Bucket)
+
+		if !isRemote {
+			currChanKey = GetChannelKey(upd.KeyParams)
+			localBuf.updsPerPartition[currChanKey].Append(upd)
+			localBuf.partitionBitSet.Set(int(currChanKey))
+		} else {
+			localBuf.reqsPerServer[serverIndex].Append(upd)
+			hasRemote = true
+		}
+	}
+	*buf = localBuf
+
+	return
 }
 
-func (tm *TransactionManager) handleTMStartTxn(request TransactionManagerRequest, txnPartitions *ongoingTxn, id int) TMStartTxnReply {
+func (tm *TransactionManager) handleTMStartTxnWithReply(request TransactionManagerRequest, txnPartitions *ongoingTxn, id int, rng *rand.Rand) {
+	request.Args.(TMStartTxnArgs).ReplyChan <- tm.handleTMStartTxn(request, txnPartitions, id, rng)
+}
+
+func (tm *TransactionManager) handleTMStartTxn(request TransactionManagerRequest, txnPartitions *ongoingTxn, id int, rng *rand.Rand) TMStartTxnReply {
 	//++fmt.Printf("%d TM%d - Started handling startTxn.\n", tm.replicaID, txnPartitions.debugID)
 	//time.Sleep(15 * time.Second)
 	//startTxnArgs := request.Args.(TMStartTxnArgs)
 
 	newClock := tm.getClockToUse(request.Timestamp, id)
 	//fmt.Println("[TM]Got clock")
-	txnPartitions.originalClk = newClock.Copy()
-	txnPartitions.TransactionId = TransactionId(rand.Uint64())
+	//txnPartitions.originalClk = newClock.Copy()
+	txnPartitions.originalClk = newClock //No need to copy as what's returned by tm.getClockToUse will never be modified.
+	txnPartitions.TransactionId = TransactionId(rng.Uint64())
 
 	//Remote data
 	//txnPartitions.conns = make([]net.Conn, len(tm.remoteIPs))
@@ -1591,8 +2012,7 @@ func (tm *TransactionManager) handleTMCommit(request TransactionManagerRequest, 
 	//PREPARE
 	//involvedPartitions := txnPartitions.partSet
 	involvedPartitions := txnPartitions.partitions
-	var currRequest MaterializerRequest
-	replyChan := make(chan clocksi.Timestamp, len(involvedPartitions))
+	replyChan := make(chan clocksi.Timestamp, nGoRoutines)
 	remoteChan := make(chan bool, 1)
 	//if txnPartitions.nConns > 0 {
 	if txnPartitions.nTxnsStarted > 0 {
@@ -1603,12 +2023,14 @@ func (tm *TransactionManager) handleTMCommit(request TransactionManagerRequest, 
 	//Send prepare to each partition involved
 	//++fmt.Printf("%d TM%d - Sending prepares to Materializers for id %d.\n", tm.replicaID, txnPartitions.debugID, request.TransactionId)
 	//for partId, _ := range involvedPartitions {
-	for partId, isOn := range involvedPartitions {
-		if isOn {
+	req := MaterializerRequest{MatRequestArgs: MatPrepareArgs{TransactionId: request.TransactionId, ReplyChan: replyChan}}
+	//for partId, isOn := range involvedPartitions {
+	for partId := 0; partId < int(nGoRoutines); partId++ {
+		//if isOn {
+		if involvedPartitions.GetBit(partId) {
 			nPartitions++
-			currRequest = MaterializerRequest{MatRequestArgs: MatPrepareArgs{TransactionId: request.TransactionId, ReplyChan: replyChan}}
 			//++fmt.Printf("%d TM%d - Sending prepare to Materializer %d for id %d.\n", tm.replicaID, txnPartitions.debugID, partId, request.TransactionId)
-			tm.mat.SendRequestToChannel(currRequest, uint64(partId))
+			tm.mat.SendRequestToChannel(req, uint64(partId))
 		}
 	}
 	//}
@@ -1631,13 +2053,10 @@ func (tm *TransactionManager) handleTMCommit(request TransactionManagerRequest, 
 	//Send commit to involved partitions
 
 	//++fmt.Printf("%d TM%d - Sending commits to Materializers.\n", tm.replicaID, txnPartitions.debugID)
-	for partId, isOn := range involvedPartitions {
-		if isOn {
-			currRequest = MaterializerRequest{MatRequestArgs: MatCommitArgs{
-				TransactionId:   request.TransactionId,
-				CommitTimestamp: maxTimestamp,
-			}}
-			tm.mat.SendRequestToChannel(currRequest, uint64(partId))
+	req = MaterializerRequest{MatRequestArgs: MatCommitArgs{TransactionId: request.TransactionId, CommitTimestamp: maxTimestamp}}
+	for partId := 0; partId < int(nGoRoutines); partId++ {
+		if involvedPartitions.GetBit(partId) {
+			tm.mat.SendRequestToChannel(req, uint64(partId))
 		}
 	}
 
@@ -1662,8 +2081,8 @@ func (tm *TransactionManager) handleTMAbort(request TransactionManagerRequest, t
 	tm.clksInUse[id] = nil
 	abortReq := MaterializerRequest{MatRequestArgs: MatAbortArgs{TransactionId: request.TransactionId}}
 	//for partId, _ := range txnPartitions.partSet {
-	for partId, isOn := range txnPartitions.partitions {
-		if isOn {
+	for partId := 0; partId < int(nGoRoutines); partId++ {
+		if txnPartitions.partitions.GetBit(partId) {
 			tm.mat.SendRequestToChannel(abortReq, uint64(partId))
 		}
 	}
@@ -1693,7 +2112,7 @@ func (tm *TransactionManager) getClockToUse(clientTs clocksi.Timestamp, id int) 
 	copyValues = tm.localClock.Copy()
 	tm.localClock.Unlock()
 	sortedIDs := clocksi.GetSortedIDs()
-	entries := make(map[int16]int64, len(copyValues))
+	entries := make(map[uint16]int64, len(copyValues))
 	for i, id := range sortedIDs {
 		entries[id] = copyValues[i]
 	}
@@ -1703,13 +2122,14 @@ func (tm *TransactionManager) getClockToUse(clientTs clocksi.Timestamp, id int) 
 	//copyClk := tm.localClock.Copy()
 	//copyValues := tm.localClock.FastCopy()
 	//tm.localClock.Unlock()
-	/*entries := make(map[int16]int64, len(copyValues))
+	/*entries := make(map[uint16]int64, len(copyValues))
 	for i, id := range tm.replicaIDs {
 		entries[id] = copyValues[i]
 	}
 	copyClk := clocksi.ClockSiTimestamp{VectorClock: entries}*/
 
-	copyClk := clocksi.ClockSiTimestamp{VectorClock: make(map[int16]int64, len(tm.replicaIDs))}
+	//copyClk := clocksi.ClockSiTimestamp{VectorClock: make(map[uint16]int64, len(tm.replicaIDs))}
+	/*copyClk := clocksi.NewSliceTimestamp()
 	//test := "hi"
 	tm.localClock.Lock()
 	tm.localClock.CopyInto(copyClk)
@@ -1720,14 +2140,21 @@ func (tm *TransactionManager) getClockToUse(clientTs clocksi.Timestamp, id int) 
 	tsToUse = copyClk.Merge(clientTs)
 	//fmt.Printf("[TM]Clocks. TM: %s; Merged: %s; Client: %s\n",
 	//copyClk.ToSortedString(), tsToUse.ToSortedString(), clientTs.ToSortedString())
-	if tsToUse.IsEqual(copyClk) {
+	/*if tsToUse.IsEqual(copyClk) {
 		//fmt.Println("[TM]TM's clock is higher than client, can return")
+		return
+	}*/
+	clk := tm.localClock.GetClock()
+	clientTs.MergeInto(clk)
+	tsToUse = clientTs
+	tm.clksInUse[id] = tsToUse
+	if tsToUse.IsEqual(clk) { //If this is true, basically it means all entries in clientTs were originally <= clk.
 		return
 	}
 	//Have to wait
 	//fmt.Println("[TM]Waiting for clock")
 	req := TMWaitClock{targetClk: tsToUse, replyChan: make(chan clocksi.Timestamp, 1)} //TODO: What if we only wait on read?
-	tm.clksInUse[id] = tsToUse
+	//tm.clksInUse[id] = tsToUse
 	tm.commitChan <- req
 	return <-req.replyChan
 }
@@ -1765,9 +2192,10 @@ func (tm *TransactionManager) applyRemoteClk(request *TMRemoteClk) {
 	//Can only apply clock if there's no transaction on hold for this clock.
 	//start := time.Now()
 	//fmt.Printf("Started applyRemoteClk at %s for ID %d with value %d\n", start.Format("2006-01-02 15:04:05.000"), request.ReplicaID, request.StableTs)
-	if len(tm.downstreamQueue[request.ReplicaID]) == 0 {
+	sortedRemoteID := clocksi.GetSortedPosOfId(request.ReplicaID)
+	if tm.downstreamQueue[sortedRemoteID].IsEmpty() {
 		replyChan := make(chan bool, nGoRoutines)
-		tm.mat.SendRequestToAllChannels(MaterializerRequest{MatRequestArgs: MatClkPosUpdArgs{ReplicaID: request.ReplicaID, StableTs: request.StableTs, ReplyChan: replyChan}})
+		tm.mat.SendRequestToAllChannels(MaterializerRequest{MatRequestArgs: MatClkPosUpdArgs{ReplicaID: sortedRemoteID, StableTs: request.StableTs, ReplyChan: replyChan}})
 		//Wait for all partitions to apply clock
 		for i := uint64(0); i < nGoRoutines; i++ {
 			<-replyChan
@@ -1781,73 +2209,80 @@ func (tm *TransactionManager) applyRemoteClk(request *TMRemoteClk) {
 		tm.localClock.Unlock()
 		copyClk := clocksi.FromSortedSliceToClockSi(copyValues)*/
 
-		copyClkValues := make([]int64, len(tm.replicaIDs))
+		/*copyClkValues := make([]int64, len(tm.replicaIDs))
 		tm.localClock.Lock()
 		tm.localClock.Timestamp.UpdatePos(request.ReplicaID, request.StableTs)
 		tm.localClock.Timestamp.FastCopyInto(copyClkValues)
 		tm.localClock.Unlock()
-		copyClk := clocksi.FromSliceValuesToClockSiTimestamp(copyClkValues)
+		copyClk := clocksi.FromSliceValuesToClockSiTimestamp(copyClkValues)*/
+
+		/*copyClk := clocksi.NewSliceTimestamp()
+		tm.localClock.Lock()
+		tm.localClock.Timestamp.UpdatePos(replicaIDPos, request.StableTs)
+		tm.localClock.Timestamp.CopyInto(copyClk)
+		tm.localClock.Unlock()*/
+		tm.remoteClock.UpdatePos(sortedRemoteID, request.StableTs)
+		tm.commitChan <- TMCommitReplClk{sortedReplicaID: sortedRemoteID, stableTs: request.StableTs}
 
 		/*tm.localClock.Lock()
 		tm.localClock.Timestamp = tm.localClock.Timestamp.UpdatePos(request.ReplicaID, request.StableTs)
 		copyClk := tm.localClock.Timestamp.Copy()
 		tm.localClock.Unlock()*/
 
-		//fmt.Println("[TM]Remote clk applied. TM clk:", tm.localClock.ToSortedString())
-		tm.checkPendingRemoteTxns(copyClk)
+		//fmt.Printf("[TM]Remote clk applied. Remote ts: %d. RemoteID: %d. TM clk: %s\n", request.StableTs, request.ReplicaID, tm.localClock.ToSortedString())
+		//tm.checkPendingRemoteTxns(copyClk)
+		tm.checkPendingRemoteTxns()
 	} else {
 		//Queue
-		//fmt.Println("[TM]Remote clk queued.")
-		tm.downstreamQueue[request.ReplicaID] = append(tm.downstreamQueue[request.ReplicaID], request)
+		//fmt.Printf("[TM]Remote clk queued. Remote ts: %d. RemoteID: %d. TM clk: %s\n", request.StableTs, request.ReplicaID, tm.localClock.ToSortedString())
+		tm.downstreamQueue[sortedRemoteID].Append(request)
 	}
 	/*end := time.Now()
 	fmt.Printf("Finished applyRemoteClk. Took: %dms, at %s for ID %d with value %d\n",
 		(end.UnixNano()-start.UnixNano())/int64(time.Millisecond), start.Format("2006-01-02 15:04:05.000"), request.ReplicaID, request.StableTs)*/
 }
 
-func (tm *TransactionManager) applyRemoteTxnGroup(request *RemoteTxnGroup) {
-	//I think I can use something similar to what's used for holding txns
-	//sliceTs := clocksi.FromClockSiToSlice(request.getMinClk())
-	//replicaPos := sliceTs.GetPosOfId(request.getReplicaID())
-	//startTs := time.Now().UnixNano() / 1000000
-	var isLowerOrEqual bool
-	tm.localClock.Lock()
-	isLowerOrEqual = request.getMinClk().IsLowerOrEqualExceptFor(tm.localClock.Timestamp, tm.replicaID, request.getReplicaID())
-	//isLowerOrEqual = tm.localClock.IsHigherOrEqualExceptFor(sliceTs, replicaPos)
-	tm.localClock.Unlock()
-	//isLowerOrEqual := true
-	if isLowerOrEqual {
-		//Can apply
-		split := tm.splitGroupByPartition(request.Txns)
-		replyChans := make([]chan []crdt.UpdateObjectParams, nGoRoutines)
-		//fmt.Printf("[TM][ApplyRemoteTxn][Group]RemoteTxnGroup. Number of txns before split: %d. Clk: %s. Started at: %s\n", len(request.Txns),
-		//request.getMaxClk().ToSortedString(), time.Now().Format("2006-01-02 15:04:05.000"))
-		for i, txns := range split {
-			/*if len(txns) == 0 {
-				fmt.Printf("[TM][ApplyRemoteTxn][Group]Partition %d has no txns to apply!\n", i)
-			} else {
-				fmt.Printf("[TM][ApplyRemoteTxn][Group]Partition %d has %d txns to apply.\n", i, len(txns))
-			}*/
-			replyChan := make(chan []crdt.UpdateObjectParams, 1)
-			replyChans[i] = replyChan
-			tm.mat.SendRequestToChannel(MaterializerRequest{
-				MatRequestArgs: MatRemoteGroupTxnArgs{Txns: txns, FinalClk: request.getMaxClk(), ReplyChan: replyChan},
-			}, uint64(i))
-			/*keys := ""
-			for _, txn := range txns {
-				for _, upd := range txn.Upds {
-					keys += fmt.Sprintf("%+v, ", upd.KeyParams)
-				}
-			}*/
-			//fmt.Printf("[TM][ApplyRemoteTxn][Group]Applying update for keys %s\n", keys)
-		}
-		tm.processMatRemoteReply(replyChans, request.getReplicaID(), request.getMaxClk())
+/*func (tm *TransactionManager) applyRemoteTxnGroup(request *RemoteTxnGroup) {
+//I think I can use something similar to what's used for holding txns
+//sliceTs := clocksi.FromClockSiToSlice(request.getMinClk())
+//replicaPos := sliceTs.GetPosOfId(request.getReplicaID())
+//startTs := time.Now().UnixNano() / 1000000
+var isLowerOrEqual bool
+otherReplicaIDPos := clocksi.GetSortedPosOfId(request.getReplicaID())
+//fmt.Printf("[TM]RemoteTxnGroup. (First) Clock received: %s. From ReplicaID: %d. TM clk: %s\n", request.Txns[0].Clk.ToSortedString(), request.getReplicaID(), tm.localClock.ToSortedString())
+tm.localClock.Lock()
+isLowerOrEqual = request.getMinClk().IsLowerOrEqualExceptFor(tm.localClock.Timestamp, shared.SortedReplicaID, otherReplicaIDPos)
+//isLowerOrEqual = tm.localClock.IsHigherOrEqualExceptFor(sliceTs, replicaPos)
+tm.localClock.Unlock()
+//isLowerOrEqual := true
+if isLowerOrEqual {
+	//Can apply
+	split := tm.splitGroupByPartition(request.Txns)
+	//replyChans := make([]chan []crdt.UpdateObjectParams, nGoRoutines)
+	//fmt.Printf("[TM]RemoteTxnGroup. Applying remote group.\n")
+	//fmt.Printf("[TM][ApplyRemoteTxn][Group]RemoteTxnGroup. Number of txns before split: %d. Clk: %s. Started at: %s\n", len(request.Txns),
+	//request.getMaxClk().ToSortedString(), time.Now().Format("2006-01-02 15:04:05.000"))
+	for i, txns := range split {
+		//replyChan := make(chan []crdt.UpdateObjectParams, 1)
+		//replyChans[i] = replyChan
+		tm.mat.SendRequestToChannel(MaterializerRequest{
+			MatRequestArgs: MatRemoteGroupTxnArgs{Txns: txns, FinalClk: request.getMaxClk(), ReplyChan: tm.matRemoteUpdsChan},
+		}, uint64(i))
+		/*keys := ""
+		for _, txn := range txns {
+			for _, upd := range txn.Upds {
+				keys += fmt.Sprintf("%+v, ", upd.KeyParams)
+			}
+		}*/
+//fmt.Printf("[TM][ApplyRemoteTxn][Group]Applying update for keys %s\n", keys)
+/*}
+		tm.processMatRemoteReply(otherReplicaIDPos, request.getMaxClk(), len(split))
 		//end := time.Now()
 		//fmt.Printf("[TM][RemoteTxn]Finished applying remoteTxnGroup from server %d at %s, took %dms\n", request.getReplicaID(), end.Format("15:04:05.000"), (end.UnixNano()/1000000)-startTs)
 	} else {
 		//Queue
-		//fmt.Println("[TM]Remote txn group in queue.")
-		tm.downstreamQueue[request.getReplicaID()] = append(tm.downstreamQueue[request.getReplicaID()], request)
+		//fmt.Printf("[TM]Remote txn group in queue. Remote (first) clk: %s. TM clk: %s.\n", request.getMinClk().ToSortedString(), tm.localClock.Timestamp.ToSortedString())
+		tm.downstreamQueue[otherReplicaIDPos].Append(request)
 	}
 }
 
@@ -1867,32 +2302,36 @@ func (tm *TransactionManager) splitGroupByPartition(toSplit []RemoteTxn) (split 
 		split[i] = split[i][:posValue]
 	}
 	return
-}
+}*/
 
 func (tm *TransactionManager) applyRemoteTxn(request *RemoteTxn) {
 	//May have to put the transaction on hold. An hold only for remote transactions.
 	//sliceTs := clocksi.FromClockSiToSlice(request.Clk)
 	//replicaPos := sliceTs.GetPosOfId(request.getReplicaID())
 	//startTs := time.Now().UnixNano() / 1000000
-	var isLowerOrEqual bool
-	tm.localClock.Lock()
-	isLowerOrEqual = request.Clk.IsLowerOrEqualExceptFor(tm.localClock.Timestamp, tm.replicaID, request.getReplicaID())
+	//var isLowerOrEqual bool
+	//fmt.Printf("[TM]RemoteTxn. Clock received: %s. From ReplicaID: %d.\n", request.Clk.ToSortedString(), request.getReplicaID())
+	remoteSortedID := clocksi.GetSortedPosOfId(request.getReplicaID())
+	/*tm.localClock.Lock()
+	isLowerOrEqual = request.Clk.IsLowerOrEqualExceptFor(tm.localClock.Timestamp, shared.SortedReplicaID, remoteSortedID)
 	//isLowerOrEqual = tm.localClock.IsHigherOrEqualExceptFor(sliceTs, replicaPos)
-	tm.localClock.Unlock()
+	tm.localClock.Unlock()*/
+
 	//isLowerOrEqual := true
-	if isLowerOrEqual {
-		//fmt.Println("[TM]Starting to apply remote txn")
+	//if isLowerOrEqual {
+	if request.Clk.IsLowerOrEqualExceptFor(tm.remoteClock, shared.SortedReplicaID, remoteSortedID) {
+		//fmt.Printf("[TM]Starting to apply remote txn with clk %s.\n", request.Clk.ToSortedString())
 		//Can apply
 		//In theory, doesn't need to update the clock as that will happen when remoteClk gets applied.
 		//In practice, I think I want to only send that once after all transactions are done.
-		replyChans := make([]chan []crdt.UpdateObjectParams, nGoRoutines)
+		//replyChans := make([]chan []crdt.UpdateObjectParams, nGoRoutines)
 		//fmt.Printf("[TM][ApplyRemoteTxn][Single]Remotetxn. Clk: %s. Started at: %s\n",
 		//request.Clk.ToSortedString(), time.Now().Format("2006-01-02 15:04:05.000"))
 		for i, upds := range request.Upds {
-			replyChan := make(chan []crdt.UpdateObjectParams, 1)
-			replyChans[i] = replyChan
+			//replyChan := make(chan []crdt.UpdateObjectParams, 1)
+			//replyChans[i] = replyChan
 			tm.mat.SendRequestToChannel(MaterializerRequest{
-				MatRequestArgs: MatRemoteTxnArgs{MatRemoteTxn: tm.makeMatRemoteTxn(request.getReplicaID(), request.Clk, upds), ReplyChan: replyChan},
+				MatRequestArgs: MatRemoteTxnArgs{MatRemoteTxn: tm.makeMatRemoteTxn(remoteSortedID, request.Clk, upds), ReplyChan: tm.matRemoteUpdsChan},
 			}, uint64(i))
 			/*keys := ""
 			for _, upd := range upds {
@@ -1900,29 +2339,36 @@ func (tm *TransactionManager) applyRemoteTxn(request *RemoteTxn) {
 			}*/
 			//fmt.Printf("[TM][ApplyRemoteTxn][Single]Applying update for keys %s\n", keys)
 		}
-		tm.processMatRemoteReply(replyChans, request.getReplicaID(), request.Clk)
+		tm.processMatRemoteReply(remoteSortedID, request.Clk, len(request.Upds))
 		//end := time.Now()
 		//fmt.Printf("[TM][RemoteTxn]Finished applying remoteTxn from server %d at %s, took %dms\n", request.getReplicaID(), end.Format("15:04:05.000"), (end.UnixNano()/1000000)-startTs)
 	} else {
 		//Queue
 		//Good thing is, for each ID, we will receive the transactions in order.
-		//fmt.Println("[TM]Remote txn in queue")
-		tm.downstreamQueue[request.getReplicaID()] = append(tm.downstreamQueue[request.getReplicaID()], request)
+		//fmt.Printf("[TM]Remote txn in queue. Clk received: %s. Clk of tm: %s.\n", request.Clk.ToSortedString(), tm.localClock.Timestamp.ToSortedString())
+		tm.downstreamQueue[remoteSortedID].Append(request)
 	}
 }
 
-func (tm *TransactionManager) processMatRemoteReply(replyChans []chan []crdt.UpdateObjectParams, replicaID int16, clk clocksi.Timestamp) {
+func (tm *TransactionManager) processMatRemoteReply(posReplicaID uint16, clk clocksi.Timestamp, nParts int) {
 	newDowns := make(map[uint64][]crdt.UpdateObjectParams) //int: partitionID
 	hasNewDowns := false
 	//fmt.Printf("[TM][ApplyRemoteTxn]Starting to wait for materializer replies. Clk: %s. Time: %s\n", clk.ToSortedString(), time.Now().Format("2006-01-02 15:04:05.000"))
 	//Receive replies; check if there's any new downstream.
-	for i, channel := range replyChans {
+	/*for i, channel := range replyChans {
 		if channel != nil {
 			reply := <-channel
 			if len(reply) > 0 {
 				hasNewDowns = true
 				newDowns[uint64(i)] = reply
 			}
+		}
+	}*/
+	for i := 0; i < nParts; i++ {
+		reply := <-tm.matRemoteUpdsChan
+		if len(reply.Second) > 0 {
+			hasNewDowns = true
+			newDowns[uint64(reply.First)] = reply.Second
 		}
 	}
 
@@ -1935,12 +2381,21 @@ func (tm *TransactionManager) processMatRemoteReply(replyChans []chan []crdt.Upd
 	tm.localClock.Unlock()
 	//copyClk := clocksi.FromSortedSliceToClockSi(copyValues)*/
 
-	copyClkValues := make([]int64, len(tm.replicaIDs))
+	/*copyClkValues := make([]int64, len(tm.replicaIDs))
 	tm.localClock.Lock()
 	tm.localClock.Timestamp.UpdatePos(replicaID, clk.GetPos(replicaID))
 	tm.localClock.Timestamp.FastCopyInto(copyClkValues)
 	tm.localClock.Unlock()
-	copyClk := clocksi.FromSliceValuesToClockSiTimestamp(copyClkValues)
+	copyClk := clocksi.FromSliceValuesToClockSiTimestamp(copyClkValues)*/
+	/*copyClk := clocksi.NewSliceTimestamp()
+	updValue := clk.GetPos(posReplicaID)
+	tm.localClock.Lock()
+	tm.localClock.Timestamp.UpdatePos(posReplicaID, updValue)
+	tm.localClock.Timestamp.CopyInto(copyClk)
+	tm.localClock.Unlock()*/
+	updValue := clk.GetPos(posReplicaID)
+	tm.remoteClock.UpdatePos(posReplicaID, updValue)
+	tm.commitChan <- TMCommitReplClk{sortedReplicaID: posReplicaID, stableTs: updValue}
 
 	/*tm.localClock.Lock()
 	tm.localClock.Timestamp.UpdatePos(replicaID, clk.GetPos(replicaID))
@@ -1951,11 +2406,10 @@ func (tm *TransactionManager) processMatRemoteReply(replyChans []chan []crdt.Upd
 	if hasNewDowns {
 		tm.downstreamOpsCh <- TMTxnForRemote{ops: newDowns}
 	}
-	tm.checkPendingRemoteTxns(copyClk)
+	tm.checkPendingRemoteTxns()
 }
 
-// TODO: When this gets called, maybe I can use a clock that was already read and avoid a lock.
-func (tm *TransactionManager) checkPendingRemoteTxns(copyClk clocksi.Timestamp) {
+func (tm *TransactionManager) checkPendingRemoteTxns() {
 	//Idea (I think somewhat similar to the previous one): go through requests until nothing can be applied
 	//Steps:
 	//Repeats
@@ -1967,95 +2421,212 @@ func (tm *TransactionManager) checkPendingRemoteTxns(copyClk clocksi.Timestamp) 
 	//6 - Update the clock.
 	//The idea is that I can send a big request to the materializer and avoid a lot of the overhead.
 	//This is "cheap" to do as this is a separate thread that is doing all the work gathering, so does not affect ongoing transactions.
-
-	//fmt.Println("[TM]Pending check")
-	//The structure to store can be something like... per partition? I still need to have txns separate for VM purposes.
-	reqsPerPart := make([][]MatRemoteTxn, nGoRoutines)
-	replyChans := make([]chan []crdt.UpdateObjectParams, nGoRoutines)
-	for i := range reqsPerPart {
-		reqsPerPart[i] = make([]MatRemoteTxn, 0, 10)
-		replyChans[i] = make(chan []crdt.UpdateObjectParams, 1)
-	}
-	newDowns := make(map[uint64][]crdt.UpdateObjectParams) //int: partitionID
+	//This version now uses a re-usable buffer to hold the txns, avoiding some GC/allocation overhead.
+	newDowns := make(map[uint64][]crdt.UpdateObjectParams) //uint64: partitionID
+	txnBuf := tm.bufPendingRemoteTxns
+	var currMsgSlice []TMRemoteMsg
 
 	atLeastOne := false    //Keeps track if there's at least one txn or clock to apply
 	foundSomething := true //For as long as one transaction of any replica is found to be appliable, the external cycle can continue
-	posToHide := 0         //Auxiliary variable that states until which point requests were processed for a given remoteID.
+	var sortedReplicaID uint16
 
-	//startTs := time.Now().UnixNano()
-	//Gather list of txns that can be applied
 	for foundSomething {
 		foundSomething = false
-		for remoteID, msgs := range tm.downstreamQueue {
-			posToHide = 0
-			for _, req := range msgs {
-				switch typedReq := req.(type) {
-				case RemoteTxn:
-					if typedReq.Clk.IsLowerOrEqualExceptFor(copyClk, tm.replicaID, typedReq.getReplicaID()) {
-						//Safe to commit. Add to list. Update copyClk
-						copyClk.UpdatePos(typedReq.getReplicaID(), typedReq.Clk.GetPos(typedReq.getReplicaID()))
-						for i, upds := range typedReq.Upds {
-							reqsPerPart[i] = append(reqsPerPart[i], tm.makeMatRemoteTxn(remoteID, typedReq.Clk, upds))
-						}
-						foundSomething, atLeastOne = true, true
-						posToHide++
-					} else {
-						//Need to go to next replica.
-						break
-					}
-				case RemoteTxnGroup:
-					if typedReq.getMaxClk().IsLowerOrEqualExceptFor(copyClk, tm.replicaID, typedReq.getReplicaID()) {
-						//Safe to commit. Add to list. Update copyClk
-						copyClk.UpdatePos(typedReq.getReplicaID(), typedReq.getMaxClk().GetPos(typedReq.getReplicaID()))
-						for _, txn := range typedReq.Txns {
-							for i, upds := range txn.Upds {
-								reqsPerPart[i] = append(reqsPerPart[i], tm.makeMatRemoteTxn(remoteID, txn.Clk, upds))
+		for remoteID, msgsBuf := range tm.downstreamQueue {
+			sortedReplicaID = uint16(remoteID)
+			if msgsBuf.Len() > 0 { //Skip our replicaID and any other empty queue.
+				currMsgSlice = msgsBuf.ToSlice()
+				for _, req := range currMsgSlice {
+					switch typedReq := req.(type) {
+					case RemoteTxn:
+						if typedReq.Clk.IsLowerOrEqualExceptFor(tm.remoteClock, shared.SortedReplicaID, sortedReplicaID) {
+							//Safe to commit. Add to list. Update copyClk
+							tm.remoteClock.UpdatePos(sortedReplicaID, typedReq.Clk.GetPos(sortedReplicaID))
+							for i, upds := range typedReq.Upds {
+								txnBuf[i].Append(tm.makeMatRemoteTxn(sortedReplicaID, typedReq.Clk, upds))
 							}
+							foundSomething, atLeastOne = true, true
+							msgsBuf.HideHead()
+						} else {
+							//Need to go to the next replica.
+							break
 						}
+					case TMRemoteClk:
+						tm.remoteClock.UpdatePos(sortedReplicaID, typedReq.StableTs)
 						foundSomething, atLeastOne = true, true
-						posToHide++
-					} else {
-						//Need to go to next replica.
-						break
+						msgsBuf.HideHead()
 					}
-				case TMRemoteClk:
-					copyClk.UpdatePos(typedReq.ReplicaID, typedReq.StableTs)
-					foundSomething, atLeastOne = true, true
-					posToHide++
 				}
 			}
-			for i := 0; i < posToHide; i++ {
-				//For GC purposes
-				msgs[i] = nil
-			}
-			if posToHide == len(msgs) { //Empty, so we can start writing from the beggining
-
-			}
-			tm.downstreamQueue[remoteID] = msgs[posToHide:]
 		}
 	}
-	//fmt.Println("[TM]Pending check end")
 
-	if !atLeastOne {
-		//Nothing to apply, can return
+	if !atLeastOne { //Nothing to do (i.e., can't apply anything), return early.
 		return
 	}
+	copyClk := tm.remoteClock.Copy() //Copy this clock as it will be sent to the partitions, thus it may be stored by CRDTs.
 	//To every partition, send a "big" request with all the transactions that were on hold + clock update.
-	for i, reqs := range reqsPerPart {
-		tm.mat.SendRequestToChannel(MaterializerRequest{MatRequestArgs: MatRemoteGroupTxnArgs{
-			Txns:      reqs,
-			FinalClk:  copyClk,
-			ReplyChan: replyChans[i],
-		}}, uint64(i))
+	nWaitFor := 0
+	for i, reqs := range txnBuf {
+		if !reqs.IsEmpty() { //Some partitions may not be involved.
+			tm.mat.SendRequestToChannel(MaterializerRequest{MatRequestArgs: MatRemoteGroupTxnArgs{
+				Txns:      reqs.ToSlice(),
+				FinalClk:  copyClk,
+				ReplyChan: tm.matRemoteUpdsChan,
+			}}, uint64(i))
+			nWaitFor++
+		}
 	}
 
+	//Take this opportunity while we wait for the partitions to deep clean the hidden parts of downstreamQueue buffers.
+	for i, buf := range tm.downstreamQueue {
+		hiddenHead := buf.LenHiddenHead()
+		if hiddenHead > 0 && hiddenHead > buf.Len()/10 { //We only shift if the amount of entries left doesn't far exceed the hidden section, to avoid expensive copying.
+			buf.ShiftElementsLeft()
+			tm.downstreamQueue[i] = buf
+		}
+	}
+	//Do a shallow clean of bufPendingRemoteTxns (OK-ish as this will be overwritten by future queued txns).
+	//This is safe as it simply resets the start and len variables, thus not affecting the slices sent to the partitions. We can't deep clear though.
+	for i := range txnBuf {
+		txnBuf[i].Clear()
+	}
+	tm.bufPendingRemoteTxns = txnBuf
+
 	hasNewDowns := false
-	//Wait for replies and update the clock here.
-	for i, replyChan := range replyChans {
-		reply := <-replyChan
-		if len(reply) > 0 {
+	for i := 0; i < nWaitFor; i++ {
+		reply := <-tm.matRemoteUpdsChan
+		if len(reply.Second) > 0 {
 			hasNewDowns = true
-			newDowns[uint64(i)] = reply
+			newDowns[uint64(reply.First)] = reply.Second
+		}
+	}
+
+	/*tm.localClock.Lock()
+	tm.localClock.MergeInto(copyClk)
+	tm.localClock.Unlock()*/
+	//tm.remoteClk was already full updated.
+	tm.commitChan <- TMCommitReplFullClk{clk: copyClk} //We may have updated several positions.
+	if hasNewDowns {
+		tm.downstreamOpsCh <- TMTxnForRemote{ops: newDowns} //Sending all grouped
+	}
+	if len(tm.remoteChan) == 0 { //Opportunity to deep clean bufPendingRemoteTxns.
+		for i := range tm.bufPendingRemoteTxns {
+			tm.bufPendingRemoteTxns[i].DeepClear()
+		}
+	}
+}
+
+/*func (tm *TransactionManager) checkPendingRemoteTxns(copyClk clocksi.Timestamp) {
+//Idea (I think somewhat similar to the previous one): go through requests until nothing can be applied
+//Steps:
+//Repeats
+//2 - Search if any ID can be applied. if it can, queue everything of that ID that can be applied. Update the clock.
+//3 - Keep doing the search, until a full cycle is done without any findings.
+//End of repeats
+//4 - Execute everything. At the end, send a clock update to every partition
+//5 - Wait for all partitions to finish commiting
+//6 - Update the clock.
+//The idea is that I can send a big request to the materializer and avoid a lot of the overhead.
+//This is "cheap" to do as this is a separate thread that is doing all the work gathering, so does not affect ongoing transactions.
+
+//fmt.Println("[TM]Pending check")
+//The structure to store can be something like... per partition? I still need to have txns separate for VM purposes.
+reqsPerPart := make([][]MatRemoteTxn, nGoRoutines)
+//replyChans := make([]chan []crdt.UpdateObjectParams, nGoRoutines)
+for i := range reqsPerPart {
+	reqsPerPart[i] = make([]MatRemoteTxn, 0, 10)
+	//replyChans[i] = make(chan []crdt.UpdateObjectParams, 1)
+}
+newDowns := make(map[uint64][]crdt.UpdateObjectParams) //int: partitionID
+
+atLeastOne := false    //Keeps track if there's at least one txn or clock to apply
+foundSomething := true //For as long as one transaction of any replica is found to be appliable, the external cycle can continue
+posToHide := 0         //Auxiliary variable that states until which point requests were processed for a given remoteID.
+var currReplicaSortedID, origReplicaID uint16
+
+//startTs := time.Now().UnixNano()
+//Gather list of txns that can be applied
+for foundSomething {
+	foundSomething = false
+	for remoteID, msgs := range tm.downstreamQueue {
+		posToHide, currReplicaSortedID, origReplicaID = 0, uint16(remoteID), clocksi.GetPosFromSortedPos(uint16(remoteID))
+		for _, req := range msgs {
+			switch typedReq := req.(type) {
+			case RemoteTxn:
+				if typedReq.Clk.IsLowerOrEqualExceptFor(copyClk, shared.SortedReplicaID, currReplicaSortedID) {
+					//Safe to commit. Add to list. Update copyClk
+					copyClk.UpdatePos(currReplicaSortedID, typedReq.Clk.GetPos(currReplicaSortedID))
+					for i, upds := range typedReq.Upds {
+						reqsPerPart[i] = append(reqsPerPart[i], tm.makeMatRemoteTxn(origReplicaID, typedReq.Clk, upds))
+					}
+					foundSomething, atLeastOne = true, true
+					posToHide++
+				} else {
+					//Need to go to next replica.
+					break
+				}
+			case RemoteTxnGroup:
+				if typedReq.getMaxClk().IsLowerOrEqualExceptFor(copyClk, shared.SortedReplicaID, currReplicaSortedID) {
+					//Safe to commit. Add to list. Update copyClk
+					copyClk.UpdatePos(currReplicaSortedID, typedReq.getMaxClk().GetPos(currReplicaSortedID))
+					for _, txn := range typedReq.Txns {
+						for i, upds := range txn.Upds {
+							reqsPerPart[i] = append(reqsPerPart[i], tm.makeMatRemoteTxn(origReplicaID, txn.Clk, upds))
+						}
+					}
+					foundSomething, atLeastOne = true, true
+					posToHide++
+				} else {
+					//Need to go to next replica.
+					break
+				}
+			case TMRemoteClk:
+				copyClk.UpdatePos(currReplicaSortedID, typedReq.StableTs)
+				foundSomething, atLeastOne = true, true
+				posToHide++
+			}
+		}
+		for i := 0; i < posToHide; i++ {
+			//For GC purposes
+			msgs[i] = nil
+		}
+		if posToHide == len(msgs) { //Empty, so we can start writing from the beggining
+
+		}
+		tm.downstreamQueue[remoteID] = msgs[posToHide:]
+	}
+}
+//fmt.Println("[TM]Pending check end")
+
+if !atLeastOne {
+	//Nothing to apply, can return
+	return
+}
+//To every partition, send a "big" request with all the transactions that were on hold + clock update.
+for i, reqs := range reqsPerPart {
+	tm.mat.SendRequestToChannel(MaterializerRequest{MatRequestArgs: MatRemoteGroupTxnArgs{
+		Txns:     reqs,
+		FinalClk: copyClk,
+		//ReplyChan: replyChans[i],
+		ReplyChan: tm.matRemoteUpdsChan,
+	}}, uint64(i))
+}
+
+hasNewDowns := false
+//Wait for replies and update the clock here.
+/*for i, replyChan := range replyChans {
+	reply := <-replyChan
+	if len(reply) > 0 {
+		hasNewDowns = true
+		newDowns[uint64(i)] = reply
+	}
+}*/ /*
+	for i := 0; i < len(reqsPerPart); i++ {
+		reply := <-tm.matRemoteUpdsChan
+		if len(reply.Second) > 0 {
+			hasNewDowns = true
+			newDowns[uint64(reply.First)] = reply.Second
 		}
 	}
 
@@ -2068,7 +2639,7 @@ func (tm *TransactionManager) checkPendingRemoteTxns(copyClk clocksi.Timestamp) 
 	/*tm.localClock.Lock()
 	tm.localClock.Timestamp = tm.localClock.Merge(copyClk)
 	//fmt.Println("[TM]Current time @ end of checking pending remotes:", time.Now().Format("2006-01-02 15:04:05.000"))
-	tm.localClock.Unlock()*/
+	tm.localClock.Unlock()*/ /*
 
 	if hasNewDowns {
 		tm.downstreamOpsCh <- TMTxnForRemote{ops: newDowns} //Sending all grouped
@@ -2076,9 +2647,9 @@ func (tm *TransactionManager) checkPendingRemoteTxns(copyClk clocksi.Timestamp) 
 	//end := time.Now()
 	//fmt.Printf("[TM][PendingCheck]Finished applying pending txns at %s, took %dms\n", end.Format("15:04:05.000"), (end.UnixNano()/1000000)-startTs)
 	//TODO: Forced GC for when downstreamQueue grows too big in capacity? Like make new slices.
-}
+}*/
 
-func (tm *TransactionManager) makeMatRemoteTxn(id int16, clk clocksi.Timestamp, upds []crdt.UpdateObjectParams) MatRemoteTxn {
+func (tm *TransactionManager) makeMatRemoteTxn(id uint16, clk clocksi.Timestamp, upds []crdt.UpdateObjectParams) MatRemoteTxn {
 	return MatRemoteTxn{ReplicaID: id, Timestamp: clk, Upds: upds}
 }
 
@@ -2086,11 +2657,12 @@ func (tm *TransactionManager) handleTMGetSnapshot(snapshot *TMGetSnapshot) {
 	buckets, replChan := snapshot.Buckets, snapshot.ReplyChan
 
 	//var values []int64
-	tm.localClock.Lock()
+	/*tm.localClock.Lock()
 	//values = tm.localClock.Copy()
 	tsToUse := tm.localClock.Timestamp.Copy()
-	tm.localClock.Unlock()
+	tm.localClock.Unlock()*/
 	//tsToUse := clocksi.FromSortedSliceToClockSi(values)
+	tsToUse := tm.localClock.GetClock()
 	nParts := len(tm.mat.channels)
 
 	//Ask to read snapshots based on the localClock.
@@ -2113,10 +2685,12 @@ func (tm *TransactionManager) handleTMGetSnapshot(snapshot *TMGetSnapshot) {
 func (tm *TransactionManager) handleTMApplySnapshot(snapshot *TMApplySnapshot) {
 	ts, states := snapshot.Timestamp, snapshot.PartStates
 	//posToUse := tm.localClock.GetPosOfId(tm.replicaID)
-	tm.localClock.Lock()
+	posToUse := clocksi.GetSortedPosOfId(tm.replicaID)
+	/*tm.localClock.Lock()
 	//ts.UpdatePos(tm.replicaID, tm.localClock.GetPosValue(posToUse))
-	ts.UpdatePos(tm.replicaID, tm.localClock.GetPos(tm.replicaID))
-	tm.localClock.Unlock()
+	ts.UpdatePos(posToUse, tm.localClock.GetPos(posToUse))
+	tm.localClock.Unlock()*/
+	ts.UpdatePos(posToUse, tm.localClock.GetValue(posToUse))
 
 	for i, partState := range states {
 		tm.mat.SendRequestToChannel(MaterializerRequest{MatRequestArgs: MatApplySnapshotArgs{
@@ -2125,10 +2699,11 @@ func (tm *TransactionManager) handleTMApplySnapshot(snapshot *TMApplySnapshot) {
 
 	//TODO: Need to update remote entries at the end of this... or right at start?
 	//sliceTs := clocksi.FromClockSiToSlice(ts)
-	tm.localClock.Lock()
+	/*tm.localClock.Lock()
 	tm.localClock.Timestamp = tm.localClock.Merge(ts)
 	//tm.localClock.SliceTimestamp.Merge(sliceTs)
-	tm.localClock.Unlock()
+	tm.localClock.Unlock()*/
+	tm.commitChan <- TMCommitReplFullClk{clk: ts} //We may have updated several positions.
 }
 
 func (tm *TransactionManager) handleReplicaID(replica *TMReplicaID) {
@@ -2157,19 +2732,32 @@ func (tm *TransactionManager) handleRemoteTrigger(trigger *TMRemoteTrigger) {
 
 // This code is run before the server starts accepting client requests, so it doesn't need to be efficient.
 func (tm *TransactionManager) handleTMStart(start *TMStart) {
-	if tm.replicaIDs == nil { //Initialization might have already been finished by S2S replicaID sharing.
+	if shared.IsReplDisabled && len(othersIPList) > 0 { //Ignore the TMStart from Replicator, wait for S2S.
+
+	} else if tm.replicaIDs == nil {
 		tm.finishTMInitialialization()
 		tm.waitStartChan <- BOTH_READY
-	} else {
+	} else { //Initialization might have already been finished by S2S replicaID sharing.
 		tm.waitStartChan <- REPL_READY
 	}
 }
 
 // This can only be done after we know all replicaIDs.
 func (tm *TransactionManager) finishTMInitialialization() {
-	clocksi.SetSortedIDs(clocksi.GetCopyKeys())
+	ids := clocksi.GetCopyKeys()
+	clocksi.SetSortedIDs(ids)
+	shared.SortedReplicaID = clocksi.GetSortedPosOfId(tm.replicaID) //Set the shared variable for the sorted replica ID.
+	tm.downstreamQueue = make([]tools.SliceWithHideable[TMRemoteMsg], len(ids))
+	for i := uint16(0); i < uint16(len(ids)); i++ {
+		if i != shared.SortedReplicaID { //We don't need a buffer for ourselves.
+			tm.downstreamQueue[i] = tools.NewSliceWithHideable[TMRemoteMsg](DOWN_QUEUE_STARTING_LEN)
+		}
+	}
 	//tm.localClock.SliceTimestamp = clocksi.NewSliceTimestamp()
-	tm.localClock.Timestamp = clocksi.NewClockSiTimestamp()
+	newClk := clocksi.Timestamp(clocksi.NewSliceTimestamp())
+	tm.localClock.readPtr.Store(&newClk)
+	tm.remoteClock = newClk.Copy()
+	go tm.handleCommitReplies()
 	//tm.mat.SendRequestToAllChannels(MaterializerRequest{MatRequestArgs: MatWaitForReplicasArgs{}})
 	tm.mat.NotifyClkReady()
 	for i, buckets := range tm.remoteBks {
@@ -2186,22 +2774,27 @@ func (tm *TransactionManager) finishTMInitialialization() {
 	tm.remoteBks = nil
 	fmt.Println("[TM][Start]RemoteIPs:", tm.remoteIPs)
 	StartBCTimer(tm.mat, tm.connPool, tm.remoteIDToIndex, tm.replicaID)
-	tm.replicaIDs = clocksi.GetCopyKeys()
+	tm.replicaIDs = ids
 }
 
 func (tm *TransactionManager) handleDownstreamGeneratedOps() {
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	replyChan := make(chan clocksi.Timestamp, nGoRoutines)
 	for {
 		req := <-tm.downstreamOpsCh
 		//fmt.Println("[TM]HandleDownstreamGeneratedOps. Downstream generated OPs at", time.Now().Format("2006-01-02 15:04:05.000"))
-		newTxnId := TransactionId(rand.Uint64())
-		replyChan := make(chan clocksi.Timestamp, len(req.ops))
-
+		newTxnId := TransactionId(rng.Uint64())
+		//replyChan := make(chan clocksi.Timestamp, len(req.ops))
+		matReq := MaterializerRequest{MatRequestArgs: MatPrepareForRemoteArgs{TransactionId: newTxnId, ReplyChan: replyChan}}
 		//Send prepare
-		for partId, partUpds := range req.ops {
+		for partId := range req.ops {
+			tm.mat.SendRequestToChannel(matReq, partId)
+		}
+		/*for partId, partUpds := range req.ops {
 			tm.mat.SendRequestToChannel(MaterializerRequest{
 				MatRequestArgs: MatPrepareForRemoteArgs{TransactionId: newTxnId, Updates: partUpds, ReplyChan: replyChan},
 			}, partId)
-		}
+		}*/
 
 		var maxTimestamp clocksi.Timestamp = clocksi.DummyTs
 		//Wait for reply of each partition
@@ -2216,9 +2809,14 @@ func (tm *TransactionManager) handleDownstreamGeneratedOps() {
 		tm.commitChan <- TMCommitNPartitions{nPartitions: len(req.ops), txnId: newTxnId, clk: maxTimestamp}
 
 		//Send commit to involved partitions
-		commitReq := MaterializerRequest{MatRequestArgs: MatCommitArgs{TransactionId: newTxnId, CommitTimestamp: maxTimestamp}}
+		/*commitReq := MaterializerRequest{MatRequestArgs: MatCommitArgs{TransactionId: newTxnId, CommitTimestamp: maxTimestamp}}
 		for partId := range req.ops {
 			tm.mat.SendRequestToChannel(commitReq, partId)
+		}*/
+		commitArgs := MatCommitArgs{TransactionId: newTxnId, CommitTimestamp: maxTimestamp, CommitType: NU_FOR_REMOTE_COMMIT}
+		for partId := range req.ops {
+			commitArgs.Upds = req.ops[partId]
+			tm.mat.SendRequestToChannel(MaterializerRequest{MatRequestArgs: commitArgs}, partId)
 		}
 		//The partitions will request the clock to be updated.
 		//fmt.Println("[TM][downGen]Commited txn with NuCRDTs for other replicas with clk", maxTimestamp.ToSortedString())
@@ -2273,7 +2871,7 @@ func (tm *TransactionManager) startTxnForRemote(txnPartitions *ongoingTxn, toCon
 
 // Note: Done by a separate goroutine
 func (tm *TransactionManager) handleRemoteReads(txnPartitions *ongoingTxn, reqsPerServer [][]crdt.ReadObjectParams,
-	remoteReqsToChan [][]int, readChans []chan crdt.State) {
+	remoteReqsToChan [][]int, readChan chan tools.Pair[int, crdt.State]) {
 
 	//if txnPartitions.nConns < len(reqsPerServer) {
 	if txnPartitions.nTxnsStarted < len(reqsPerServer) {
@@ -2312,7 +2910,8 @@ func (tm *TransactionManager) handleRemoteReads(txnPartitions *ongoingTxn, reqsP
 			readReply := reply.msg.ReadObjs.GetObjects()
 			for j, obj := range readReply {
 				readParams = currReqs[j]
-				readChans[currIndexes[j]] <- crdt.ReadRespProtoToAntidoteState(obj, readParams.CrdtType, readParams.ReadArgs.GetREADType())
+				//readChans[currIndexes[j]] <- crdt.ReadRespProtoToAntidoteState(obj, readParams.CrdtType, readParams.ReadArgs.GetREADType())
+				readChan <- tools.Pair[int, crdt.State]{First: currIndexes[j], Second: crdt.ReadRespProtoToAntidoteState(obj, readParams.CrdtType, readParams.ReadArgs.GetREADType())}
 			}
 		}
 	}
@@ -2322,12 +2921,12 @@ func (tm *TransactionManager) handleRemoteStaticSingleRead(txnID TransactionId, 
 	poolChan := tm.connPool.sendRequest(S2S, CreateS2SWrapperProto(int32(txnID), proto.WrapperType_STATIC_SINGLE_READ, CreateS2SSingleRead(readArgs)), remoteIndex)
 	reply := <-poolChan
 	state := crdt.ReadRespProtoToAntidoteState(reply.msg.SingleRead.Resp, readArgs.CrdtType, readArgs.ReadArgs.GetREADType())
-	replyChan <- StateClockPair{State: state, Timestamp: clocksi.ClockSiTimestamp{}.FromBytes(reply.msg.SingleRead.Clk)}
+	replyChan <- StateClockPair{State: state, Timestamp: clocksi.SliceTimestamp{}.FromBytes(reply.msg.SingleRead.Clk)}
 }
 
 // func (tm *TransactionManager) handleRemoteStaticReads(txnID TransactionId, ts clocksi.Timestamp, bufs *TMClientBuffers) {
 func (tm *TransactionManager) handleRemoteStaticReads(txnID TransactionId, ts clocksi.Timestamp, reqsPerServer [][]crdt.ReadObjectParams,
-	remoteReqsToChan [][]int, readChans []chan crdt.State) {
+	remoteReqsToChan [][]int, readChan chan tools.Pair[int, crdt.State]) {
 
 	//conns := make([]net.Conn, len(reqsPerServer))
 	//poolChans := make([]chan msgReply, len(bufs.reqsPerServer))
@@ -2368,7 +2967,8 @@ func (tm *TransactionManager) handleRemoteStaticReads(txnID TransactionId, ts cl
 			for j, obj := range readReply {
 				readParams = currReqs[j]
 				//fmt.Printf("[TM][S2S]ReadParams: %+v\n", readParams)
-				readChans[currIndexes[j]] <- crdt.ReadRespProtoToAntidoteState(obj, readParams.CrdtType, readParams.ReadArgs.GetREADType())
+				//readChans[currIndexes[j]] <- crdt.ReadRespProtoToAntidoteState(obj, readParams.CrdtType, readParams.ReadArgs.GetREADType())
+				readChan <- tools.Pair[int, crdt.State]{First: currIndexes[j], Second: crdt.ReadRespProtoToAntidoteState(obj, readParams.CrdtType, readParams.ReadArgs.GetREADType())}
 				//bufs.readChans[currIndexes[j]] <- crdt.ReadRespProtoToAntidoteState(obj, readParams.CrdtType, readParams.ReadArgs.GetREADType())
 			}
 			//bufs.reqsPerServer[i], bufs.remoteReqsToChan[i] = bufs.reqsPerServer[i][:0], bufs.remoteReqsToChan[i][:0]
@@ -2378,13 +2978,13 @@ func (tm *TransactionManager) handleRemoteStaticReads(txnID TransactionId, ts cl
 	//fmt.Println("[TM][StaticReadRemote]Got reply from all channels")
 }
 
-func (tm *TransactionManager) handleRemoteUpds(txnPartitions *ongoingTxn, reqsPerServer [][]crdt.UpdateObjectParams) {
+func (tm *TransactionManager) handleRemoteUpds(txnPartitions *ongoingTxn, reqsPerServer []tools.SliceWithCounter[crdt.UpdateObjectParams]) {
 
 	//if txnPartitions.nConns < len(reqsPerServer) {
 	if txnPartitions.nTxnsStarted < len(reqsPerServer) {
 		toContact, has := make([]bool, len(reqsPerServer)), false
 		for i, reqs := range reqsPerServer {
-			if len(reqs) > 0 {
+			if reqs.Len() > 0 {
 				toContact[i], has = true, true
 			}
 		}
@@ -2395,19 +2995,19 @@ func (tm *TransactionManager) handleRemoteUpds(txnPartitions *ongoingTxn, reqsPe
 
 	//Sending reqs
 	for i, reqs := range reqsPerServer {
-		if len(reqs) > 0 {
+		if reqs.Len() > 0 {
 			//SendProto(UpdateObjs, CreateUpdateObjs(txnPartitions.txnDataToUse[i], reqs), txnPartitions.conns[i])
 			//txnPartitions.lockChans[i] <- msgToSend{code: UpdateObjs, needsLock: true, msg: CreateUpdateObjs(txnPartitions.txnDataToUse[i], reqs), replyChan: txnPartitions.replyChans[i]}
 			txnPartitions.lockChans[i] <- msgToSend{code: S2S, needsLock: true, msg: CreateS2SWrapperProto(int32(txnPartitions.TransactionId),
-				proto.WrapperType_UPD, CreateUpdateObjs(txnPartitions.txnDataToUse[i], reqs)), replyChan: txnPartitions.replyChans[i]}
+				proto.WrapperType_UPD, CreateUpdateObjs(txnPartitions.txnDataToUse[i], reqs.ToSlice())), replyChan: txnPartitions.replyChans[i]}
 		}
 	}
 
-	var currReqs []crdt.UpdateObjectParams
+	var currReqs tools.SliceWithCounter[crdt.UpdateObjectParams]
 	//for i, conn := range txnPartitions.conns {
 	for i, replyChan := range txnPartitions.replyChans {
 		currReqs = reqsPerServer[i]
-		if len(currReqs) > 0 {
+		if currReqs.Len() > 0 {
 			//ReceiveProto(conn) //Waits until the other server acks the write
 			<-replyChan
 		}
@@ -2466,12 +3066,12 @@ func (tm *TransactionManager) handleRemoteAbort(txnPartitions *ongoingTxn, remot
 	remoteChan <- true
 }
 
-func (tm *TransactionManager) handleRemoteStaticUpds(txnID TransactionId, ts clocksi.Timestamp, reqsPerServer [][]crdt.UpdateObjectParams) {
+func (tm *TransactionManager) handleRemoteStaticUpds(txnID TransactionId, ts clocksi.Timestamp, reqsPerServer []tools.SliceWithCounter[crdt.UpdateObjectParams]) {
 	//conns := make([]net.Conn, len(reqsPerServer))
 	poolChans := make([]chan msgReply, len(reqsPerServer))
 	//Sending reqs
 	for i, reqs := range reqsPerServer {
-		if len(reqs) > 0 {
+		if reqs.Len() > 0 {
 			/*
 				conn, err := net.Dial("tcp", tm.remoteIPs[i])
 				utilities.CheckErr("Network connection establishment err on remote read", err)
@@ -2480,16 +3080,16 @@ func (tm *TransactionManager) handleRemoteStaticUpds(txnID TransactionId, ts clo
 			*/
 			//SendProto(StaticUpdateObjs, CreateStaticUpdateObjs(ts.ToBytes(), reqs), ongoingRemote.conns[i])
 			poolChans[i] = tm.connPool.sendRequest(S2S, CreateS2SWrapperProto(int32(txnID),
-				proto.WrapperType_STATIC_UPDATE, CreateStaticUpdateObjs(ts.ToBytes(), reqs)), i)
+				proto.WrapperType_STATIC_UPDATE, CreateStaticUpdateObjs(ts.ToBytes(), reqs.ToSlice())), i)
 		}
 	}
 
-	var currReqs []crdt.UpdateObjectParams
+	var currReqs tools.SliceWithCounter[crdt.UpdateObjectParams]
 	//for i, conn := range conns {
 	//for i, conn := range ongoingRemote.conns {
 	for i, poolChan := range poolChans {
 		currReqs = reqsPerServer[i]
-		if len(currReqs) > 0 {
+		if currReqs.Len() > 0 {
 			<-poolChan //Waits until the other server acks the write
 			//ReceiveProto(conn) //Waits until the other server acks the write
 			//conns[i].Close()
@@ -2505,133 +3105,251 @@ func (tm *TransactionManager) generateTMIDs() {
 	reusableIDs := make([]int, 0, 10)
 	//Idea: Keep a bunch of IDs already pre-available, fill more as it empties
 	for {
-		if len(reusableIDs) > 0 {
-			tm.newIDChan <- reusableIDs[len(reusableIDs)-1]
+		if len(reusableIDs) > 0 { //In this case we do not increment maxID as we are re-using an ID
+			tm.newIDChan <- TMClientID((1 << 63) | uint64(reusableIDs[len(reusableIDs)-1])) //Set highest bit to 1 to indicate that it's a reused ID.
 			reusableIDs = reusableIDs[:len(reusableIDs)-1]
 		} else {
-			tm.newIDChan <- currMaxAvailableID
 			currMaxAvailableID++
 			//TODO: Probably lock this.
 			if currMaxAvailableID == len(tm.clksInUse) {
 				tm.clksInUse = append(tm.clksInUse, nil)
 			}
+			tm.newIDChan <- TMClientID(uint64(currMaxAvailableID)) //Highest bit is 0, as it is a new ID
 		}
 		//Check if any client closed. If so, keep reading until empty
 		for len(tm.canReuseIDChan) > 0 {
 			reusableIDs = append(reusableIDs, <-tm.canReuseIDChan)
 		}
 		//Known shortcoming: if at some point there are a lot of clients, and then few, the size of clksInUse will keep being big
-		//and thus GC will always check a lot of (nil) positions
+		//and thus PotionDB's GC will always check a lot of (nil) positions
 	}
 }
 
-type TMCommitInfo interface{}
-
-// Sent by each partition of the materializer
-type TMPartCommitReply struct {
-	txnId TransactionId
-}
-
-// Sent by the goroutine who asked for the commit
-type TMCommitNPartitions struct {
-	nPartitions int
-	txnId       TransactionId
-	clk         clocksi.Timestamp
-}
-
-// Message sent by StaticRead() and StartTransaction() when the client's clock is too new.
-type TMWaitClock struct {
-	targetClk clocksi.Timestamp
-	replyChan chan clocksi.Timestamp //Replies with the actual clock of TM
-}
-
-// Used to get a copy of the TM's current clock
-type TMGetClock struct {
-	replyChan chan clocksi.Timestamp
-}
-
-// This will also need to handle requests for transactions on hold. Can use a sorted heap for this.
+// TODO: Rewrite handleCommitReplies(), in order to also support RemoteTxns.
+// RemoteTxns should be special, as they should directly lead to updating TM's clock.
+// We should also think if txnToClock and txnWaitFor should be SliceMaps instead.
+// Note that Go Map's will re-use deleted slots, so this map won't grow forever (pfew).
+// I may want to merge more clocks, and also test if this is a updating bottleneck. E.g., can check the len to see if it's full (possibly can give a very long len)
+// Maybe a solution for RemoteTxns clock updating being behind is for the replication routine to keep a local copy of the clk, that is always updated.
+// We can do a fast read from TM's clock and merge into that copy, and use that for decision making + sending to the materializer.
+// We would have to read from TM's clock anyway, so this seems wise.
+// We leverage on the fact that local txns only increase the local replica's clock entry, and that Replicator only increase another remote replica's clk
+// (as for a remote txn to be applied, all entries aside from that replica must be >= than the clk received)
+// Thus, this allows us to always only update a single pos, avoiding more complex clk merging.
+// Note that TM's clock still has to be implemented with the swapping buffers technique, as otherwise all entries in a VC would have to be atomic, and we'd have to atomically read them and copy (and this is dangerous, individual atomics are not globally atomic!)
+// This method includes a lot of code repetition, as speed execution is key, thus we want to avoid the overhead of calling auxiliary functions.
 func (tm *TransactionManager) handleCommitReplies() {
-	txnToClk := make(map[TransactionId]clocksi.Timestamp)
-	txnWaitFor := make(map[TransactionId]*int)
-	waitingTMs := ClockHeap{entries: make([]TMWaitClock, 100), nEntries: new(int)} //TODO: Put this as a variable somewhere?
-	var count *int
-	var clk clocksi.Timestamp
+	txnToClk := make(map[TransactionId]tools.Pair[clocksi.Timestamp, *int]) //Probably needs to be *int.
+	waitingTMs := tools.NewHeap(TMWaitClockLess, 100)                       //Which one better? ClockHeap or this?
 
-	//Idea: when there is many requests to process, keep the clocks together and merge them only at the end. Every 10 stack (or if queue is empty) force an update.
-	var stackedClk clocksi.Timestamp
-	nStacked := 0
+	stackedClk := (*tm.localClock.readPtr.Load()).Copy()
+	nStacked, ourReplicaID := 0, shared.SortedReplicaID
 
-	//var rdyClk clocksi.Timestamp //Idea: keep collecting clocks from TMPartCommitReply; update the local clock only when the queue is empty
-	//TODO: Maybe only need to do updatePos? Need to think about this.
 	for {
 		switch typedReq := (<-tm.commitChan).(type) {
 		case TMCommitNPartitions:
-			txnToClk[typedReq.txnId], txnWaitFor[typedReq.txnId] = typedReq.clk, &typedReq.nPartitions
+			txnToClk[typedReq.txnId] = tools.Pair[clocksi.Timestamp, *int]{First: typedReq.clk, Second: &typedReq.nPartitions}
 		case TMPartCommitReply:
-			count = txnWaitFor[typedReq.txnId]
-			*count--
-			if *count == 0 {
-				clk = txnToClk[typedReq.txnId]
+			pair := txnToClk[typedReq.txnId]
+			*pair.Second--
+			if *pair.Second == 0 {
 				delete(txnToClk, typedReq.txnId)
-				delete(txnWaitFor, typedReq.txnId)
-				if len(tm.commitChan) > int(nGoRoutines)*2 { //Most likely can apply another clock.
-					if stackedClk == nil {
-						stackedClk = clk.Copy()
-					} else {
-						stackedClk.MergeInto(clk)
+				stackedClk.UpdatePos(ourReplicaID, pair.First.GetPos(ourReplicaID))
+				nStacked++
+				if waitingTMs.Len() > 0 && waitingTMs.PeekMin().targetClk.IsLowerOrEqual(stackedClk) { //If there's waitingTMs that can be answered with this, we update the clock right away and reply to them.
+					tm.localClock.UpdatePos(ourReplicaID, stackedClk.GetPos(ourReplicaID))
+					copyClk := stackedClk.Copy()
+					waitingTMs.Pop().replyChan <- copyClk
+					for waitingTMs.Len() > 0 && waitingTMs.PeekMin().targetClk.IsLowerOrEqual(stackedClk) {
+						waitingTMs.Pop().replyChan <- copyClk
 					}
-					nStacked++
-				} else if waitingTMs.Len() == 0 { //No need to copy: we hold the lock for a shorter time
-					tm.localClock.Lock()
-					tm.localClock.MergeInto(clk) //Cannot just "copy" clk into localClock as remoteTxns may have updated localClock.
-					tm.txnsSinceCompact++
-					tm.localClock.Unlock()
-				} else {
-					tm.localClock.Lock()
-					tm.localClock.MergeInto(clk)
-					copyClk := tm.localClock.Timestamp.Copy() //TODO: Fast copy?
-					tm.txnsSinceCompact++
-					tm.localClock.Unlock()
-					//Notify all
-					for waitingTMs.Len() > 0 && waitingTMs.PeekMin().targetClk.IsLowerOrEqual(copyClk) {
-						heap.Pop(waitingTMs).(TMWaitClock).replyChan <- copyClk
+					nStacked = 0
+				}
+			}
+		case TMWaitClock:
+			//Possible data-race: when we tried to read/start txn, this clk was not satisfied yet. But in the meantime, it got satisfied. We must check it as, if updates cease, we will never reply to this client.
+			if typedReq.targetClk.IsLowerOrEqual(stackedClk) {
+				if nStacked > 0 { //Update clock.
+					tm.localClock.UpdatePos(ourReplicaID, stackedClk.GetPos(ourReplicaID))
+					nStacked = 0
+				}
+				copyClk := stackedClk.Copy()
+				typedReq.replyChan <- copyClk //No need to check waitingTMs, as all of those there are, for sure, > stackedClk.
+			} else { //Most likely scenario.
+				waitingTMs.Push(typedReq)
+			}
+		/*case TMCommitReplTxn: //Update clock right away.
+		sortedReplicaID := clocksi.GetSortedPosOfId(typedReq.replicaID)
+		stackedClk.UpdatePos(sortedReplicaID, typedReq.Clk.GetPos(sortedReplicaID))
+		if nStacked > 0 { //We need to update two positions.
+			tm.localClock.UpdateTwoPos(sortedReplicaID, stackedClk.GetPos(sortedReplicaID), ourReplicaID, stackedClk.GetPos(ourReplicaID))
+			nStacked = 0
+		} else { //Update only remote pos
+			tm.localClock.UpdatePos(sortedReplicaID, stackedClk.GetPos(sortedReplicaID))
+		}
+		if waitingTMs.Len() > 0 && waitingTMs.PeekMin().targetClk.IsLowerOrEqual(stackedClk) {
+			copyClk := stackedClk.Copy()
+			waitingTMs.Pop().replyChan <- copyClk
+			for waitingTMs.Len() > 0 && waitingTMs.PeekMin().targetClk.IsLowerOrEqual(stackedClk) {
+				waitingTMs.Pop().replyChan <- copyClk
+			}
+		}*/
+		case TMCommitReplClk: //Update clock right away. Note: replicaID is already the sorted one.
+			sortedReplicaID := typedReq.sortedReplicaID
+			stackedClk.UpdatePos(sortedReplicaID, typedReq.stableTs)
+			if nStacked > 0 { //We need to update two positions.
+				tm.localClock.UpdateTwoPos(sortedReplicaID, stackedClk.GetPos(sortedReplicaID), ourReplicaID, stackedClk.GetPos(ourReplicaID))
+				nStacked = 0
+			} else { //Update only remote pos
+				tm.localClock.UpdatePos(sortedReplicaID, stackedClk.GetPos(sortedReplicaID))
+			}
+			if waitingTMs.Len() > 0 && waitingTMs.PeekMin().targetClk.IsLowerOrEqual(stackedClk) {
+				copyClk := stackedClk.Copy()
+				waitingTMs.Pop().replyChan <- copyClk
+				for waitingTMs.Len() > 0 && waitingTMs.PeekMin().targetClk.IsLowerOrEqual(stackedClk) {
+					waitingTMs.Pop().replyChan <- copyClk
+				}
+			}
+		case TMCommitReplFullClk: //Update clock right away.
+			if nStacked > 0 {
+				stackedClk.MergeInto(typedReq.clk) //We can't do the other way around, as typedReq.clk is shared with partitions.
+				nStacked = 0
+				tm.localClock.Update(stackedClk)
+			} else {
+				tm.localClock.Update(typedReq.clk)
+			}
+			if waitingTMs.Len() > 0 && waitingTMs.PeekMin().targetClk.IsLowerOrEqual(stackedClk) {
+				copyClk := stackedClk.Copy()
+				waitingTMs.Pop().replyChan <- copyClk
+				for waitingTMs.Len() > 0 && waitingTMs.PeekMin().targetClk.IsLowerOrEqual(stackedClk) {
+					waitingTMs.Pop().replyChan <- copyClk
+				}
+			}
+		}
+		if nStacked > 0 { //Depending on certain conditions, we may update the localClock early.
+			reqsLeft := len(tm.commitChan)
+			if reqsLeft == 0 || nStacked >= 100 || (nStacked >= 5 && len(tm.commitChan) < int(nGoRoutines/4)) {
+				//Idea: if no requests left -> always update localClock. If many already stacked, force an upd for next reads to have a recent clk. If a few stacked, and few reqs left, the chance of being able to stack more are slim -> update now.
+				tm.localClock.UpdatePos(ourReplicaID, stackedClk.GetPos(ourReplicaID))
+				nStacked = 0
+				if waitingTMs.Len() > 0 && waitingTMs.PeekMin().targetClk.IsLowerOrEqual(stackedClk) {
+					copyClk := stackedClk.Copy()
+					waitingTMs.Pop().replyChan <- copyClk
+					for waitingTMs.Len() > 0 && waitingTMs.PeekMin().targetClk.IsLowerOrEqual(stackedClk) {
+						waitingTMs.Pop().replyChan <- copyClk
 					}
 				}
-				/*tm.localClock.Lock()
-				tm.localClock.Timestamp = tm.localClock.Merge(clk)
-				copyClk := tm.localClock.Timestamp.Copy()
+			}
+		}
+	}
+}
+
+// This will also need to handle requests for transactions on hold. Can use a sorted heap for this.
+/*func (tm *TransactionManager) handleCommitReplies() {
+txnToClk := make(map[TransactionId]clocksi.Timestamp)
+txnWaitFor := make(map[TransactionId]*int)
+waitingTMs := ClockHeap{entries: make([]TMWaitClock, 100), nEntries: new(int)} //TODO: Put this as a variable somewhere?
+var count *int
+var clk clocksi.Timestamp
+
+//Idea: when there is many requests to process, keep the clocks together and merge them only at the end. Every 10 stack (or if queue is empty) force an update.
+var stackedClk clocksi.Timestamp
+nStacked := 0
+
+//var rdyClk clocksi.Timestamp //Idea: keep collecting clocks from TMPartCommitReply; update the local clock only when the queue is empty
+//TODO: Maybe only need to do updatePos? Need to think about this.
+for {
+	switch typedReq := (<-tm.commitChan).(type) {
+	case TMCommitNPartitions:
+		txnToClk[typedReq.txnId], txnWaitFor[typedReq.txnId] = typedReq.clk, &typedReq.nPartitions
+	case TMPartCommitReply:
+		count = txnWaitFor[typedReq.txnId]
+		*count--
+		if *count == 0 {
+			clk = txnToClk[typedReq.txnId]
+			delete(txnToClk, typedReq.txnId)
+			delete(txnWaitFor, typedReq.txnId)
+			if len(tm.commitChan) > int(nGoRoutines)*2 { //Most likely can apply another clock.
+				if stackedClk == nil {
+					stackedClk = clk.Copy()
+				} else {
+					stackedClk.MergeInto(clk)
+				}
+				nStacked++
+			} else if waitingTMs.Len() == 0 { //No need to copy: we hold the lock for a shorter time
+				tm.localClock.Lock()
+				tm.localClock.MergeInto(clk) //Cannot just "copy" clk into localClock as remoteTxns may have updated localClock.
+				tm.txnsSinceCompact++
+				tm.localClock.Unlock()
+			} else {
+				tm.localClock.Lock()
+				tm.localClock.MergeInto(clk)
+				copyClk := tm.localClock.Timestamp.Copy() //TODO: Fast copy?
 				tm.txnsSinceCompact++
 				tm.localClock.Unlock()
 				//Notify all
 				for waitingTMs.Len() > 0 && waitingTMs.PeekMin().targetClk.IsLowerOrEqual(copyClk) {
 					heap.Pop(waitingTMs).(TMWaitClock).replyChan <- copyClk
-				}*/
-			}
-		case TMWaitClock:
-			heap.Push(waitingTMs, typedReq)
-			/*default:
-			ignore(typedReq, txnToClk, txnWaitFor, waitingTMs, count, clk)*/
-			if len(tm.commitChan) == 0 {
-				fmt.Printf("[TM][HandleCommitReplies]tm.commitChan is empty (fully processed). Current time: %s\n", time.Now().Format("2006-01-02 15:04:05.000"))
-			}
-		}
-		/*if len(tm.commitChan) == 0 {
-			if rdyClk != nil {
-				sliceClk := clocksi.FromClockSiToSlice(rdyClk)
-				var copySliceClk []int64
-				tm.localClock.Lock()
-				tm.localClock.SliceTimestamp.Merge(sliceClk)
-				copySliceClk = tm.localClock.Copy()
-				tm.localClock.Unlock()
-				copyClk := clocksi.FromSortedSliceToClockSi(copySliceClk)
-				//Notify all
-				for waitingTMs.Len() > 0 && waitingTMs.PeekMin().targetClk.IsLowerOrEqual(copyClk) {
-					heap.Pop(waitingTMs).(TMWaitClock).replyChan <- copyClk
 				}
-				rdyClk = nil
-			}
+			}*/
+/*tm.localClock.Lock()
+tm.localClock.Timestamp = tm.localClock.Merge(clk)
+copyClk := tm.localClock.Timestamp.Copy()
+tm.txnsSinceCompact++
+tm.localClock.Unlock()
+//Notify all
+for waitingTMs.Len() > 0 && waitingTMs.PeekMin().targetClk.IsLowerOrEqual(copyClk) {
+	heap.Pop(waitingTMs).(TMWaitClock).replyChan <- copyClk
+}*/ /*
+		}
+	case TMWaitClock:
+		heap.Push(waitingTMs, typedReq)
+		//default:
+		//ignore(typedReq, txnToClk, txnWaitFor, waitingTMs, count, clk)
+		if len(tm.commitChan) == 0 {
+			fmt.Printf("[TM][HandleCommitReplies]tm.commitChan is empty (fully processed). Current time: %s\n", time.Now().Format("2006-01-02 15:04:05.000"))
 		}*/
+/*case TMCommitReplTxn: //Update clock right away.
+if stackedClk == nil {
+	tm.localClock.Lock()
+	tm.localClock.MergeInto(clk)
+	tm.localClock.Unlock()
+} else {
+	stackedClk.MergeInto(clk)
+	tm.localClock.Lock()
+	tm.localClock.MergeInto(clk)
+	tm.localClock.Unlock()
+	stackedClk, nStacked = nil, 0
+}*/ /*
+	case TMCommitReplClk: //Update clock right away.
+		if stackedClk == nil {
+			tm.localClock.Lock()
+			tm.localClock.UpdatePos(typedReq.replicaID, typedReq.stableTs)
+			tm.localClock.Unlock()
+		} else {
+			stackedClk.UpdatePos(typedReq.replicaID, typedReq.stableTs)
+			tm.localClock.Lock()
+			tm.localClock.MergeInto(clk)
+			tm.localClock.Unlock()
+			stackedClk, nStacked = nil, 0
+		}
+	}*/
+/*if len(tm.commitChan) == 0 {
+	if rdyClk != nil {
+		sliceClk := clocksi.FromClockSiToSlice(rdyClk)
+		var copySliceClk []int64
+		tm.localClock.Lock()
+		tm.localClock.SliceTimestamp.Merge(sliceClk)
+		copySliceClk = tm.localClock.Copy()
+		tm.localClock.Unlock()
+		copyClk := clocksi.FromSortedSliceToClockSi(copySliceClk)
+		//Notify all
+		for waitingTMs.Len() > 0 && waitingTMs.PeekMin().targetClk.IsLowerOrEqual(copyClk) {
+			heap.Pop(waitingTMs).(TMWaitClock).replyChan <- copyClk
+		}
+		rdyClk = nil
+	}
+}*/ /*
 		if nStacked > 10 || (len(tm.commitChan) < int(nGoRoutines)/2 && stackedClk != nil) { //Force clk update. We keep nStacked small to make sure clients have access to recent clocks.
 			if waitingTMs.Len() == 0 {
 				tm.localClock.Lock()
@@ -2652,64 +3370,18 @@ func (tm *TransactionManager) handleCommitReplies() {
 			nStacked, stackedClk = 0, nil
 		}
 	}
-}
-
-type ClockHeap struct {
-	entries  []TMWaitClock
-	nEntries *int
-}
-
-func (c ClockHeap) Len() int { return *c.nEntries }
-
-// We want the heap's Pop() to return the lowest element, so we use < on "less". The smallest element is on h[0].
-func (c ClockHeap) Less(i, j int) bool {
-	return c.entries[i].targetClk.IsLowerOrEqualTotalOrder(c.entries[i].targetClk)
-}
-
-func (c ClockHeap) Swap(i, j int) {
-	c.entries[i], c.entries[j] = c.entries[j], c.entries[i]
-}
-
-func (c ClockHeap) Push(value interface{}) {
-	convValue := value.(TMWaitClock)
-	if *c.nEntries == cap(c.entries) {
-		c.entries = append(c.entries, convValue)
-		c.entries = c.entries[:cap(c.entries)] //Extending to capacity
-		*c.nEntries += 1
-	} else {
-		c.entries[*c.nEntries], *c.nEntries = convValue, *c.nEntries+1
-	}
-
-}
-
-func (c ClockHeap) Pop() interface{} {
-	if *c.nEntries == 0 {
-		return nil
-	}
-	old := c.entries[*c.nEntries-1]
-	c.entries[*c.nEntries-1] = TMWaitClock{}
-	*c.nEntries--
-	return old
-}
-
-// Returns the lowest value, but does not remove it.
-func (c ClockHeap) PeekMin() TMWaitClock {
-	if *c.nEntries == 0 {
-		return TMWaitClock{}
-	}
-	return c.entries[0]
-}
+}*/
 
 //Debug
 
 func (tm *TransactionManager) sanityCheck() {
 	for {
 		time.Sleep(50 * time.Second)
-		fmt.Println("[TM][SC]Clock: ", tm.localClock.Timestamp.ToSortedString())
+		fmt.Println("[TM][SC]Clock: ", tm.localClock.GetClock().ToSortedString())
 		//fmt.Println("[TM][SC]Clock: ", tm.localClock.SliceTimestamp.ToSortedString())
 		for id, msgs := range tm.downstreamQueue {
-			if len(msgs) > 0 {
-				fmt.Println("[TM][SC]There's still leftover msgs in downstreamQueue! ID:", id, msgs)
+			if !msgs.IsEmpty() {
+				fmt.Println("[TM][SC]There's still leftover msgs in downstreamQueue! ID:", id, msgs.ToSlice())
 			}
 		}
 	}

@@ -114,7 +114,7 @@ func (args EmbMapGetValueArguments) GetCRDTType() proto.CRDTType { return proto.
 
 func (args EmbMapGetValueArguments) GetREADType() proto.READType { return proto.READType_GET_POS }
 
-func (crdt *RWEmbArrayCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
+func (crdt *RWEmbArrayCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	crdt = new & RWEmbArrayCrdt{
 		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
 		entries:               nil,

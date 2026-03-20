@@ -15,6 +15,10 @@ package components
 //Or some GC ID that is left on each object to know the last time they were GC'ed.
 //Maybe only implement this when doing performance tests.
 
+//An idea (that needs to be better thought of): opportunistic GC.
+//Send GC request to materializer, the partitions only do the GC if their queue of reqs is empty.
+//This is definitely not perfect, as GC may take long...
+
 import (
 	fmt "fmt"
 	"sync/atomic"
@@ -24,64 +28,164 @@ import (
 	"potionDB/shared/shared"
 )
 
+// TODO: Maybe not needed @ hasdonestableclean, consider removing.
+// HasDoneStableClean:
+// //When two consecutive GCs calls have the same clock, it means PotionDB is in an stable/idle state.
+// In this situation, GC will also clean any lastCleanClk too.
+// This is currently unused.
 type GarbageCollector struct {
-	tm           *TransactionManager
-	lastCleanClk clocksi.Timestamp
+	tm                    *TransactionManager
+	lastCleanClk          clocksi.Timestamp
+	hasDoneStableClean    bool
+	hasAutomaticGCStarted bool
+	manualGcChan          chan struct{}
+	manualReplyChan       chan bool
+	gcTicker              *time.Ticker
+	matReplyChan          chan struct{}
 }
 
 const (
-	GCFreq = 5000 * time.Millisecond //ms
+	GCFreq   = 10000 * time.Millisecond //ms
+	GCFreq64 = 10000
 )
 
 func InitializeGarbageCollector(tm *TransactionManager) (gc *GarbageCollector) {
-	gc = &GarbageCollector{tm: tm}
+	gc = &GarbageCollector{tm: tm, gcTicker: time.NewTicker(24 * time.Hour),
+		manualGcChan: make(chan struct{}, 1), matReplyChan: make(chan struct{}, nGoRoutines)} //Non initialized ticker - it will be initialized by StartGCTimer()
 	if !shared.IsVMDisabled && !shared.IsGCDisabled {
 		go gc.cleanRoutine()
 	}
 	return
 }
 
-func (gc *GarbageCollector) cleanRoutine() {
-	//To prevent too much GC spam we only warn about "not cleaning" every 10 cleans
-	noCleans := 0
-	for {
-		//fmt.Println("[GC]Sleeping...")
-		time.Sleep(GCFreq)
-		//fmt.Println("[GC]It's sweeping time!")
-		//var tmSliceClk []int64
-		gc.tm.localClock.Lock()
-		tmClk := gc.tm.localClock.Copy()
-		//tmSliceClk = gc.tm.localClock.Copy()
-		gc.tm.localClock.Unlock()
+// Starts periodic GC.
+func (gc *GarbageCollector) StartGCTimer() {
+	gc.hasAutomaticGCStarted = true
+	gc.gcTicker.Reset(GCFreq)
+}
 
-		var safeClk clocksi.Timestamp = clocksi.HighestTs //All entries maxed
-		var clk clocksi.Timestamp
-		anyOngoing := false
-		nEntries := atomic.LoadInt64(&gc.tm.maxIDInUse)
-		//fmt.Printf("[GC]There's up to %d clients in the system\n", nEntries)
-		for i := int64(0); i < nEntries; i++ {
-			clk = gc.tm.clksInUse[i]
-			if clk != nil && clk.IsLower(safeClk) {
-				safeClk = clk
-				anyOngoing = true
-			}
-		} //TODO: If having any problems, decrement the self replica's clock by 500ms.
-		if !anyOngoing {
-			//fmt.Println("[GC]No pending clock! We can clean up to the TM's clock.")
-			//No pending clk.
-			safeClk = tmClk
-			//safeClk = clocksi.FromSortedSliceToClockSi(tmSliceClk)
+func (gc *GarbageCollector) RequestManualGC(replyChan chan bool) {
+	fmt.Printf("[TM]Requesting manual GC.\n")
+	gc.manualReplyChan = replyChan
+	gc.manualGcChan <- struct{}{}
+}
+
+// Returns true if there was some cleaning done, false if not. GC will only happen if TM's clock has advanced since last GC.
+func (gc *GarbageCollector) doClean(isManualGC bool) bool {
+	//fmt.Println("[GC]It's sweeping time!")
+	//var tmSliceClk []int64
+	/*gc.tm.localClock.Lock()
+	tmClk := gc.tm.localClock.Copy()
+	//tmSliceClk = gc.tm.localClock.Copy()
+	gc.tm.localClock.Unlock()*/
+	tmClk := gc.tm.localClock.GetClock()
+
+	var safeClk clocksi.Timestamp = clocksi.HighestTs //All entries maxed
+	var clk clocksi.Timestamp
+	anyOngoing := false
+	nEntries := atomic.LoadInt64(&gc.tm.maxIDInUse)
+	//fmt.Printf("[GC]There's up to %d clients in the system\n", nEntries)
+	for i := int64(0); i < nEntries; i++ {
+		clk = gc.tm.clksInUse[i]
+		if clk != nil && clk.IsLower(safeClk) {
+			safeClk = clk
+			anyOngoing = true
 		}
-		if safeClk.IsEqual(gc.lastCleanClk) {
-			if noCleans%10 == 0 {
-				fmt.Printf("[GC]Not cleaning garbage as TM's clock has not advanced since the last round of GC.\n Current clock: %v\n", safeClk.ToSortedString())
+	} //TODO: If having any problems, decrement the self replica's clock by 500ms.
+	if !anyOngoing {
+		//fmt.Println("[GC]No pending clock! We can clean up to the TM's clock.")
+		//No pending clk.
+		safeClk = tmClk
+		//safeClk = clocksi.FromSortedSliceToClockSi(tmSliceClk)
+	}
+	/*if safeClk.IsEqual(gc.lastCleanClk) {
+		if noCleans%5 == 0 {
+			fmt.Printf("[GC]Not cleaning garbage as TM's clock has not advanced since the last round of GC.\n Current clock: %v\n", safeClk.ToSortedString())
+		}
+		noCleans++
+	} else {*/
+	//fmt.Printf("[GC]Clock to clean: %s. TM clock: %v\n", safeClk.ToSortedString(), tmSliceClk)
+	if safeClk.IsEqual(gc.lastCleanClk) {
+		return false
+	}
+	if isManualGC {
+		fmt.Printf("[GC]Manual GC. Clock to clean: %s\n", safeClk.ToSortedString())
+		//fmt.Printf("[GC]Manual GC. Clock to clean: %s. TM clock: %v\n", safeClk.ToSortedString(), tmClk.ToSortedString())
+	} else {
+		fmt.Printf("[GC]Automatic GC. Clock to clean: %s\n", safeClk.ToSortedString())
+		//fmt.Printf("[GC]Automatic GC. Clock to clean: %s. TM clock: %v\n", safeClk.ToSortedString(), tmClk.ToSortedString())
+	}
+	gc.tm.mat.SendRequestToAllChannels(MaterializerRequest{MatRequestArgs: MatGCArgs{SafeClk: safeClk, ReplyChan: gc.matReplyChan}})
+	gc.lastCleanClk = safeClk.Copy() //Shouldn't really need a copy...
+	for i := 0; i < int(nGoRoutines); i++ {
+		<-gc.matReplyChan
+	}
+	return true
+	//}
+}
+
+func (gc *GarbageCollector) cleanRoutine() {
+	//To prevent too much GC spam we only warn about "not cleaning" every 5 cleans
+	noCleans, didClean, isManualGC, gcStart, gcFinish := 0, false, false, int64(0), int64(0)
+	for {
+		fmt.Println("[GC]Waiting for a GC request...")
+		select { //Wait for a manual request or the ticker.
+		case <-gc.manualGcChan:
+			fmt.Println("[GC]Received manual GC request.")
+			isManualGC = true
+			if gc.hasAutomaticGCStarted {
+				gc.gcTicker.Reset(GCFreq)
+			}
+			if len(gc.gcTicker.C) > 0 { //Small chance that both automatic and manual GC are requested at the same time.
+				<-gc.gcTicker.C
+			}
+		case <-gc.gcTicker.C:
+			fmt.Println("[GC]Received automatic GC request.")
+			isManualGC = false
+			//Note: If a concurrent manual GC is requested, we will still process it afterwards, in order to give a reply.
+		}
+		gcStart = time.Now().UnixMilli()
+		didClean = gc.doClean(isManualGC)
+		gcFinish = time.Now().UnixMilli()
+		if didClean {
+			fmt.Printf("[GC]Finished GC. Took %d ms.\n", gcFinish-gcStart)
+			noCleans = 0
+		} else {
+			if !isManualGC && noCleans%5 == 0 {
+				fmt.Printf("[GC]Not cleaning garbage as TM's clock has not advanced since the last GC round.\n Current clock: %v\n", gc.lastCleanClk.ToSortedString())
+			} else if isManualGC {
+				fmt.Printf("[GC]Manual GC call was ignored as TM's clock has not advanced since the last GC round.\n Current clock: %v\n", gc.lastCleanClk.ToSortedString())
 			}
 			noCleans++
-		} else {
-			//fmt.Printf("[GC]Clock to clean: %s. TM clock: %v\n", safeClk.ToSortedString(), tmSliceClk)
-			fmt.Printf("[GC]Clock to clean: %s. TM clock: %v\n", safeClk.ToSortedString(), tmClk)
-			gc.tm.mat.SendRequestToAllChannels(MaterializerRequest{MatRequestArgs: MatGCArgs{SafeClk: safeClk}})
-			gc.lastCleanClk, noCleans = safeClk.Copy(), 0
+		}
+		if isManualGC && gc.manualReplyChan != nil { //Notify caller of manual GC.
+			gc.manualReplyChan <- didClean
+			close(gc.manualReplyChan)
+			gc.manualReplyChan = nil
+		}
+		if gc.hasAutomaticGCStarted && gcFinish-gcStart > 2*GCFreq64/3 {
+			gc.gcTicker.Reset(GCFreq)    //Reset ticker, to ensure we wait again GCFreq.
+			for len(gc.gcTicker.C) > 0 { //Clear any pending ticks.
+				<-gc.gcTicker.C
+			}
 		}
 	}
 }
+
+/*func (gc *GarbageCollector) cleanRoutine() {
+	//To prevent too much GC spam we only warn about "not cleaning" every 5 cleans
+	noCleans, didClean := 0, false
+	for {
+		//fmt.Println("[GC]Sleeping...")
+		time.Sleep(GCFreq)
+		didClean = gc.doClean()
+		if didClean {
+			noCleans = 0
+		} else {
+			if noCleans%5 == 0 {
+				fmt.Printf("[GC]Not cleaning garbage as TM's clock has not advanced since the last round of GC.\n Current clock: %v\n", gc.lastCleanClk.ToSortedString())
+			}
+			noCleans++
+		}
+	}
+}*/

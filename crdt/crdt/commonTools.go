@@ -1,14 +1,26 @@
 package crdt
 
 import (
+	"fmt"
 	"potionDB/crdt/clocksi"
 	"potionDB/crdt/proto"
 	"potionDB/shared/shared"
 )
 
 var (
-	NReplicas int32 //Information that may be used by CRDTs if needed. Note: doesn't update when a new replica joins the system besides the intended number. But is that even supported atm?
+	NReplicas           int32   //Information that may be used by CRDTs if needed. Note: doesn't update when a new replica joins the system besides the intended number. But is that even supported atm?
+	emptyData           *[]byte = &[]byte{}
+	POINTER_ONE_UINT32          = newUInt32Pointer(1)
+	POINTER_ZERO_UINT32         = newUInt32Pointer(0)
 )
+
+func newInt32Pointer(value int32) *int32 {
+	return &value
+}
+
+func newUInt32Pointer(value uint32) *uint32 {
+	return &value
+}
 
 type PairValueClk struct { //Used by MW-Register
 	Value interface{}
@@ -19,6 +31,22 @@ type Unique uint64
 
 type Number interface {
 	int64 | float64 | uint64 | int32 | float32 | uint32 | int16 | uint16 | int8 | uint8 | int | uint
+}
+
+type SignedNumber interface {
+	int64 | float64 | int32 | float32 | int16 | int8 | int
+}
+
+type AnyInt interface {
+	int64 | int32 | int16 | int8 | int
+}
+
+type AnyUInt interface {
+	uint64 | uint32 | uint16 | uint8 | uint
+}
+
+type AnyFloat interface {
+	float64 | float32
 }
 
 /*
@@ -37,8 +65,11 @@ type UniqueElemPair struct {
 type UniqueSet map[Unique]struct{}
 
 func makeUniqueSet() (set UniqueSet) {
-	set = UniqueSet(make(map[Unique]struct{}))
-	return
+	return UniqueSet(make(map[Unique]struct{}))
+}
+
+func makeUniqueSetWithSize(size int) (set UniqueSet) {
+	return UniqueSet(make(map[Unique]struct{}, size))
 }
 
 // Adds an element to the set. This hides the internal representation of the set
@@ -83,7 +114,8 @@ func (set UniqueSet) copy() (copySet UniqueSet) {
 
 /***** CRDT INITIALIZATION *****/
 
-func InitializeCrdt(crdtType proto.CRDTType, replicaID int16) (newCrdt CRDT) {
+// dataType is an optional argument only required for CRDTs with generic implementations.
+func InitializeCrdt(crdtType proto.CRDTType, dataType proto.DATAType, replicaID uint16) (newCrdt CRDT) {
 	if shared.IsCRDTDisabled {
 		return (&EmptyCrdt{})
 	}
@@ -122,11 +154,34 @@ func InitializeCrdt(crdtType proto.CRDTType, replicaID int16) (newCrdt CRDT) {
 		newCrdt = (&PairCounterCrdt{}).Initialize(nil, replicaID)
 	case proto.CRDTType_ARRAY_COUNTER:
 		newCrdt = (&CounterArrayCrdt{}).Initialize(nil, replicaID)
+	case proto.CRDTType_ARRAY_FLOAT:
+		newCrdt = (&FloatArrayCrdt{}).Initialize(nil, replicaID)
 	case proto.CRDTType_MULTI_ARRAY:
 		newCrdt = (&MultiArrayCrdt{}).Initialize(nil, replicaID)
 	case proto.CRDTType_MVREG:
 		newCrdt = (&MVRegisterCrdt{}).Initialize(nil, replicaID)
+	case proto.CRDTType_SIMPLE_DATE:
+		newCrdt = (&SimpleDateCrdt{}).Initialize(nil, replicaID)
+	case proto.CRDTType_SETW_DATE:
+		newCrdt = (&SetWDateCrdt{}).Initialize(nil, replicaID)
+	case proto.CRDTType_INCW_DATE:
+		newCrdt = (&IncWDateCrdt{}).Initialize(nil, replicaID)
+	case proto.CRDTType_SET_ONLY_DATE:
+		newCrdt = (&SetOnlyDateCrdt{}).Initialize(nil, replicaID)
+	case proto.CRDTType_ARRAY_COMPACT:
+		newCrdt = (&CompactArrayCrdt{}).Initialize(nil, replicaID)
+	case proto.CRDTType_ARRAY_STRING:
+		newCrdt = (&StringArrayCrdt{}).Initialize(nil, replicaID)
+	case proto.CRDTType_MAP_COUNTER:
+		newCrdt = initializeCounterMap(dataType, replicaID)
+	case proto.CRDTType_ARRAY_BYTE: //TODO: Not yet coded in crdtProtoLib.
+		newCrdt = (&ByteArrayCrdt{}).Initialize(nil, replicaID)
+	case proto.CRDTType_TOPK_RMV_EXT:
+		newCrdt = (&TopKRmvExtTopCrdt{}).Initialize(nil, replicaID)
+	case proto.CRDTType_GMAP, proto.CRDTType_RWSET, proto.CRDTType_LEADERBOARD, proto.CRDTType_NOOP:
+		//Ignore.
 	default:
+		fmt.Printf("[CRDT]Warning - unknown CRDT type in initialization: %v. Maybe a new CRDT was coded but not added to commonTools.go, InitializeCrdt?\n", crdtType)
 		newCrdt = nil
 	}
 	return
@@ -151,7 +206,7 @@ func ByteMatrixToElementArray(bytes [][]byte) (elements []Element) {
 }
 
 func UInt64ArrayToUniqueSet(uniques []uint64) (uniqueSet UniqueSet) {
-	uniqueSet = makeUniqueSet()
+	uniqueSet = makeUniqueSetWithSize(len(uniques))
 	for _, unique := range uniques {
 		uniqueSet.add(Unique(unique))
 	}
@@ -189,4 +244,11 @@ func MinInt32(a, b int32) int32 {
 		return a
 	}
 	return b
+}
+
+func DataHelper(data []byte) *[]byte {
+	if len(data) == 0 {
+		return emptyData
+	}
+	return &data
 }

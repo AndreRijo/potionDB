@@ -7,19 +7,20 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unsafe"
 )
 
 type Timestamp interface {
 	//Creates a new timestamp representing the initial value, with all known replicaIDs set to 0.
 	NewTimestamp() (newTs Timestamp)
 	//Creates a new timestamp whose only entry is id
-	NewTimestampFromId(id int16) (newTs Timestamp)
+	NewTimestampFromId(id uint16) (newTs Timestamp)
 	//Gets a timestamp that is more recent than the actual one
-	NextTimestamp(id int16) (newTs Timestamp)
+	NextTimestamp(id uint16) (newTs Timestamp)
 	//Gets a timestamp that increments the id value by one
-	IncTimestamp(id int16) (newTs Timestamp)
+	IncTimestamp(id uint16) (newTs Timestamp)
 	//Increments this timestamp's value for id by one. This should only be used when it is known that the Timestamp won't be shared.
-	SelfIncTimestamp(id int16)
+	SelfIncTimestamp(id uint16)
 	//Compares two timestamps. Returns HigherTs if the current timestamp is higher than otherTs. Others should be self explanatory.
 	//Possible results: HigherTs/LowerTs/EqualTs/ConcurrentTs
 	Compare(otherTs Timestamp) (compResult TsResult)
@@ -29,6 +30,8 @@ type Timestamp interface {
 	//Returns true when Compare(otherTs) would return LowerTs or EqualTs.
 	//In some implementations (e.g., VectorClocks) and in some situations, this may be more efficient than Compare.
 	IsLowerOrEqual(otherTs Timestamp) (compResult bool)
+	//Compares only for lower or equal, returning respectively LowerTs or EqualTs. Returns UnknownTs if it is higher or concurrent. This may be more efficient than Compare in some implementations.
+	CompareLowerOrEqual(otherTs Timestamp) (compResult TsResult)
 	//Returns true when Compare(otherTs) would return LowerTs.
 	//In some implementations (e.g., VectorClocks) and in some situations, this may be more efficient than Compare.
 	IsLower(otherTs Timestamp) (compResult bool)
@@ -46,24 +49,24 @@ type Timestamp interface {
 	IsDifferent(otherTs Timestamp) bool
 	//Compares a position in both timestamps. This operation has no meaning if the Timestamp implementation isn't based on vector clocks or other position based system
 	//Returns concurrent if one of the clocks doesn't contain the reffered position
-	ComparePos(id int16, otherTs Timestamp) (compResult TsResult)
+	ComparePos(id uint16, otherTs Timestamp) (compResult TsResult)
 	//Updates a position with the max between the current value and newValue
-	UpdatePos(id int16, newValue int64) (newTs Timestamp)
+	UpdatePos(id uint16, newValue int64) (newTs Timestamp)
 	//Updates a position with newValue, even if newValue than the actual value. Useful for version management.
-	UpdateForcedPos(id int16, newValue int64) (newTs Timestamp)
+	UpdateForcedPos(id uint16, newValue int64) (newTs Timestamp)
 	//Gets the timestamp value associated to the id
-	GetPos(id int16) (value int64)
+	GetPos(id uint16) (value int64)
 	//Does the same as IsLowerOrEqual except that it ignores the values associated to self and id positions
-	IsLowerOrEqualExceptFor(otherTs Timestamp, self int16, id int16) (compResult bool)
+	IsLowerOrEqualExceptFor(otherTs Timestamp, self uint16, id uint16) (compResult bool)
 	//Does the same as isEqual except it ignores the value associated to self
-	IsEqualExceptForSelf(otherTs Timestamp, self int16) (isEqual bool)
+	IsEqualExceptForSelf(otherTs Timestamp, self uint16) (isEqual bool)
 	//Returns the timestamp resulting of merging this timestamp and the argument timestamp
 	//In a vector clock, it represents keeping the highest value of each position. The current implementation creates a new timestamp.
 	Merge(otherTs Timestamp) (mergedTs Timestamp)
 	//Merges otherTs into this timestamp. This should only be used when it is known that this timestamp will not be shared.
 	MergeInto(otherTs Timestamp)
 	//Adds entries for all replicas in knownIDs that aren't already existent in the Timestamp. This operation only makes sense for vector clock implementations.
-	Update()
+	Update() Timestamp //Returns itself, in case of implementations that may need to expand the storage
 	//Converts the timestamp to a byte array
 	ToBytes() (bytes []byte)
 	//Gets the timestamp that is represented in the byte array
@@ -80,18 +83,18 @@ type Timestamp interface {
 	//Performs a fast copy of the values according to the order in knownIDs
 	FastCopy() (values []int64)
 	//Performs a copy of the current timestamp into copyTs. It is assumed that copyTs is empty or its entries' keys are a subset of the current timestamp's.
-	CopyInto(copyTs ClockSiTimestamp)
+	CopyInto(copyTs Timestamp)
 	//Performs a fast copy of the current timestamp into values, according to the order in knownIDs
 	FastCopyInto(values []int64)
 	//Returns true if this TS happened before otherTS or, if they are concurrent, if by a total order TS should be before orderTS. Also returns true if they are equal.
 	IsLowerOrEqualTotalOrder(otherTs Timestamp) (compResult bool)
 	//For vector clocks, get the list of IDs sorted numerically
-	GetSortedKeys() (keys []int16)
+	GetSortedKeys() (keys []uint16)
 }
 
 type ClockSiTimestamp struct {
 	//VectorClock *[]int64
-	VectorClock map[int16]int64 //replicaID to clock value
+	VectorClock map[uint16]int64 //replicaID to clock value
 }
 
 type TsResult int
@@ -112,6 +115,12 @@ type StringKey string //Literal []int64 to string conversion
 
 type ByteKey string //BigEndian byte conversion of []int64
 
+// This key hashes faster than using StringKey or ByteKey. For SliceClocks, it also avoids new allocations.
+type PointerKey struct {
+	ptr *int64 //Pointer to the first byte of the slice representation.
+	len int
+}
+
 //type SliceKey []int64
 
 const (
@@ -120,40 +129,53 @@ const (
 	HigherTs     TsResult = 1
 	LowerTs      TsResult = 2
 	ConcurrentTs TsResult = 3
+	UnknownTs    TsResult = 4
 
 	//Specific to clocksi implementation
-	entrySize    = 8
-	randomFactor = 500  //max value that can be added to the timestamp to avoid collisions
-	useByteKey   = true //true = TimestampKey uses byte representation (ByteKey). Otherwise, uses StringKey.
+	entrySize     = 8
+	randomFactor  = 500 //max value that can be added to the timestamp to avoid collisions
+	usePointerKey = true
+	useByteKey    = false //true = TimestampKey uses byte representation (ByteKey). Otherwise, uses StringKey.
 	//useSliceKey = true //true = SliceKey ([]int64). false = string representation of the numbers
 )
 
 var (
 	//Useful for comparations or other situations in which we need a temporary, non-significant, timestamp
-	DummyTs   = NewClockSiTimestampFromId(0)
-	knownIDs  = make([]int16, 0, 5) //Known replicaIDs. All new ClockSiTimestamps generated with NewClockSiTimestamp() will contain entries for these IDs
-	HighestTs = ClockSiTimestamp{VectorClock: make(map[int16]int64, 5)}
-	MinimumTs = ClockSiTimestamp{VectorClock: make(map[int16]int64, 5)}
+	//DummyTs   = NewClockSiTimestampFromId(0)
+	DummyTs  = NewSliceTimestamp()
+	knownIDs = make([]uint16, 0, 5) //Known replicaIDs. All new ClockSiTimestamps generated with NewClockSiTimestamp() will contain entries for these IDs
+	//HighestTs = ClockSiTimestamp{VectorClock: make(map[uint16]int64, 5)}
+	//MinimumTs = ClockSiTimestamp{VectorClock: make(map[uint16]int64, 5)}
+	//HighestTs = SliceTimestamp{vc: make([]int64, 5)}
+	//MinimumTs = SliceTimestamp{vc: make([]int64, 5)}
+	HighestTs, MinimumTs = SliceTimestamp{vc: make([]int64, 0, 5)}, SliceTimestamp{vc: make([]int64, 0, 5)}
+	nReplicas            = 0
 )
 
-func AddNewID(id int16) {
+func AddNewID(id uint16) {
 	knownIDs = append(knownIDs, id)
+	nReplicas++
 	addToHighestAndMinimumTs(id)
+	DummyTs = NewSliceTimestamp()
 }
 
 // Returns a copy of the known IDs
-func GetCopyKeys() (ids []int16) {
-	ids = make([]int16, len(knownIDs))
+func GetCopyKeys() (ids []uint16) {
+	ids = make([]uint16, len(knownIDs))
 	copy(ids, knownIDs)
 	return ids
 }
 
-func GetKeys() (ids []int16) {
+func GetKeys() (ids []uint16) {
 	return knownIDs
 }
 
+func GetNumberReplicas() int {
+	return nReplicas
+}
+
 func FromSliceValuesToClockSiTimestamp(values []int64) (ts Timestamp) {
-	vc := make(map[int16]int64, len(knownIDs))
+	vc := make(map[uint16]int64, len(knownIDs))
 	for i, id := range knownIDs {
 		vc[id] = values[i]
 	}
@@ -162,12 +184,12 @@ func FromSliceValuesToClockSiTimestamp(values []int64) (ts Timestamp) {
 
 // Creates a new timestamp. This gives the same result as doing: newTs = ClockSiTimestamp{}.NewTimestamp().
 // Use whichever option feels more natural.
-func NewClockSiTimestampFromId(id int16) (ts Timestamp) {
+func NewClockSiTimestampFromId(id uint16) (ts Timestamp) {
 	return ClockSiTimestamp{}.NewTimestampFromId(id)
 }
 
-func (ts ClockSiTimestamp) NewTimestampFromId(id int16) (newTs Timestamp) {
-	vc := make(map[int16]int64, len(knownIDs))
+func (ts ClockSiTimestamp) NewTimestampFromId(id uint16) (newTs Timestamp) {
+	vc := make(map[uint16]int64, len(knownIDs))
 	vc[id] = 0
 	//ts = ClockSiTimestamp{VectorClock: vc}
 	//return ts
@@ -179,15 +201,15 @@ func NewClockSiTimestamp() (ts Timestamp) {
 }
 
 func (ts ClockSiTimestamp) NewTimestamp() (newTs Timestamp) {
-	vc := make(map[int16]int64, len(knownIDs))
+	vc := make(map[uint16]int64, len(knownIDs))
 	for _, id := range knownIDs {
 		vc[id] = 0
 	}
 	return ClockSiTimestamp{VectorClock: vc}
 }
 
-func (ts ClockSiTimestamp) NextTimestamp(id int16) (newTs Timestamp) {
-	newVc := make(map[int16]int64, len(ts.VectorClock))
+func (ts ClockSiTimestamp) NextTimestamp(id uint16) (newTs Timestamp) {
+	newVc := make(map[uint16]int64, len(ts.VectorClock))
 	for i, value := range ts.VectorClock {
 		newVc[i] = value
 	}
@@ -205,8 +227,8 @@ func (ts ClockSiTimestamp) NextTimestamp(id int16) (newTs Timestamp) {
 
 }
 
-func (ts ClockSiTimestamp) IncTimestamp(id int16) (newTs Timestamp) {
-	newVc := make(map[int16]int64, len(ts.VectorClock))
+func (ts ClockSiTimestamp) IncTimestamp(id uint16) (newTs Timestamp) {
+	newVc := make(map[uint16]int64, len(ts.VectorClock))
 	for i, value := range ts.VectorClock {
 		newVc[i] = value
 	}
@@ -214,14 +236,13 @@ func (ts ClockSiTimestamp) IncTimestamp(id int16) (newTs Timestamp) {
 	return ClockSiTimestamp{VectorClock: newVc}
 }
 
-func (ts ClockSiTimestamp) SelfIncTimestamp(id int16) {
+func (ts ClockSiTimestamp) SelfIncTimestamp(id uint16) {
 	ts.VectorClock[id] += 1
 }
 
 func (ts ClockSiTimestamp) Compare(otherTs Timestamp) (compResult TsResult) {
 	if otherTs == nil {
-		compResult = HigherTs
-		return
+		return HigherTs
 	}
 
 	otherVc := otherTs.(ClockSiTimestamp).VectorClock
@@ -292,6 +313,29 @@ func (ts ClockSiTimestamp) IsHigher(otherTs Timestamp) (compResult bool) {
 	return foundLower
 }
 
+func (ts ClockSiTimestamp) CompareLowerOrEqual(otherTs Timestamp) (compResult TsResult) {
+	if otherTs == nil {
+		return UnknownTs
+	}
+
+	otherVc := otherTs.(ClockSiTimestamp).VectorClock
+	selfVc := ts.VectorClock
+	lower := false
+
+	for i, selfValue := range selfVc {
+		if selfValue > otherVc[i] {
+			return UnknownTs
+		} else if selfValue < otherVc[i] {
+			lower = true
+		}
+	}
+
+	if lower {
+		return LowerTs
+	}
+	return EqualTs
+}
+
 func (ts ClockSiTimestamp) IsLowerOrEqual(otherTs Timestamp) (compResult bool) {
 	if otherTs == nil {
 		return false
@@ -310,7 +354,7 @@ func (ts ClockSiTimestamp) IsLowerOrEqual(otherTs Timestamp) (compResult bool) {
 	return true
 }
 
-func (ts ClockSiTimestamp) IsLowerOrEqualExceptFor(otherTs Timestamp, self int16, id int16) (compResult bool) {
+func (ts ClockSiTimestamp) IsLowerOrEqualExceptFor(otherTs Timestamp, self uint16, id uint16) (compResult bool) {
 	if otherTs == nil {
 		return false
 	}
@@ -329,7 +373,7 @@ func (ts ClockSiTimestamp) IsLowerOrEqualExceptFor(otherTs Timestamp, self int16
 	return true
 }
 
-func (ts ClockSiTimestamp) IsEqualExceptForSelf(otherTs Timestamp, self int16) (isEqual bool) {
+func (ts ClockSiTimestamp) IsEqualExceptForSelf(otherTs Timestamp, self uint16) (isEqual bool) {
 	if otherTs == nil {
 		return false
 	}
@@ -400,7 +444,7 @@ func (ts ClockSiTimestamp) IsLowerOrEqualTotalOrder(otherTs Timestamp) (compResu
 		return true
 	}
 	//Concurrent. Check which one has the minimum ID that is "lower"
-	minIdLower, minIdHigher := int16(math.MaxInt16), int16(math.MaxInt16)
+	minIdLower, minIdHigher := uint16(math.MaxUint16), uint16(math.MaxUint16)
 	for i, selfValue := range selfVc {
 		if selfValue > otherVc[i] && minIdLower > i {
 			minIdLower = i
@@ -437,7 +481,7 @@ func (ts ClockSiTimestamp) IsConcurrent(otherTs Timestamp) (compResult bool) {
 	return ts.Compare(otherTs) == ConcurrentTs
 }
 
-func (ts ClockSiTimestamp) ComparePos(id int16, otherTs Timestamp) (compResult TsResult) {
+func (ts ClockSiTimestamp) ComparePos(id uint16, otherTs Timestamp) (compResult TsResult) {
 	tsValue, hasTs := ts.VectorClock[id]
 	otherTsValue, hasOtherTs := otherTs.(ClockSiTimestamp).VectorClock[id]
 	if !hasTs || !hasOtherTs {
@@ -452,7 +496,7 @@ func (ts ClockSiTimestamp) ComparePos(id int16, otherTs Timestamp) (compResult T
 	return HigherTs
 }
 
-func (ts ClockSiTimestamp) UpdatePos(id int16, newValue int64) (newTs Timestamp) {
+func (ts ClockSiTimestamp) UpdatePos(id uint16, newValue int64) (newTs Timestamp) {
 	if ts.VectorClock[id] < newValue {
 		ts.VectorClock[id] = newValue
 	}
@@ -460,26 +504,26 @@ func (ts ClockSiTimestamp) UpdatePos(id int16, newValue int64) (newTs Timestamp)
 	return
 }
 
-func (ts ClockSiTimestamp) UpdateForcedPos(id int16, newValue int64) (newTs Timestamp) {
+func (ts ClockSiTimestamp) UpdateForcedPos(id uint16, newValue int64) (newTs Timestamp) {
 	ts.VectorClock[id] = newValue
 	newTs = ts
 	return
 }
 
-func (ts ClockSiTimestamp) GetPos(id int16) (value int64) {
+func (ts ClockSiTimestamp) GetPos(id uint16) (value int64) {
 	return ts.VectorClock[id]
 }
 
 func (ts ClockSiTimestamp) Merge(otherTs Timestamp) (mergedTs Timestamp) {
 	if otherTs == nil {
 		//Just do a copy
-		vc := make(map[int16]int64, len(ts.VectorClock))
+		vc := make(map[uint16]int64, len(ts.VectorClock))
 		for i, value := range ts.VectorClock {
 			vc[i] = value
 		}
 		return ClockSiTimestamp{VectorClock: vc}
 	}
-	vc := make(map[int16]int64, len(ts.VectorClock))
+	vc := make(map[uint16]int64, len(ts.VectorClock))
 	otherTsVc := otherTs.(ClockSiTimestamp).VectorClock
 
 	for i, value := range ts.VectorClock {
@@ -509,7 +553,7 @@ func (ts ClockSiTimestamp) MergeInto(otherTs Timestamp) {
 func (ts ClockSiTimestamp) IsSmallerConcurrent(otherTs Timestamp) (isSmaller bool) {
 	//Note: Assuming both are concurrent
 	isSmaller = false
-	smallestId := int16(math.MaxInt16)
+	smallestId := uint16(math.MaxInt16)
 	otherTsVc := otherTs.(ClockSiTimestamp).VectorClock
 
 	for id, value := range ts.VectorClock {
@@ -538,16 +582,20 @@ func (ts ClockSiTimestamp) IsDifferent(otherTs Timestamp) bool {
 	return false
 }
 
-func (ts ClockSiTimestamp) Update() {
+func (ts ClockSiTimestamp) Update() (sameTs Timestamp) {
 	for _, id := range knownIDs {
 		if _, has := ts.VectorClock[id]; !has {
 			ts.VectorClock[id] = 0
 		}
 	}
+	return ts
 }
 
-func addToHighestAndMinimumTs(id int16) {
-	HighestTs.VectorClock[id], MinimumTs.VectorClock[id] = math.MaxInt64, math.MinInt64
+func addToHighestAndMinimumTs(id uint16) {
+	//HighestTs.VectorClock[id], MinimumTs.VectorClock[id] = math.MaxInt64, math.MinInt64
+	//HighestTs.vc[nReplicas-1], MinimumTs.vc[nReplicas-1] = math.MaxInt64, math.MinInt64
+	HighestTs.vc = append(HighestTs.vc, math.MaxInt64)
+	MinimumTs.vc = append(MinimumTs.vc, math.MinInt64)
 }
 
 func (ts ClockSiTimestamp) ToBytes() (bytes []byte) {
@@ -587,13 +635,13 @@ func (ts ClockSiTimestamp) FromBytes(bytes []byte) (newTs Timestamp) {
 		}
 		return
 	*/
-	newVC := make(map[int16]int64, len(knownIDs))
-	if bytes == nil || len(bytes) == 0 {
+	newVC := make(map[uint16]int64, len(knownIDs))
+	if len(bytes) == 0 {
 		newVC[0] = 0
 	} else {
 		nEntries := len(bytes) / (entrySize * 2)
 		for i := 0; i < nEntries; i++ {
-			replicaID := int16(binary.LittleEndian.Uint16(bytes[i*2*entrySize : (i+1)*2*entrySize-entrySize]))
+			replicaID := binary.LittleEndian.Uint16(bytes[i*2*entrySize : (i+1)*2*entrySize-entrySize])
 			value := int64(binary.LittleEndian.Uint64(bytes[i*2*entrySize+entrySize : (i+1)*2*entrySize]))
 			newVC[replicaID] = value
 		}
@@ -632,6 +680,9 @@ func (ts ClockSiTimestamp) ToSortedString() (tsString string) {
 
 // NOTE: If we one day support adding/removing replicas on the fly this will probably no longer work, as it ignores the replica's ID (map key)
 func (ts ClockSiTimestamp) GetMapKey() (key TimestampKey) {
+	if usePointerKey {
+		return ts.getPointerKey()
+	}
 	if useByteKey {
 		return ts.getMapByteKey()
 	}
@@ -641,7 +692,16 @@ func (ts ClockSiTimestamp) GetMapKey() (key TimestampKey) {
 	return ts.getMapStringKey()
 }
 
-// Byte representation. Unused atm, probably no longer needed.
+func (ts ClockSiTimestamp) getPointerKey() (key TimestampKey) {
+	//Need to ensure this is written in order, since go randomizes map iteration order
+	keys := ts.GetSortedKeys()
+	slice := make([]int64, len(keys))
+	for i, key := range keys {
+		slice[i] = ts.VectorClock[key]
+	}
+	return PointerKey{ptr: &slice[0], len: len(slice)}
+}
+
 func (ts ClockSiTimestamp) getMapByteKey() (key TimestampKey) {
 	//Need to ensure this is written in order, since go randomizes map iteration order
 	keys := ts.GetSortedKeys()
@@ -649,7 +709,8 @@ func (ts ClockSiTimestamp) getMapByteKey() (key TimestampKey) {
 	for i, key := range keys {
 		binary.BigEndian.PutUint64(byteSlice[i*8:i*8+8], uint64(ts.VectorClock[key]))
 	}
-	return ByteKey(string(byteSlice))
+	return ByteKey(unsafe.String(&byteSlice[0], len(byteSlice)))
+	//return ByteKey(string(byteSlice))
 }
 
 //Slice representation
@@ -675,8 +736,8 @@ func (ts ClockSiTimestamp) getMapStringKey() (key TimestampKey) {
 	return StringKey(builder.String())
 }
 
-func (ts ClockSiTimestamp) GetSortedKeys() (keys []int16) {
-	keys = make([]int16, len(ts.VectorClock))
+func (ts ClockSiTimestamp) GetSortedKeys() (keys []uint16) {
+	keys = make([]uint16, len(ts.VectorClock))
 	i := 0
 	for key := range ts.VectorClock {
 		keys[i] = key
@@ -687,7 +748,7 @@ func (ts ClockSiTimestamp) GetSortedKeys() (keys []int16) {
 }
 
 func (ts ClockSiTimestamp) Copy() (copyTs Timestamp) {
-	copySiTS := ClockSiTimestamp{VectorClock: make(map[int16]int64, len(ts.VectorClock))}
+	copySiTS := ClockSiTimestamp{VectorClock: make(map[uint16]int64, len(ts.VectorClock))}
 	for key, value := range ts.VectorClock {
 		copySiTS.VectorClock[key] = value
 	}
@@ -702,9 +763,10 @@ func (ts ClockSiTimestamp) FastCopy() (values []int64) {
 	return
 }
 
-func (ts ClockSiTimestamp) CopyInto(copyTs ClockSiTimestamp) {
+func (ts ClockSiTimestamp) CopyInto(copyTs Timestamp) {
+	copyTsSi := copyTs.(ClockSiTimestamp)
 	for key, value := range ts.VectorClock {
-		copyTs.VectorClock[key] = value
+		copyTsSi.VectorClock[key] = value
 	}
 }
 
@@ -756,12 +818,61 @@ func (k SliceKey) toSliceKey() (sliceKey SliceKey) {
 	return k
 }*/
 
+func (pk PointerKey) IsLower(otherKey TimestampKey) bool {
+	otherPointerKey := otherKey.(PointerKey)
+	ourSlice, otherSlice := unsafe.Slice(pk.ptr, pk.len), unsafe.Slice(otherPointerKey.ptr, otherPointerKey.len)
+	foundHigher := false
+	for i, v := range ourSlice {
+		if v > otherSlice[i] { //It's not lower for sure.
+			return false
+		} else if v < otherSlice[i] { //May be lower. We need this, as if the clocks are equal, we must return false.
+			foundHigher = true
+		}
+	}
+	return foundHigher
+}
+
+func (pk PointerKey) IsEqual(otherKey TimestampKey) bool {
+	otherPointerKey := otherKey.(PointerKey)
+	ourSlice, otherSlice := unsafe.Slice(pk.ptr, pk.len), unsafe.Slice(otherPointerKey.ptr, otherPointerKey.len)
+	for i, v := range ourSlice {
+		if v != otherSlice[i] {
+			return false //Any value that is different implies the keys are not equal
+		}
+	}
+	return true
+}
+
+func (pk PointerKey) IsHigher(otherKey TimestampKey) bool {
+	otherPointerKey := otherKey.(PointerKey)
+	ourSlice, otherSlice := unsafe.Slice(pk.ptr, pk.len), unsafe.Slice(otherPointerKey.ptr, otherPointerKey.len)
+	foundLower := false
+	for i, v := range ourSlice {
+		if v < otherSlice[i] { //It's not higher for sure.
+			return false
+		} else if v > otherSlice[i] { //May be higher. We need this, as if the clocks are equal, we must return false.
+			foundLower = true
+		}
+	}
+	return foundLower
+}
+
+func (pk PointerKey) IsLowerOrEqual(otherKey TimestampKey) bool {
+	otherPointerKey := otherKey.(PointerKey)
+	ourSlice, otherSlice := unsafe.Slice(pk.ptr, pk.len), unsafe.Slice(otherPointerKey.ptr, otherPointerKey.len)
+	for i, v := range ourSlice {
+		if v > otherSlice[i] { //It's not lower for sure.
+			return false
+		}
+	}
+	return true
+}
+
 func (bk ByteKey) IsLower(otherKey TimestampKey) bool {
 	ourBytes, otherBytes := []byte(bk), []byte(otherKey.(ByteKey))
-	i, j := 0, 0
-	foundHigher := false
-	for ; i < len(ourBytes); i += 4 {
-		for j = 0; j < 4; j++ {
+	i, j, foundHigher := 0, 0, false
+	for ; i < len(ourBytes); i += 8 {
+		for j = 0; j < 8; j++ {
 			if ourBytes[i+j] > otherBytes[i+j] { //if int1 > int2, then one of the leftmost bytes of int1 will be higher.
 				return false
 			} else if ourBytes[i+j] < otherBytes[i+j] { //Similarly but with "<" and lower.
@@ -787,8 +898,8 @@ func (bk ByteKey) IsHigher(otherKey TimestampKey) bool {
 	ourBytes, otherBytes := []byte(bk), []byte(otherKey.(ByteKey))
 	i, j := 0, 0
 	foundLower := false
-	for ; i < len(ourBytes); i += 4 {
-		for j = 0; j < 4; j++ {
+	for ; i < len(ourBytes); i += 8 {
+		for j = 0; j < 8; j++ {
 			if ourBytes[i+j] < otherBytes[i+j] { //if int1 < int2, then one of the leftmost bytes of int1 will be lower.
 				return false
 			} else if ourBytes[i+j] > otherBytes[i+j] { //Similarly but with ">" and higher.
@@ -803,8 +914,8 @@ func (bk ByteKey) IsHigher(otherKey TimestampKey) bool {
 func (bk ByteKey) IsLowerOrEqual(otherKey TimestampKey) bool {
 	ourBytes, otherBytes := []byte(bk), []byte(otherKey.(ByteKey))
 	i, j := 0, 0
-	for ; i < len(ourBytes); i += 4 {
-		for j = 0; j < 4; j++ {
+	for ; i < len(ourBytes); i += 8 {
+		for j = 0; j < 8; j++ {
 			if ourBytes[i+j] > otherBytes[i+j] { //if int1 > int2, then one of the leftmost bytes of int1 will be higher.
 				return false
 			} else if ourBytes[i+j] < otherBytes[i+j] {

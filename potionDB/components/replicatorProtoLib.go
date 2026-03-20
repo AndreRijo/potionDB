@@ -1,6 +1,7 @@
 package components
 
 import (
+	fmt "fmt"
 	"potionDB/crdt/clocksi"
 	"potionDB/crdt/crdt"
 	"potionDB/crdt/proto"
@@ -11,11 +12,11 @@ import (
 
 /*****ANTIDOTE -> PROTO*****/
 
-func createProtoStableClock(replicaID int16, ts int64) (protobuf *proto.ProtoStableClock) {
+func createProtoStableClock(replicaID uint16, ts int64) (protobuf *proto.ProtoStableClock) {
 	return &proto.ProtoStableClock{SenderID: pb.Int32(int32(replicaID)), ReplicaTs: &ts}
 }
 
-func createProtoReplicateGroupTxn(replicaID int16, allTxns []RemoteTxn, bucketOps []RemoteTxn) (protobuf *proto.ProtoReplicateGroupTxn) {
+func createProtoReplicateGroupTxn(replicaID uint16, allTxns []RemoteTxn, bucketOps []RemoteTxn) (protobuf *proto.ProtoReplicateGroupTxn) {
 	protos := make([]*proto.ProtoReplicateTxn, len(bucketOps))
 	for i, txn := range bucketOps {
 		protos[i] = createProtoReplicateTxn(replicaID, txn.Clk, txn.Upds, txn.TxnID)
@@ -24,7 +25,7 @@ func createProtoReplicateGroupTxn(replicaID int16, allTxns []RemoteTxn, bucketOp
 	return &proto.ProtoReplicateGroupTxn{SenderID: pb.Int32(int32(replicaID)), Txns: protos, MinTxnID: pb.Int32(minID), MaxTxnID: pb.Int32(maxID)}
 }
 
-/*func createProtoReplicateGroupTxn(replicaID int16, txns []RemoteTxn, bucketOps []map[int][]crdt.UpdateObjectParams, txnCount int32) (protobuf *proto.ProtoReplicateGroupTxn) {
+/*func createProtoReplicateGroupTxn(replicaID uint16, txns []RemoteTxn, bucketOps []map[int][]crdt.UpdateObjectParams, txnCount int32) (protobuf *proto.ProtoReplicateGroupTxn) {
 	protos := make([]*proto.ProtoReplicateTxn, len(txns))
 	j := 0
 	initialCount := txnCount
@@ -40,7 +41,10 @@ func createProtoReplicateGroupTxn(replicaID int16, allTxns []RemoteTxn, bucketOp
 	return &proto.ProtoReplicateGroupTxn{SenderID: pb.Int32(int32(replicaID)), Txns: protos, MinTxnID: pb.Int32(initialCount), MaxTxnID: pb.Int32(txnCount)}
 }*/
 
-func createProtoReplicateTxn(replicaID int16, clk clocksi.Timestamp, upds map[int][]crdt.UpdateObjectParams, txnCount int32) (protobuf *proto.ProtoReplicateTxn) {
+func createProtoReplicateTxn(replicaID uint16, clk clocksi.Timestamp, upds map[int][]crdt.UpdateObjectParams, txnCount int32) (protobuf *proto.ProtoReplicateTxn) {
+	if len(upds) == 0 || clk == nil {
+		fmt.Printf("[ReplicatorProtoLib][createProtoReplicateTxn]WARNING - Received a nil map or a nil clk!!! Map len: %d. Clk: %v.\n", len(upds), clk)
+	}
 	protos := make([]*proto.ProtoNewRemoteTxn, len(upds))
 	i := 0
 	for partID, partUpds := range upds {
@@ -55,7 +59,7 @@ func createProtoNewRemoteTxn(partID int64, upds []crdt.UpdateObjectParams) (prot
 }
 
 /*
-func createProtoReplicatePart(replicaID int16, partitionID int64, timestamp clocksi.Timestamp, upds []crdt.UpdateObjectParams, txnCount int32) (protobuf *proto.ProtoReplicatePart) {
+func createProtoReplicatePart(replicaID uint16, partitionID int64, timestamp clocksi.Timestamp, upds []crdt.UpdateObjectParams, txnCount int32) (protobuf *proto.ProtoReplicatePart) {
 	return &proto.ProtoReplicatePart{
 		SenderID:    pb.Int32(int32(replicaID)),
 		PartitionID: &partitionID,
@@ -76,11 +80,11 @@ func createProtoDownstreamUpds(upds []crdt.UpdateObjectParams) (protobufs []*pro
 	return protobufs
 }
 
-func createProtoRemoteID(replicaID int16, myBuckets []string, myIP string) (protobuf *proto.ProtoRemoteID) {
+func createProtoRemoteID(replicaID uint16, myBuckets []string, myIP string) (protobuf *proto.ProtoRemoteID) {
 	return &proto.ProtoRemoteID{ReplicaID: pb.Int32(int32(replicaID)), MyBuckets: myBuckets, MyIP: &myIP}
 }
 
-func createProtoJoin(buckets []string, replicaID int16, ip string) (protobuf *proto.ProtoJoin) {
+func createProtoJoin(buckets []string, replicaID uint16, ip string) (protobuf *proto.ProtoJoin) {
 	return &proto.ProtoJoin{Buckets: buckets, ReplicaID: pb.Int32(int32(replicaID)), ReplicaIP: &ip}
 }
 
@@ -111,30 +115,30 @@ func createProtoPartitions(partCRDTs []*proto.ProtoCRDT) (protobuf *proto.ProtoP
 
 /*****PROTO -> ANTIDOTE*****/
 
-func protoToStableClock(protobuf *proto.ProtoStableClock) (stableClk *StableClock) {
-	return &StableClock{SenderID: int16(protobuf.GetSenderID()), Ts: protobuf.GetReplicaTs()}
+func protoToStableClock(protobuf *proto.ProtoStableClock) (stableClk StableClock) {
+	return StableClock{SenderID: uint16(protobuf.GetSenderID()), Ts: protobuf.GetReplicaTs()}
 }
 
-func protoToRemoteTxnGroup(protobuf *proto.ProtoReplicateGroupTxn) (request *RemoteTxnGroup) {
+/*func protoToRemoteTxnGroup(protobuf *proto.ProtoReplicateGroupTxn) (request RemoteTxnGroup) {
 	protoTxns := protobuf.GetTxns()
 	txns := make([]RemoteTxn, len(protoTxns))
 	for i, protoTxn := range protoTxns {
-		txns[i] = *protoToRemoteTxn(protoTxn)
+		txns[i] = protoToRemoteTxn(protoTxn)
 	}
-	return &RemoteTxnGroup{Txns: txns, SenderID: int16(protobuf.GetSenderID()),
+	return RemoteTxnGroup{Txns: txns, SenderID: uint16(protobuf.GetSenderID()),
 		MaxTxnID: protobuf.GetMaxTxnID(), MinTxnID: protobuf.GetMinTxnID()}
-}
+}*/
 
-func protoToRemoteTxn(protobuf *proto.ProtoReplicateTxn) (request *RemoteTxn) {
+func protoToRemoteTxn(protobuf *proto.ProtoReplicateTxn) (request RemoteTxn) {
 	protoParts := protobuf.GetPart()
-	upds := make(map[int][]crdt.UpdateObjectParams)
+	upds := make(map[int][]crdt.UpdateObjectParams, len(protoParts))
 	for _, protoPart := range protoParts {
 		partUpds, partID := protoToPartitionUpds(protoPart)
 		upds[int(partID)] = partUpds
 	}
-	return &RemoteTxn{
-		SenderID: int16(protobuf.GetSenderID()),
-		Clk:      clocksi.ClockSiTimestamp{}.FromBytes(protobuf.GetTimestamp()),
+	return RemoteTxn{
+		SenderID: uint16(protobuf.GetSenderID()),
+		Clk:      clocksi.SliceTimestamp{}.FromBytes(protobuf.GetTimestamp()),
 		Upds:     upds,
 		TxnID:    protobuf.GetTxnID(),
 	}
@@ -167,24 +171,24 @@ func protoToDownstreamUpds(protobufs []*proto.ProtoDownstreamUpd) (upds []crdt.U
 	return upds
 }
 
-func protoToRemoteID(protobuf *proto.ProtoRemoteID) (remoteID int16) {
-	return int16(protobuf.GetReplicaID())
+func protoToRemoteID(protobuf *proto.ProtoRemoteID) (remoteID uint16) {
+	return uint16(protobuf.GetReplicaID())
 }
 
-func protoToJoin(protobuf *proto.ProtoJoin) (buckets []string, senderID int16, ip string) {
-	return protobuf.GetBuckets(), int16(protobuf.GetReplicaID()), protobuf.GetReplicaIP()
+func protoToJoin(protobuf *proto.ProtoJoin) (buckets []string, senderID uint16, ip string) {
+	return protobuf.GetBuckets(), uint16(protobuf.GetReplicaID()), protobuf.GetReplicaIP()
 }
 
-func protoToReplyJoin(protobuf *proto.ProtoReplyJoin) (buckets []string, clks []clocksi.Timestamp, senderID int16) {
-	return protobuf.GetBuckets(), clocksi.ByteArrayToClockArray(protobuf.GetPartsClk()), int16(protobuf.GetReplicaID())
+func protoToReplyJoin(protobuf *proto.ProtoReplyJoin) (buckets []string, clks []clocksi.Timestamp, senderID uint16) {
+	return protobuf.GetBuckets(), clocksi.ByteArrayToClockArray(protobuf.GetPartsClk()), uint16(protobuf.GetReplicaID())
 }
 
-func protoToRequestBucket(protobuf *proto.ProtoRequestBucket) (buckets []string, senderID int16) {
-	return protobuf.GetBuckets(), int16(protobuf.GetReplicaID())
+func protoToRequestBucket(protobuf *proto.ProtoRequestBucket) (buckets []string, senderID uint16) {
+	return protobuf.GetBuckets(), uint16(protobuf.GetReplicaID())
 }
 
-func protoToReplyBucket(protobuf *proto.ProtoReplyBucket) (states [][]*proto.ProtoCRDT, clk clocksi.Timestamp, senderID int16) {
-	return protoToPartitions(protobuf.GetParts()), clocksi.ClockSiTimestamp{}.FromBytes(protobuf.GetClk()), int16(protobuf.GetReplicaID())
+func protoToReplyBucket(protobuf *proto.ProtoReplyBucket) (states [][]*proto.ProtoCRDT, clk clocksi.Timestamp, senderID uint16) {
+	return protoToPartitions(protobuf.GetParts()), clocksi.SliceTimestamp{}.FromBytes(protobuf.GetClk()), uint16(protobuf.GetReplicaID())
 }
 
 func protoToPartitions(protobuf []*proto.ProtoPartition) (states [][]*proto.ProtoCRDT) {

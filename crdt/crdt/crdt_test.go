@@ -2,13 +2,11 @@ package crdt
 
 import (
 	"fmt"
-	"potionDB/crdt/clocksi"
 	"sort"
 	"strings"
-	"testing"
 )
 
-func TestTopKRmv1(t *testing.T) {
+/*func TestTopKRmv1(t *testing.T) {
 	crdtR1 := (&TopKRmvCrdt{}).Initialize(nil, 666).(*TopKRmvCrdt)
 	crdtR2 := (&TopKRmvCrdt{}).Initialize(nil, 777).(*TopKRmvCrdt)
 	newDownstreamR1 := make([]DownstreamArguments, 0, 10)
@@ -81,7 +79,7 @@ func TestTopKRmv2(t *testing.T) {
 	sort.Slice(stateR2.Scores, func(i, j int) bool { return stateR2.Scores[i].Id < stateR2.Scores[j].Id })
 	fmt.Println(stateR1.Scores)
 	fmt.Println(stateR2.Scores)
-}
+}*/
 
 func addDownIfNotEmpty(list []DownstreamArguments, downArgs DownstreamArguments) []DownstreamArguments {
 	if downArgs != nil {

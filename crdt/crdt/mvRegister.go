@@ -1,8 +1,10 @@
 package crdt
 
 import (
+	"fmt"
 	"potionDB/crdt/clocksi"
 	"potionDB/crdt/proto"
+	"unsafe"
 
 	"github.com/AndreRijo/go-tools/src/tools"
 	pb "google.golang.org/protobuf/proto"
@@ -15,11 +17,11 @@ import (
 // This read returns the concurrent write from the replica with the lowest replicaID, so it is consistent across replicas.
 type MVRegisterCrdt struct {
 	CRDTVM
-	clkValuePair PairValueClk //The "current" value, which is the one with the highest clock (or, in case of ties, the clk produced by the replica with lowest replicaID)
-	replicaID    int16        //ReplicaID of the replica with the "current" value
+	clkValuePair   PairValueClk //The "current" value, which is the one with the highest clock (or, in case of ties, the clk produced by the replica with lowest replicaID)
+	replicaID      uint16       //ReplicaID of the replica with the "current" value
+	localReplicaID uint16       //ReplicaID of the replica with this CRDT instance
 	//concValues     map[any]clocksi.Timestamp //Important note: we're at most gonna have as many entries as the number of replicas-1.
-	concValues     tools.SliceWithCounter[PairValueClk] //Note: at most we will have as many entries as the number of replicas-1.
-	localReplicaID int16                                //ReplicaID of the replica with this CRDT instance
+	concValues tools.SliceWithCounter[PairValueClk] //Note: at most we will have as many entries as the number of replicas-1.
 }
 
 type MVRegisterState struct {
@@ -35,7 +37,7 @@ type MVRegisterSingleReadArguments struct{}
 
 type DownstreamMVSetValue struct {
 	NewValue  any
-	ReplicaID int16
+	ReplicaID uint16
 	Clk       clocksi.Timestamp
 }
 
@@ -50,13 +52,13 @@ type MVRegisterEffect interface {
 
 type SetValueHigherEffect struct { //New value is >= current value
 	OldPair      PairValueClk //The old value that was replaced by the new value
-	OldReplicaID int16
+	OldReplicaID uint16
 	RemovedConc  tools.SliceWithCounter[PairValueClk]
 }
 
 type SetValueConcurrentHigherEffect struct { //New value is concurrent to current value, but it went still to value due to replicaID being lower.
 	OldPair      PairValueClk //The old value that was replaced by the new value
-	OldReplicaID int16
+	OldReplicaID uint16
 	RemovedConc  tools.SliceWithCounter[PairValueClk]
 }
 
@@ -66,13 +68,17 @@ type SetValueConcurrentEffect struct { //New value is concurrent to current valu
 }
 
 func (crdt *MVRegisterCrdt) GetCRDTType() proto.CRDTType { return proto.CRDTType_MVREG }
+func (crdt *MVRegisterCrdt) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 
 func (args MVSetValue) GetCRDTType() proto.CRDTType           { return proto.CRDTType_MVREG }
+func (args MVSetValue) GetDATAType() proto.DATAType           { return proto.DATAType_DEFAULT }
 func (args DownstreamMVSetValue) GetCRDTType() proto.CRDTType { return proto.CRDTType_MVREG }
+func (args DownstreamMVSetValue) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 func (args DownstreamMVSetValue) MustReplicate() bool         { return true }
 
 // Reads
 func (args MVRegisterSingleReadArguments) GetCRDTType() proto.CRDTType { return proto.CRDTType_MVREG }
+func (args MVRegisterSingleReadArguments) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 func (args MVRegisterSingleReadArguments) GetREADType() proto.READType {
 	return proto.READType_MULTI_SINGLE
 }
@@ -84,6 +90,8 @@ func (state MVRegisterState) GetCRDTType() proto.CRDTType       { return proto.C
 func (state MVRegisterSingleState) GetCRDTType() proto.CRDTType { return proto.CRDTType_MVREG }
 func (state MVRegisterState) GetREADType() proto.READType       { return proto.READType_FULL }
 func (state MVRegisterSingleState) GetREADType() proto.READType { return proto.READType_MULTI_SINGLE }
+func (state MVRegisterState) GetDATAType() proto.DATAType       { return proto.DATAType_DEFAULT }
+func (state MVRegisterSingleState) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 
 // Effects
 func (eff SetValueHigherEffect) GetRemovedConcValues() tools.SliceWithCounter[PairValueClk] {
@@ -97,28 +105,28 @@ func (eff SetValueConcurrentEffect) GetRemovedConcValues() tools.SliceWithCounte
 }
 
 // Note: crdt can (and most often will be) nil
-func (crdt *MVRegisterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
+func (crdt *MVRegisterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	return &MVRegisterCrdt{
-		CRDTVM: (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete),
+		CRDTVM: (&genericInversibleCRDT{}).initialize(crdt),
 		//value:          "",
 		//clk:            clocksi.DummyTs,
 		clkValuePair: PairValueClk{Value: "", Clk: clocksi.DummyTs},
 		//concValues:     make(map[any]clocksi.Timestamp),
-		concValues:     tools.NewSliceWithCounter[PairValueClk](len(clocksi.GetKeys()) - 1),
+		concValues:     tools.NewSliceWithCounter[PairValueClk](tools.Max(len(clocksi.GetKeys())-1, 1)), //If a dummy instance of this is created, clocksi might not yet have the replicaIDs.
 		localReplicaID: replicaID,
 	}
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *MVRegisterCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID int16) (sameCRDT *MVRegisterCrdt) {
-	crdt.CRDTVM, crdt.localReplicaID = (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete), replicaID
+func (crdt *MVRegisterCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *MVRegisterCrdt) {
+	crdt.CRDTVM, crdt.localReplicaID = (&genericInversibleCRDT{}).initialize(crdt), replicaID
 	return crdt
 }
 
 func (crdt *MVRegisterCrdt) IsBigCRDT() bool { return false }
 
 func (crdt *MVRegisterCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
-	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+	if len(updsNotYetApplied) == 0 {
 		if args.GetREADType() == proto.READType_FULL {
 			return crdt.GetValue()
 		} //else: single read
@@ -138,7 +146,7 @@ func (crdt *MVRegisterCrdt) GetValue() (state State) {
 		i++
 	}
 	return MVRegisterState{Values: values}*/
-	values, i := make([]any, crdt.concValues.Len+1), 1
+	values, i := make([]any, crdt.concValues.Len()+1), 1
 	values[0] = crdt.clkValuePair.Value
 	for _, pair := range crdt.concValues.ToSlice() {
 		values[i] = pair.Value
@@ -147,10 +155,13 @@ func (crdt *MVRegisterCrdt) GetValue() (state State) {
 	return MVRegisterState{Values: values}
 }
 
+// Note: Doesn't support MultiUpd, which would make no sense here anyway.
 func (crdt *MVRegisterCrdt) Update(args UpdateArguments) (downStreamArgs DownstreamArguments) {
 	if upd, ok := args.(MVSetValue); ok {
 		newClk := crdt.getMaxClk().NextTimestamp(crdt.localReplicaID)
 		return DownstreamMVSetValue{NewValue: upd.NewValue, Clk: newClk, ReplicaID: crdt.localReplicaID}
+	} else {
+		fmt.Printf("[MVRegister][Update]Unknown update type: %v (%T)\n", args, args)
 	}
 	return nil
 }
@@ -214,6 +225,7 @@ func (crdt *MVRegisterCrdt) applyDownstream(downstreamArgs DownstreamArguments) 
 		}
 		return &effectValue
 	} else {
+		fmt.Printf("[MVRegister][Downstream]Unsupported downstream type: %v (%T)\n", downstreamArgs, downstreamArgs)
 		effectValue = NoEffect{}
 	}
 	return &effectValue
@@ -230,16 +242,16 @@ func (crdt *MVRegisterCrdt) applyDownstream(downstreamArgs DownstreamArguments) 
 
 // Iterate from end, to minimize shifts to left.
 func (crdt *MVRegisterCrdt) removeLowerClks(refClk clocksi.Timestamp) (removedClks tools.SliceWithCounter[PairValueClk]) {
-	if crdt.concValues.Len == 0 {
+	if crdt.concValues.Len() == 0 {
 		return
 	}
-	removedClks = tools.NewSliceWithCounter[PairValueClk](crdt.concValues.Len)
-	for i := crdt.concValues.Len - 1; i >= 0; i-- {
+	removedClks = tools.NewSliceWithCounter[PairValueClk](crdt.concValues.Len())
+	for i := crdt.concValues.Len() - 1; i >= 0; i-- {
 		if crdt.concValues.Get(i).Clk.IsLower(refClk) {
 			removedClks.AddToEnd(crdt.concValues.RemoveAndGet(i))
 		}
 	}
-	if removedClks.Len == 0 {
+	if removedClks.Len() == 0 {
 		return tools.SliceWithCounter[PairValueClk]{}
 	}
 	return removedClks
@@ -306,14 +318,16 @@ func (crdtOp MVSetValue) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (o
 }
 
 func (crdtOp MVSetValue) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	return &proto.ApbUpdateOperation{Regop: &proto.ApbRegUpdate{Value: []byte(crdtOp.NewValue.(string))}}
+	strV := crdtOp.NewValue.(string)
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Regop{Regop: &proto.ApbRegUpdate{Value: unsafe.Slice(unsafe.StringData(strV), len(strV))}}}
 }
 
 func (crdtState MVRegisterState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
 	byteValues := protobuf.GetMvreg().GetValues()
 	crdtState.Values = make([]any, len(byteValues))
 	for i, byteValue := range byteValues {
-		crdtState.Values[i] = string(byteValue)
+		//crdtState.Values[i] = string(byteValue)
+		crdtState.Values[i] = unsafe.Slice(unsafe.StringData(string(byteValue)), len(byteValue))
 	}
 	return crdtState
 }
@@ -321,9 +335,11 @@ func (crdtState MVRegisterState) FromReadResp(protobuf *proto.ApbReadObjectResp)
 func (crdtState MVRegisterState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
 	byteValues := make([][]byte, len(crdtState.Values))
 	for i, value := range crdtState.Values {
-		byteValues[i] = []byte(value.(string))
+		//byteValues[i] = []byte(value.(string))
+		strV := value.(string)
+		byteValues[i] = unsafe.Slice(unsafe.StringData(strV), len(strV))
 	}
-	return &proto.ApbReadObjectResp{Mvreg: &proto.ApbGetMVRegResp{Values: byteValues}}
+	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Mvreg{Mvreg: &proto.ApbGetMVRegResp{Values: byteValues}}}
 }
 
 func (crdtState MVRegisterSingleState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
@@ -332,8 +348,8 @@ func (crdtState MVRegisterSingleState) FromReadResp(protobuf *proto.ApbReadObjec
 }
 
 func (crdtState MVRegisterSingleState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
-	return &proto.ApbReadObjectResp{Partread: &proto.ApbPartialReadResp{Mvreg: &proto.ApbMVRegPartialReadResp{
-		Single: &proto.ApbMVRegSingleResp{Value: []byte((crdtState.Value).(string))}}}}
+	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Mvreg{Mvreg: &proto.ApbMVRegPartialReadResp{
+		Single: &proto.ApbMVRegSingleResp{Value: []byte((crdtState.Value).(string))}}}}}}
 }
 
 func (args MVRegisterSingleReadArguments) FromPartialRead(protobuf *proto.ApbPartialReadArgs) (readArgs ReadArguments) {
@@ -341,38 +357,39 @@ func (args MVRegisterSingleReadArguments) FromPartialRead(protobuf *proto.ApbPar
 }
 
 func (args MVRegisterSingleReadArguments) ToPartialRead() (protobuf *proto.ApbPartialReadArgs) {
-	return &proto.ApbPartialReadArgs{Mvreg: &proto.ApbMVRegPartialRead{Single: &proto.ApbMVRegSingleRead{}}}
+	return &proto.ApbPartialReadArgs{Args: &proto.ApbPartialReadArgs_Mvreg{Mvreg: &proto.ApbMVRegPartialRead{Single: &proto.ApbMVRegSingleRead{}}}}
 }
 
 func (downOp DownstreamMVSetValue) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
 	regOp := protobuf.GetMvregOp()
-	downOp.NewValue, downOp.ReplicaID, downOp.Clk = string(regOp.GetValue()), int16(regOp.GetReplicaID()), clocksi.ClockSiTimestamp{}.FromBytes(regOp.GetClk())
+	downOp.NewValue, downOp.ReplicaID, downOp.Clk = string(regOp.GetValue()), uint16(regOp.GetReplicaID()), clocksi.SliceTimestamp{}.FromBytes(regOp.GetClk())
 	return downOp
 }
 
 func (downOp DownstreamMVSetValue) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	return &proto.ProtoOpDownstream{MvregOp: &proto.ProtoMVRegisterDownstream{
-		Value: []byte(downOp.NewValue.(string)), Clk: downOp.Clk.ToBytes(), ReplicaID: pb.Int32(int32(downOp.ReplicaID)),
-	}}
+	strV := downOp.NewValue.(string)
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_MvregOp{MvregOp: &proto.ProtoMVRegisterDownstream{
+		Value: unsafe.Slice(unsafe.StringData(strV), len(strV)), Clk: downOp.Clk.ToBytes(), ReplicaID: pb.Int32(int32(downOp.ReplicaID)),
+	}}}
 }
 
 func (crdt *MVRegisterCrdt) ToProtoState() (protobuf *proto.ProtoState) {
 	mvState := &proto.ProtoMVRegState{Value: []byte((crdt.clkValuePair.Value).(string)), Clk: crdt.clkValuePair.Clk.ToBytes(), ReplicaID: pb.Int32(int32(crdt.replicaID))}
-	mvState.ConcValues, mvState.ConcClks = make([][]byte, crdt.concValues.Len), make([][]byte, crdt.concValues.Len)
+	mvState.ConcValues, mvState.ConcClks = make([][]byte, crdt.concValues.Len()), make([][]byte, crdt.concValues.Len())
 	for i, pair := range crdt.concValues.ToSlice() {
 		mvState.ConcValues[i], mvState.ConcClks[i] = []byte(pair.Value.(string)), pair.Clk.ToBytes()
 	}
-	return &proto.ProtoState{Mvreg: mvState}
+	return &proto.ProtoState{State: &proto.ProtoState_Mvreg{Mvreg: mvState}}
 }
 
-func (crdt *MVRegisterCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID int16) (newCRDT CRDT) {
+func (crdt *MVRegisterCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	mvProto := proto.GetMvreg()
-	crdt.clkValuePair = PairValueClk{Value: string(mvProto.GetValue()), Clk: clocksi.ClockSiTimestamp{}.FromBytes(mvProto.GetClk())}
-	crdt.replicaID = int16(mvProto.GetReplicaID())
+	crdt.clkValuePair = PairValueClk{Value: string(mvProto.GetValue()), Clk: clocksi.SliceTimestamp{}.FromBytes(mvProto.GetClk())}
+	crdt.replicaID = uint16(mvProto.GetReplicaID())
 	protoV, protoC := mvProto.GetConcValues(), mvProto.GetConcClks()
 	crdt.concValues = tools.NewSliceWithCounter[PairValueClk](len(clocksi.GetKeys()))
 	for i := 0; i < len(protoV); i++ {
-		crdt.concValues.AddToEnd(PairValueClk{Value: string(protoV[i]), Clk: clocksi.ClockSiTimestamp{}.FromBytes(protoC[i])})
+		crdt.concValues.AddToEnd(PairValueClk{Value: string(protoV[i]), Clk: clocksi.SliceTimestamp{}.FromBytes(protoC[i])})
 	}
 	return crdt.initializeFromSnapshot(ts, replicaID)
 }

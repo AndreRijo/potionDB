@@ -53,7 +53,7 @@ func TestWrites1(t *testing.T) {
 	firstWriteParams := createRandomSetAdd(firstKey)
 	firstWriteReq, firstWriteChan := createStaticWrite(TransactionId(rand.Uint64()), clocksi.NewClockSiTimestampFromId(0), firstWriteParams)
 
-	go tm.handleStaticTMUpdate(firstWriteReq)
+	go tm.handleStaticTMUpdate(firstWriteReq, rand.New(rand.NewSource(time.Now().UnixNano())), &tmUpdBuffers{})
 	firstWriteReply := <-firstWriteChan
 
 	if firstWriteReply.Err != nil {
@@ -63,7 +63,7 @@ func TestWrites1(t *testing.T) {
 	secondWriteParams := createRandomSetAdd(secondKey)
 	secondWriteReq, secondWriteChan := createStaticWrite(firstWriteReply.TransactionId, firstWriteReply.Timestamp, secondWriteParams)
 
-	go tm.handleStaticTMUpdate(secondWriteReq)
+	go tm.handleStaticTMUpdate(secondWriteReq, rand.New(rand.NewSource(time.Now().UnixNano())), &tmUpdBuffers{})
 	secondWriteReply := <-secondWriteChan
 
 	if secondWriteReply.Err != nil {
@@ -112,7 +112,7 @@ func TestWrites2(t *testing.T) {
 	firstWriteReq, firstWriteChan := createStaticWrite(TransactionId(rand.Uint64()), clocksi.NewClockSiTimestampFromId(0), firstWriteParams)
 
 	//fmt.Println("Sending 1st write")
-	go tm.handleStaticTMUpdate(firstWriteReq)
+	go tm.handleStaticTMUpdate(firstWriteReq, rand.New(rand.NewSource(time.Now().UnixNano())), &tmUpdBuffers{})
 	firstWriteReply := <-firstWriteChan
 	//fmt.Println("Got 1st write reply")
 
@@ -124,7 +124,7 @@ func TestWrites2(t *testing.T) {
 	secondWriteReq, secondWriteChan := createStaticWrite(firstWriteReply.TransactionId, firstWriteReply.Timestamp, secondWriteParams)
 
 	//fmt.Println("Sending 2nd write")
-	go tm.handleStaticTMUpdate(secondWriteReq)
+	go tm.handleStaticTMUpdate(secondWriteReq, rand.New(rand.NewSource(time.Now().UnixNano())), &tmUpdBuffers{})
 	secondWriteReply := <-secondWriteChan
 	//fmt.Println("Got 2nd write reply")
 
@@ -136,7 +136,7 @@ func TestWrites2(t *testing.T) {
 	thirdWriteReq, thirdWriteChan := createStaticWrite(secondWriteReply.TransactionId, secondWriteReply.Timestamp, thirdWriteParams)
 
 	//fmt.Println("Sending 3rd write")
-	go tm.handleStaticTMUpdate(thirdWriteReq)
+	go tm.handleStaticTMUpdate(thirdWriteReq, rand.New(rand.NewSource(time.Now().UnixNano())), &tmUpdBuffers{})
 	thirdWriteReply := <-thirdWriteChan
 	//fmt.Println("Got 3rd write reply")
 
@@ -180,7 +180,7 @@ func TestWrites3(t *testing.T) {
 	firstWriteParams := createRandomSetAdd(firstKey)
 	firstWriteReq, firstWriteChan := createStaticWrite(TransactionId(0), clocksi.NewClockSiTimestampFromId(0), firstWriteParams)
 
-	go tm.handleStaticTMUpdate(firstWriteReq)
+	go tm.handleStaticTMUpdate(firstWriteReq, rand.New(rand.NewSource(time.Now().UnixNano())), &tmUpdBuffers{})
 	firstWriteReply := <-firstWriteChan
 
 	if firstWriteReply.Err != nil {
@@ -190,7 +190,7 @@ func TestWrites3(t *testing.T) {
 	secondWriteParams := createRandomSetAdd(firstKey)
 	secondWriteReq, secondWriteChan := createStaticWrite(firstWriteReply.TransactionId, firstWriteReply.Timestamp, secondWriteParams)
 
-	go tm.handleStaticTMUpdate(secondWriteReq)
+	go tm.handleStaticTMUpdate(secondWriteReq, rand.New(rand.NewSource(time.Now().UnixNano())), &tmUpdBuffers{})
 	secondWriteReply := <-secondWriteChan
 
 	if secondWriteReply.Err != nil {
@@ -200,7 +200,7 @@ func TestWrites3(t *testing.T) {
 	thirdWriteParams := createRandomSetAdd(firstKey)
 	thirdWriteReq, thirdWriteChan := createStaticWrite(TransactionId(0), clocksi.NewClockSiTimestampFromId(0), thirdWriteParams)
 
-	go tm.handleStaticTMUpdate(thirdWriteReq)
+	go tm.handleStaticTMUpdate(thirdWriteReq, rand.New(rand.NewSource(time.Now().UnixNano())), &tmUpdBuffers{})
 	thirdWriteReply := <-thirdWriteChan
 
 	if thirdWriteReply.Err != nil {
@@ -254,7 +254,7 @@ func TestWritesAndReads(t *testing.T) {
 	firstWriteParams := createRandomSetAdd(firstKey)
 	firstWriteReq, firstWriteChan := createStaticWrite(TransactionId(rand.Uint64()), clocksi.NewClockSiTimestampFromId(0), firstWriteParams)
 
-	go tm.handleStaticTMUpdate(firstWriteReq)
+	go tm.handleStaticTMUpdate(firstWriteReq, rand.New(rand.NewSource(time.Now().UnixNano())), &tmUpdBuffers{})
 	firstWriteReply := <-firstWriteChan
 
 	if firstWriteReply.Err != nil {
@@ -264,7 +264,7 @@ func TestWritesAndReads(t *testing.T) {
 	secondWriteParams := createRandomSetAdd(firstKey)
 	secondWriteReq, secondWriteChan := createStaticWrite(firstWriteReply.TransactionId, firstWriteReply.Timestamp.NextTimestamp(0), secondWriteParams)
 
-	go tm.handleStaticTMUpdate(secondWriteReq)
+	go tm.handleStaticTMUpdate(secondWriteReq, rand.New(rand.NewSource(time.Now().UnixNano())), &tmUpdBuffers{})
 	secondWriteReply := <-secondWriteChan
 
 	if secondWriteReply.Err != nil {
@@ -274,7 +274,7 @@ func TestWritesAndReads(t *testing.T) {
 	thirdWriteParams := createRandomSetAdd(firstKey)
 	thirdWriteReq, thirdWriteChan := createStaticWrite(firstWriteReply.TransactionId, firstWriteReply.Timestamp, thirdWriteParams)
 
-	go tm.handleStaticTMUpdate(thirdWriteReq)
+	go tm.handleStaticTMUpdate(thirdWriteReq, rand.New(rand.NewSource(time.Now().UnixNano())), &tmUpdBuffers{})
 	thirdWriteReply := <-thirdWriteChan
 
 	if thirdWriteReply.Err != nil {
@@ -315,7 +315,7 @@ func TestWritesAndReads(t *testing.T) {
 	fourthWriteParams := createRandomSetAdd(firstKey)
 	fourthWriteReq, fourthWriteChan := createStaticWrite(thirdWriteReply.TransactionId, thirdWriteReply.Timestamp, fourthWriteParams)
 
-	go tm.handleStaticTMUpdate(fourthWriteReq)
+	go tm.handleStaticTMUpdate(fourthWriteReq, rand.New(rand.NewSource(time.Now().UnixNano())), &tmUpdBuffers{})
 	fourthWriteReply := <-fourthWriteChan
 
 	if fourthWriteReply.Err != nil {
@@ -477,7 +477,7 @@ func TestReplicator2(t *testing.T) {
 	writeRemParams := make([]crdt.UpdateObjectParams, 1)
 	writeRemParams[0] = crdt.UpdateObjectParams{KeyParams: key, UpdateArgs: crdt.Remove{Element: (writeReq[0].UpdateArgs).(crdt.Add).Element}}
 	writeReq2, tmChan := createStaticWrite(TransactionId(rand.Uint64()), writeReply.staticUpdateReply.Timestamp, writeRemParams)
-	go tm1.handleStaticTMUpdate(writeReq2)
+	go tm1.handleStaticTMUpdate(writeReq2, rand.New(rand.NewSource(time.Now().UnixNano())), &tmUpdBuffers{})
 	reply := <-tmChan
 	ignore(reply)
 
@@ -595,11 +595,11 @@ func createAndProcessWrite(tm *TransactionManager, txnPartitions *ongoingTxn, is
 	writeParams = writeParamsFunc(key)
 	if isStatic {
 		writeReq, writeChan := createStaticWrite(txnId, ts, writeParams)
-		go tm.handleStaticTMUpdate(writeReq)
+		go tm.handleStaticTMUpdate(writeReq, rand.New(rand.NewSource(time.Now().UnixNano())), &tmUpdBuffers{})
 		writeReply = testUpdateReply{staticUpdateReply: <-writeChan}
 	} else {
 		writeReq, writeChan := createWrite(txnId, ts, writeParams)
-		go tm.handleTMUpdate(writeReq, txnPartitions)
+		go tm.handleTMUpdate(writeReq, txnPartitions, &tmUpdBuffers{})
 		writeReply = testUpdateReply{updateReply: <-writeChan}
 	}
 	return
@@ -620,7 +620,7 @@ func createAndProccessRead(tm *TransactionManager, isStatic bool, readParams []c
 
 func createAndProcessStartTxn(tm *TransactionManager, txnPartitions *ongoingTxn, txnId TransactionId, ts clocksi.Timestamp) (reply TMStartTxnReply) {
 	txn, txnChan := createStartTxn(TransactionId(rand.Uint64()), clocksi.NewClockSiTimestampFromId(0))
-	go tm.handleTMStartTxn(txn, txnPartitions, 1)
+	go tm.handleTMStartTxn(txn, txnPartitions, 1, rand.New(rand.NewSource(time.Now().UnixNano())))
 	return <-txnChan
 }
 

@@ -2,9 +2,11 @@ package crdt
 
 import (
 	"fmt"
+	"math"
 
 	"potionDB/crdt/clocksi"
 	"potionDB/crdt/proto"
+	"potionDB/shared/shared"
 
 	//pb "github.com/golang/protobuf/proto"
 	pb "google.golang.org/protobuf/proto"
@@ -37,10 +39,9 @@ To think: should each CRDT generate a message or group them?
 // Supports >= and >
 type BoundedCounterCrdt struct {
 	CRDTVM
-	permissions map[int16]int32
-	decs        map[int16]int32
+	permissions map[uint16]int32
+	decs        map[uint16]int32
 	limit       int32 //The value that must always be kept
-	replicaID   int16
 	value       int32
 }
 
@@ -54,51 +55,51 @@ type SetCounterBound struct {
 // Both update and downstream
 type TransferCounter struct {
 	ToTransfer  int32
-	FromID      int16
-	ToID        int16
+	FromID      uint16
+	ToID        uint16
 	ToReplicate *bool
 }
 
 // New inc/dec downstream to know the source replica
 type DownstreamIncBCounter struct {
 	Change    int32
-	ReplicaID int16
+	ReplicaID uint16
 }
 
 type DownstreamDecBCounter struct {
 	Change      int32
-	ReplicaID   int16
+	ReplicaID   uint16
 	ToReplicate *bool
 }
 
 func (crdt *BoundedCounterCrdt) GetCRDTType() proto.CRDTType { return proto.CRDTType_FATCOUNTER }
+func (crdt *BoundedCounterCrdt) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 
 func (args SetCounterBound) GetCRDTType() proto.CRDTType { return proto.CRDTType_FATCOUNTER }
-
-func (args SetCounterBound) MustReplicate() bool { return true }
+func (args SetCounterBound) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
+func (args SetCounterBound) MustReplicate() bool         { return true }
 
 func (args TransferCounter) GetCRDTType() proto.CRDTType { return proto.CRDTType_FATCOUNTER }
-
-func (args TransferCounter) MustReplicate() bool { return *args.ToReplicate }
+func (args TransferCounter) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
+func (args TransferCounter) MustReplicate() bool         { return *args.ToReplicate }
 
 func (args DownstreamIncBCounter) GetCRDTType() proto.CRDTType { return proto.CRDTType_FATCOUNTER }
-
-func (args DownstreamIncBCounter) MustReplicate() bool { return true }
+func (args DownstreamIncBCounter) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
+func (args DownstreamIncBCounter) MustReplicate() bool         { return true }
 
 func (args DownstreamDecBCounter) GetCRDTType() proto.CRDTType { return proto.CRDTType_FATCOUNTER }
+func (args DownstreamDecBCounter) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
+func (args DownstreamDecBCounter) MustReplicate() bool         { return *args.ToReplicate }
 
-func (args DownstreamDecBCounter) MustReplicate() bool { return *args.ToReplicate }
-
-func (crdt *BoundedCounterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int16) (newCrdt CRDT) {
+func (crdt *BoundedCounterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	crdt = &BoundedCounterCrdt{
-		CRDTVM:      (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete),
-		permissions: make(map[int16]int32),
-		decs:        make(map[int16]int32),
+		permissions: make(map[uint16]int32),
+		decs:        make(map[uint16]int32),
 		limit:       0,
-		replicaID:   replicaID,
 		value:       0,
 	}
-	ts := clocksi.NewClockSiTimestamp().(clocksi.ClockSiTimestamp)
+	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
+	ts := clocksi.NewClockSiTimestamp().(clocksi.ClockSiTimestamp) //TODO: Update to slice timestamp?
 	for id := range ts.VectorClock {
 		crdt.permissions[id], crdt.decs[id] = 0, 0
 	}
@@ -106,8 +107,8 @@ func (crdt *BoundedCounterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *BoundedCounterCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID int16) (sameCRDT *BoundedCounterCrdt) {
-	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(startTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete)
+func (crdt *BoundedCounterCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *BoundedCounterCrdt) {
+	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
 
@@ -115,7 +116,7 @@ func (crdt *BoundedCounterCrdt) IsBigCRDT() bool { return false }
 
 func (crdt *BoundedCounterCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
 	fmt.Println("[BC][Read]Value: ", crdt.value)
-	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+	if len(updsNotYetApplied) == 0 {
 		return crdt.GetValue()
 	}
 	//TODO: Do with updsNotYetApplied... must consider limit.
@@ -131,22 +132,35 @@ func (crdt *BoundedCounterCrdt) Update(args UpdateArguments) (downstreamArgs Dow
 	fmt.Printf("[BC][Update]Update type: %T\n", args)
 	switch typedArgs := args.(type) {
 	case Increment:
-		return DownstreamIncBCounter{Change: typedArgs.Change, ReplicaID: crdt.replicaID}
+		return DownstreamIncBCounter{Change: typedArgs.Change, ReplicaID: shared.ReplicaID}
 	case Decrement:
-		return DownstreamDecBCounter{Change: typedArgs.Change, ReplicaID: crdt.replicaID, ToReplicate: new(bool)}
+		return DownstreamDecBCounter{Change: typedArgs.Change, ReplicaID: shared.ReplicaID, ToReplicate: new(bool)}
 	case SetCounterBound:
 		fmt.Println("[BC][Update]SetCounterBound upd.")
 		return typedArgs
 	case TransferCounter:
-		if typedArgs.ToTransfer > crdt.permissions[crdt.replicaID]/2 { //Too few rights to transfer
+		if typedArgs.ToTransfer > crdt.permissions[shared.ReplicaID]/2 { //Too few rights to transfer
 			return NoOp{}
 		}
 		return typedArgs
+	case MultiUpd:
+		multiDowns := make(MultiUpd, len(typedArgs))
+		for i, innerUpd := range typedArgs {
+			multiDowns[i] = crdt.Update(innerUpd)
+		}
+		return multiDowns
+	default:
+		fmt.Printf("[BC][Update]Unknown update type: %v (%T)\n", args, args)
 	}
 	return nil
 }
 
 func (crdt *BoundedCounterCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs DownstreamArguments) (otherDownstreamAgs DownstreamArguments) {
+	if multiUpd, ok := downstreamArgs.(MultiUpd); ok {
+		for _, upd := range multiUpd {
+			crdt.Downstream(updTs, upd.(DownstreamArguments))
+		}
+	}
 	crdt.addToHistory(&updTs, &downstreamArgs, crdt.applyDownstream(downstreamArgs))
 	return nil
 }
@@ -163,6 +177,8 @@ func (crdt *BoundedCounterCrdt) applyDownstream(downstreamArgs DownstreamArgumen
 		return crdt.counterInitOp(opType)
 	case TransferCounter:
 		return crdt.transfer(opType)
+	default:
+		fmt.Printf("[BC][Downstream]Unsupported downstream type: %v (%T)\n", downstreamArgs, downstreamArgs)
 	}
 	return
 }
@@ -209,7 +225,7 @@ func (crdt *BoundedCounterCrdt) counterInitOp(op SetCounterBound) (effect *Effec
 
 // TODO: Em vez de recusar o pedido, simplesmente transferir menos permissoes.
 func (crdt *BoundedCounterCrdt) transfer(op TransferCounter) (effect *Effect) {
-	if op.FromID == crdt.replicaID && op.ToTransfer > crdt.permissions[op.FromID]/2 { //If the transfer comes from ourselves, ensure enough permissions will be left
+	if op.FromID == shared.ReplicaID && op.ToTransfer > crdt.permissions[op.FromID]/2 { //If the transfer comes from ourselves, ensure enough permissions will be left
 		*op.ToReplicate = false
 	} else {
 		*op.ToReplicate = true
@@ -221,22 +237,22 @@ func (crdt *BoundedCounterCrdt) transfer(op TransferCounter) (effect *Effect) {
 
 // Called periodically. Checks if the counter needs more rights and, if so, requests
 // them from the replica with the most rights.
-func (crdt *BoundedCounterCrdt) RequestTransfer() (toAsk int32, askID int16) {
+func (crdt *BoundedCounterCrdt) RequestTransfer() (toAsk int32, askID uint16) {
 	//The total perms matches the value of the counter
-	if crdt.permissions[crdt.replicaID] < (crdt.value / int32(len(crdt.permissions)) / 2) {
+	if crdt.permissions[shared.ReplicaID] < (crdt.value / int32(len(crdt.permissions)) / 2) {
 		//Find replica with the most permissions
-		maxP, maxID := int32(0), int16(0)
+		maxP, maxID := int32(0), uint16(0)
 		for id, perm := range crdt.permissions {
 			if perm > maxP {
 				maxP, maxID = perm, id
 			}
 		}
 		//Ask for the min of: (remote rights - local rights) / 2 rights, crdt.value - crdt.permissions[local]
-		toAsk := MinInt32((crdt.permissions[maxID]-crdt.permissions[crdt.replicaID])/2,
-			(crdt.value - crdt.permissions[crdt.replicaID]))
+		toAsk := MinInt32((crdt.permissions[maxID]-crdt.permissions[shared.ReplicaID])/2,
+			(crdt.value - crdt.permissions[shared.ReplicaID]))
 		return toAsk, maxID
 	}
-	return -1, -1
+	return -1, math.MaxUint16
 }
 
 func (crdt *BoundedCounterCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err error) {
@@ -246,10 +262,9 @@ func (crdt *BoundedCounterCrdt) IsOperationWellTyped(args UpdateArguments) (ok b
 func (crdt *BoundedCounterCrdt) Copy() (copyCRDT InversibleCRDT) {
 	newCRDT := BoundedCounterCrdt{
 		CRDTVM:      crdt.CRDTVM.copy(),
-		permissions: make(map[int16]int32),
-		decs:        make(map[int16]int32),
+		permissions: make(map[uint16]int32),
+		decs:        make(map[uint16]int32),
 		limit:       crdt.limit,
-		replicaID:   crdt.replicaID,
 		value:       crdt.value,
 	}
 	return &newCRDT
@@ -277,8 +292,8 @@ func (crdtOp SetCounterBound) FromUpdateObject(protobuf *proto.ApbUpdateOperatio
 }
 
 func (crdtOp SetCounterBound) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	return &proto.ApbUpdateOperation{Bcounterop: &proto.ApbBoundCounterUpdate{
-		Limit: pb.Int64(int64(crdtOp.Bound)), InitialValue: pb.Int64(int64(crdtOp.InitialValue)), CompEq: &crdtOp.CompEq}}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Bcounterop{Bcounterop: &proto.ApbBoundCounterUpdate{
+		Limit: pb.Int64(int64(crdtOp.Bound)), InitialValue: pb.Int64(int64(crdtOp.InitialValue)), CompEq: &crdtOp.CompEq}}}
 }
 
 func (crdtOp TransferCounter) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -291,24 +306,24 @@ func (crdtOp TransferCounter) ToUpdateObject(protobuf *proto.ApbUpdateOperation)
 
 func (downOp DownstreamIncBCounter) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
 	pbCounter := protobuf.GetBcounterOp().GetInc()
-	downOp.Change, downOp.ReplicaID = pbCounter.GetChange(), int16(pbCounter.GetReplicaID())
+	downOp.Change, downOp.ReplicaID = pbCounter.GetChange(), uint16(pbCounter.GetReplicaID())
 	return downOp
 }
 
 func (downOp DownstreamIncBCounter) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	return &proto.ProtoOpDownstream{BcounterOp: &proto.ProtoBCounterDownstream{
-		Inc: &proto.ProtoIncBCounterDownstream{Change: pb.Int32(downOp.Change), ReplicaID: pb.Int32(int32(downOp.ReplicaID))}}}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_BcounterOp{BcounterOp: &proto.ProtoBCounterDownstream{
+		Inc: &proto.ProtoIncBCounterDownstream{Change: pb.Int32(downOp.Change), ReplicaID: pb.Int32(int32(downOp.ReplicaID))}}}}
 }
 
 func (downOp DownstreamDecBCounter) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
 	pbCounter := protobuf.GetBcounterOp().GetDec()
-	downOp.Change, downOp.ReplicaID, downOp.ToReplicate = pbCounter.GetChange(), int16(pbCounter.GetReplicaID()), new(bool)
+	downOp.Change, downOp.ReplicaID, downOp.ToReplicate = pbCounter.GetChange(), uint16(pbCounter.GetReplicaID()), new(bool)
 	return downOp
 }
 
 func (downOp DownstreamDecBCounter) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	return &proto.ProtoOpDownstream{BcounterOp: &proto.ProtoBCounterDownstream{
-		Dec: &proto.ProtoDecBCounterDownstream{Change: pb.Int32(downOp.Change), ReplicaID: pb.Int32(int32(downOp.ReplicaID))}}}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_BcounterOp{BcounterOp: &proto.ProtoBCounterDownstream{
+		Dec: &proto.ProtoDecBCounterDownstream{Change: pb.Int32(downOp.Change), ReplicaID: pb.Int32(int32(downOp.ReplicaID))}}}}
 }
 
 func (downOp SetCounterBound) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
@@ -318,20 +333,20 @@ func (downOp SetCounterBound) FromReplicatorObj(protobuf *proto.ProtoOpDownstrea
 }
 
 func (downOp SetCounterBound) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	return &proto.ProtoOpDownstream{BcounterOp: &proto.ProtoBCounterDownstream{
-		SetBounds: &proto.ProtoSetBoundCounterDownstream{Limit: &downOp.Bound, CompEq: &downOp.CompEq, Value: &downOp.InitialValue}}}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_BcounterOp{BcounterOp: &proto.ProtoBCounterDownstream{
+		SetBounds: &proto.ProtoSetBoundCounterDownstream{Limit: pb.Int32(downOp.Bound), CompEq: pb.Bool(downOp.CompEq), Value: pb.Int32(downOp.InitialValue)}}}}
 }
 
 func (downOp TransferCounter) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
 	pbOp := protobuf.GetBcounterOp().GetTransfer()
-	downOp.ToTransfer, downOp.FromID, downOp.ToID, downOp.ToReplicate = pbOp.GetTransferValue(), int16(pbOp.GetFromID()), int16(pbOp.GetToID()), new(bool)
+	downOp.ToTransfer, downOp.FromID, downOp.ToID, downOp.ToReplicate = pbOp.GetTransferValue(), uint16(pbOp.GetFromID()), uint16(pbOp.GetToID()), new(bool)
 	return downOp
 }
 
 func (downOp TransferCounter) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	return &proto.ProtoOpDownstream{BcounterOp: &proto.ProtoBCounterDownstream{
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_BcounterOp{BcounterOp: &proto.ProtoBCounterDownstream{
 		Transfer: &proto.ProtoTransferCounterDownstream{
-			TransferValue: &downOp.ToTransfer, FromID: pb.Int32(int32(downOp.FromID)), ToID: pb.Int32(int32(downOp.ToID))}}}
+			TransferValue: pb.Int32(downOp.ToTransfer), FromID: pb.Int32(int32(downOp.FromID)), ToID: pb.Int32(int32(downOp.ToID))}}}}
 }
 
 func (crdt *BoundedCounterCrdt) ToProtoState() (protobuf *proto.ProtoState) {
@@ -342,19 +357,19 @@ func (crdt *BoundedCounterCrdt) ToProtoState() (protobuf *proto.ProtoState) {
 	for key, value := range crdt.decs {
 		decsCopy[int32(key)] = value
 	}
-	return &proto.ProtoState{Bcounter: &proto.ProtoBoundedCounterState{
+	return &proto.ProtoState{State: &proto.ProtoState_Bcounter{Bcounter: &proto.ProtoBoundedCounterState{
 		Permissions: permsCopy, Decs: decsCopy, Limit: pb.Int32(crdt.limit), Value: pb.Int32(crdt.value),
-	}}
+	}}}
 }
 
-func (crdt *BoundedCounterCrdt) FromProtoState(protobuf *proto.ProtoState, ts *clocksi.Timestamp, replicaID int16) (newCRDT CRDT) {
+func (crdt *BoundedCounterCrdt) FromProtoState(protobuf *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	pbCounter := protobuf.GetBcounter()
-	perms, decs, permsPb, decsPb := make(map[int16]int32), make(map[int16]int32), pbCounter.GetPermissions(), pbCounter.GetDecs()
+	perms, decs, permsPb, decsPb := make(map[uint16]int32), make(map[uint16]int32), pbCounter.GetPermissions(), pbCounter.GetDecs()
 	for key, value := range permsPb {
-		perms[int16(key)] = value
+		perms[uint16(key)] = value
 	}
 	for key, value := range decsPb {
-		decs[int16(key)] = value
+		decs[uint16(key)] = value
 	}
 	return (&BoundedCounterCrdt{permissions: perms, decs: decs, limit: pbCounter.GetLimit(), value: pbCounter.GetValue()}).
 		initializeFromSnapshot(ts, replicaID)
