@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	//pb "github.com/golang/protobuf/proto"
+
 	tools "github.com/AndreRijo/go-tools/src/tools"
 	pb "google.golang.org/protobuf/proto"
 )
@@ -32,6 +33,7 @@ type TopKCrdt struct {
 	//Buffer for getTopN and getTopAbove.
 	//Each time the top is *actually* modified it gets nilled, and is rebuilt on the first execution of one of those queries.
 	//Any add that does not change the top does not nill this buffer.
+	//Since this buffer is nilled, it can be directly given as a reply on read.
 	sortedElems []TopKScore
 
 	//If true, all entries whose score matches smallestScore are kept and returned.
@@ -116,11 +118,11 @@ func (score TopKScore) isLowerScore(other TopKScore) bool {
 	return false
 }
 
-func (crdt *TopKCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *TopKCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	return crdt.InitializeWithSize(startTs, replicaID, defaultTopKSize)
 }
 
-func (crdt *TopKCrdt) InitializeWithSize(startTs *clocksi.Timestamp, replicaID uint16, size int) (newCrdt CRDT) {
+func (crdt *TopKCrdt) InitializeWithSize(startTs clocksi.Timestamp, replicaID uint16, size int) (newCrdt CRDT) {
 	crdt = &TopKCrdt{
 		CRDTVM:          (&genericInversibleCRDT{}).initialize(crdt),
 		replicaID:       replicaID,
@@ -134,7 +136,7 @@ func (crdt *TopKCrdt) InitializeWithSize(startTs *clocksi.Timestamp, replicaID u
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *TopKCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *TopKCrdt) {
+func (crdt *TopKCrdt) initializeFromSnapshot(startTs clocksi.Timestamp, replicaID uint16) (sameCRDT *TopKCrdt) {
 	crdt.CRDTVM, crdt.replicaID = (&genericInversibleCRDT{}).initialize(crdt), replicaID
 	return crdt
 }
@@ -187,8 +189,10 @@ func (crdt *TopKCrdt) makeSortedElems() {
 func (crdt *TopKCrdt) getState(updsNotYetApplied []UpdateArguments) (state State) {
 	var values []TopKScore
 	if crdt.sortedElems != nil {
-		values = make([]TopKScore, len(crdt.sortedElems))
-		copy(values, crdt.sortedElems)
+		/*values = make([]TopKScore, len(crdt.sortedElems))
+		copy(values, crdt.sortedElems)*/
+		//Safe to share: sortedElems will get set to nil when an update comes.
+		values = crdt.sortedElems
 	} else {
 		if !crdt.keepTiedEntries {
 			values = make([]TopKScore, len(crdt.elems))
@@ -223,6 +227,7 @@ func (crdt *TopKCrdt) getTopN(numberEntries int32, updsNotYetApplied []UpdateArg
 		//sort.Slice(crdt.sortedElems, func(i, j int) bool { return crdt.sortedElems[i].Score > crdt.sortedElems[j].Score })
 		crdt.makeSortedElems()
 	}
+	//Safe to share sortedElems, as it will get set to nil when an update comes.
 	if numberEntries >= int32(len(crdt.sortedElems)) {
 		return TopKValueState{Scores: crdt.sortedElems}
 	}
@@ -230,8 +235,10 @@ func (crdt *TopKCrdt) getTopN(numberEntries int32, updsNotYetApplied []UpdateArg
 }
 
 func (crdt *TopKCrdt) getTopKAboveValue(minValue int32, updsNotYetApplied []UpdateArguments) (state State) {
-	values := make([]TopKScore, len(crdt.elems))
-	actuallyAdded := 0
+	//Note: No need to allocate is sortedElems is available, as it will be set to nil when an update arrives that modifies the top.
+	//values := make([]TopKScore, len(crdt.elems))
+	var values []TopKScore
+	actuallyAdded := -1
 	//Faster to do with sortedElems if it's available.
 	if crdt.sortedElems != nil {
 		/*for _, elem := range crdt.sortedElems {
@@ -242,11 +249,12 @@ func (crdt *TopKCrdt) getTopKAboveValue(minValue int32, updsNotYetApplied []Upda
 				break
 			}
 		}*/
-		if minValue <= crdt.smallestScore.Score {
-			values = make([]TopKScore, len(crdt.sortedElems))
-			copy(values, crdt.sortedElems)
-		} else if len(crdt.sortedElems) > 200 { //Attempt to find the end position and use a direct copy (faster)
-			//Binary search + copy.
+		if minValue <= crdt.smallestScore.Score { //In this case, can use sortedElems directly.
+			values = crdt.sortedElems
+			/*values = make([]TopKScore, len(crdt.sortedElems))
+			copy(values, crdt.sortedElems)*/
+		} else if len(crdt.sortedElems) > 200 { //Attempt to find the end position
+			//Binary search
 			left := 0
 			right := len(crdt.sortedElems) - 1
 			for left <= right {
@@ -257,30 +265,36 @@ func (crdt *TopKCrdt) getTopKAboveValue(minValue int32, updsNotYetApplied []Upda
 					right = mid - 1
 				}
 			}
-			values = make([]TopKScore, left)
-			copy(values, crdt.sortedElems[:left])
-		} else { //Just iterate and copy manually.
-			values = make([]TopKScore, len(crdt.elems))
+			values = crdt.sortedElems[:left]
+			//values = make([]TopKScore, left)
+			//copy(values, crdt.sortedElems[:left])
+		} else { //Just iterate and then slice accordingly.
+			//values = make([]TopKScore, len(crdt.elems))
 			for i, elem := range crdt.sortedElems {
 				if elem.Score >= minValue {
 					//values[actuallyAdded] = TopKScore{Id: elem.Id, Score: elem.Score, Data: elem.Data}
-					values[i] = elem //This will copy as its a value type.
+					//values[i] = elem //This will copy as its a value type.
 				} else {
 					actuallyAdded = i
 					break
 				}
 			}
-			if actuallyAdded == 0 {
-				actuallyAdded = len(crdt.elems)
+			if actuallyAdded == -1 { //All were added but... this shouldn't happen as we already test minValue <= crdt.smallestScore.Score
+				//actuallyAdded = len(crdt.elems)
+				actuallyAdded = len(crdt.sortedElems)
 			}
-			if crdt.keepTiedEntries && crdt.smallestScore.Score >= minValue {
+			//No longer needed as sortedElems already includes tiedEntries.
+			/*if crdt.keepTiedEntries && crdt.smallestScore.Score >= minValue {
 				for _, tied := range crdt.tiedElems {
 					values = append(values, tied)
 				}
-			}
+			}*/
+			values = crdt.sortedElems[:actuallyAdded]
 		}
+		return TopKValueState{Scores: values}
 	} else {
 		//Must go through all elems
+		values = make([]TopKScore, len(crdt.elems))
 		for _, elem := range crdt.elems {
 			if elem.Score >= minValue {
 				values[actuallyAdded] = TopKScore{Id: elem.Id, Score: elem.Score, Data: elem.Data}
@@ -290,6 +304,7 @@ func (crdt *TopKCrdt) getTopKAboveValue(minValue int32, updsNotYetApplied []Upda
 		if crdt.keepTiedEntries && crdt.smallestScore.Score >= minValue {
 			for _, tied := range crdt.tiedElems {
 				values = append(values, tied)
+				actuallyAdded++
 			}
 		}
 	}
@@ -444,11 +459,11 @@ func (crdt *TopKCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs Downstr
 	}
 	effect := crdt.applyDownstream(downstreamArgs)
 	//Necessary for inversibleCrdt
-	crdt.addToHistory(&updTs, &downstreamArgs, effect)
+	crdt.addToHistory(updTs, downstreamArgs, effect)
 	return
 }
 
-func (crdt *TopKCrdt) applyDownstream(downstreamArgs UpdateArguments) (effect *Effect) {
+func (crdt *TopKCrdt) applyDownstream(downstreamArgs UpdateArguments) (effect Effect) {
 	//fmt.Printf("[TopK]Apply downstream. Operation: %+v (Type: %T)\n", downstreamArgs, downstreamArgs)
 	switch opType := downstreamArgs.(type) {
 	case DownstreamSimpleTopKAdd:
@@ -463,21 +478,18 @@ func (crdt *TopKCrdt) applyDownstream(downstreamArgs UpdateArguments) (effect *E
 	return
 }
 
-func (crdt *TopKCrdt) applyInit(op TopKInit) (effect *Effect) {
+func (crdt *TopKCrdt) applyInit(op TopKInit) (effect Effect) {
 	if int(op) > crdt.maxElems*10 && len(crdt.elems) == 0 {
 		crdt.elems = make(map[int32]TopKScore, int(op)) //Resize.
 	}
 	crdt.maxElems = int(op)
-	var effectValue Effect = NoEffect{}
-	effect = &effectValue
 	//fmt.Println("[TOPK]Max top size set to", crdt.maxElems)
-	return
+	return NoEffect{}
 }
 
-func (crdt *TopKCrdt) applyAdd(op DownstreamSimpleTopKAdd) (effect *Effect) {
+func (crdt *TopKCrdt) applyAdd(op DownstreamSimpleTopKAdd) (effect Effect) {
 	//fmt.Printf("[TopK][DownstreamAdd]Received: %d:%d (Min: %d:%d)\n", op.Id, op.Score, crdt.smallestScore.Id, crdt.smallestScore.Score)
 	elem, has := crdt.elems[op.Id]
-	var effectI Effect = NoEffect{}
 	topChanged := false
 	if has && elem.Score > op.Score { //Old score is higher. Ignore.
 		//fmt.Printf("[TopK][DownstreamAdd]Already have ID but ignored as new value is lower: %d:%d (old: %d %d) (Min: %d:%d)\n", op.Id, op.Score,
@@ -485,7 +497,7 @@ func (crdt *TopKCrdt) applyAdd(op DownstreamSimpleTopKAdd) (effect *Effect) {
 		*op.ToReplicate = false
 	} else if has { //New score is higher, goes to top.
 		*op.ToReplicate, topChanged = true, true
-		effectI = TopKReplaceEffect{newElem: op.TopKScore, oldElem: crdt.elems[op.Id], oldMin: crdt.smallestScore}
+		effect = TopKReplaceEffect{newElem: op.TopKScore, oldElem: crdt.elems[op.Id], oldMin: crdt.smallestScore}
 		crdt.elems[op.Id] = op.TopKScore
 		if crdt.smallestScore.Id == op.Id { //The id updated used to be the smallest score
 			crdt.findAndUpdateMin()
@@ -496,14 +508,14 @@ func (crdt *TopKCrdt) applyAdd(op DownstreamSimpleTopKAdd) (effect *Effect) {
 		*op.ToReplicate, topChanged = true, true
 		crdt.elems[op.Id] = op.TopKScore
 		if op.TopKScore.isLowerScore(crdt.smallestScore) {
-			effectI = TopKReplaceEffect{newElem: op.TopKScore, oldMin: crdt.smallestScore}
+			effect = TopKReplaceEffect{newElem: op.TopKScore, oldMin: crdt.smallestScore}
 			//fmt.Printf("[TopK][DownstreamAdd]Top not full yet. Min changed. OldMin: %d:%d. NewMin: %d:%d\n",
 			//crdt.smallestScore.Id, crdt.smallestScore.Score, op.TopKScore.Id, op.TopKScore.Score)
 			crdt.smallestScore = op.TopKScore
 		} else {
 			//fmt.Printf("[TopK][DownstreamAdd]Top not full yet. Min not changed. Min: %d:%d\n",
 			//crdt.smallestScore.Id, crdt.smallestScore.Score)
-			effectI = TopKAddEffect{TopKScore: op.TopKScore}
+			effect = TopKAddEffect{TopKScore: op.TopKScore}
 		}
 	} else if op.TopKScore.isHigherScore(crdt.smallestScore) { //!has and the topK is full
 		*op.ToReplicate, topChanged = true, true
@@ -512,7 +524,7 @@ func (crdt *TopKCrdt) applyAdd(op DownstreamSimpleTopKAdd) (effect *Effect) {
 		if op.TopKScore.Score == crdt.smallestScore.Score { //Same score, but the new one has a higher ID
 			if crdt.keepTiedEntries {
 				crdt.addTiedElem(crdt.smallestScore)
-				effectI = TopKReplaceAndTiedEffect{newElem: op.TopKScore, oldElem: crdt.smallestScore, oldMin: crdt.smallestScore}
+				effect = TopKReplaceAndTiedEffect{newElem: op.TopKScore, oldElem: crdt.smallestScore, oldMin: crdt.smallestScore}
 			}
 			//fmt.Printf("[TopK][DownstreamAdd]New add has equal value to min, but higher Id. TopK is full. OldMin: %d:%d. NewMin: %d:%d\n",
 			//crdt.smallestScore.Id, crdt.smallestScore.Score, op.TopKScore.Id, op.TopKScore.Score)
@@ -522,30 +534,30 @@ func (crdt *TopKCrdt) applyAdd(op DownstreamSimpleTopKAdd) (effect *Effect) {
 			crdt.findAndUpdateMin()
 			if crdt.keepTiedEntries && oldMin.Score == crdt.smallestScore.Score {
 				crdt.addTiedElem(oldMin)
-				effectI = TopKReplaceAndTiedEffect{newElem: op.TopKScore, oldElem: crdt.smallestScore, oldMin: crdt.smallestScore}
+				effect = TopKReplaceAndTiedEffect{newElem: op.TopKScore, oldElem: crdt.smallestScore, oldMin: crdt.smallestScore}
 			} else if crdt.keepTiedEntries {
-				effectI = TopKReplaceAndCleanTiedEffect{newElem: op.TopKScore, oldElem: crdt.smallestScore, oldMin: crdt.smallestScore, oldTied: crdt.tiedElems}
+				effect = TopKReplaceAndCleanTiedEffect{newElem: op.TopKScore, oldElem: crdt.smallestScore, oldMin: crdt.smallestScore, oldTied: crdt.tiedElems}
 				crdt.tiedElems = nil //New min has a higher score
 			}
 			//fmt.Printf("[TopK][DownstreamAdd]New add is higher than min. TopK is full. OldMin: %d:%d. NewMin: %d:%d\n",
 			//oldMin.Id, oldMin.Score, crdt.smallestScore.Id, crdt.smallestScore.Score)
 		}
-		if (effectI == NoEffect{}) {
-			effectI = TopKReplaceEffect{newElem: op.TopKScore, oldElem: crdt.smallestScore, oldMin: crdt.smallestScore}
+		if (effect == NoEffect{}) {
+			effect = TopKReplaceEffect{newElem: op.TopKScore, oldElem: crdt.smallestScore, oldMin: crdt.smallestScore}
 		}
 	} else { //Topk is full and the elem is too small. However, if it ties with smallestScore and we keep tied entries, we keep it as tied.
 		if crdt.smallestScore.Score == op.TopKScore.Score && crdt.keepTiedEntries {
 			crdt.addTiedElem(op.TopKScore)
-			*op.ToReplicate, effectI, topChanged = true, TopKAddEffect{TopKScore: op.TopKScore}, true
+			*op.ToReplicate, effect, topChanged = true, TopKAddEffect{TopKScore: op.TopKScore}, true
 		} else {
-			*op.ToReplicate, effectI = false, NoEffect{}
+			*op.ToReplicate, effect = false, NoEffect{}
 		}
 		//fmt.Printf("[TopK][DownstreamAdd]New add is lower than min. TopK is full. Nothing changed.")
 	}
 	if topChanged {
 		crdt.nUpds++
 	}
-	return &effectI
+	return
 }
 
 func (crdt *TopKCrdt) addTiedElem(score TopKScore) {
@@ -555,12 +567,11 @@ func (crdt *TopKCrdt) addTiedElem(score TopKScore) {
 	crdt.tiedElems[score.Id] = score
 }
 
-func (crdt *TopKCrdt) applyAddAll(op DownstreamSimpleTopKAddAll) (effect *Effect) {
+func (crdt *TopKCrdt) applyAddAll(op DownstreamSimpleTopKAddAll) (effect Effect) {
 	currI, topChanged := 0, false
 	elem, has := TopKScore{}, false
 	listEffect := TopKAddAllEffect{effects: make([]Effect, len(op.DownstreamAdds))}
 	newDown := make([]TopKScore, len(op.DownstreamAdds))
-	var effectI Effect
 	for _, add := range op.DownstreamAdds {
 		elem, has = crdt.elems[add.Id]
 		if has && elem.Score > add.Score { //Ignore, as the existing score is higher.
@@ -619,11 +630,9 @@ func (crdt *TopKCrdt) applyAddAll(op DownstreamSimpleTopKAddAll) (effect *Effect
 		crdt.nUpds++
 	}
 	if currI == 0 {
-		effectI = NoEffect{}
-		return &effectI
+		return NoEffect{}
 	}
-	effectI = listEffect
-	return &effectI
+	return listEffect
 }
 
 func (crdt *TopKCrdt) findAndUpdateMin() {
@@ -662,12 +671,12 @@ func (crdt *TopKCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
-func (crdt *TopKCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *TopKCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	return crdt.applyDownstream(updArgs)
 }
 
-func (crdt *TopKCrdt) undoEffect(effect *Effect) {
-	switch typedEffect := (*effect).(type) {
+func (crdt *TopKCrdt) undoEffect(effect Effect) {
+	switch typedEffect := (effect).(type) {
 	case TopKAddEffect:
 		crdt.undoAddEffect(&typedEffect)
 	case TopKReplaceEffect:
@@ -719,7 +728,7 @@ func (crdt *TopKCrdt) undoAddAllEffect(effect *TopKAddAllEffect) {
 	}
 }
 
-func (crdt *TopKCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+func (crdt *TopKCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {}
 
 // Protobuf functions
 func (crdtOp TopKInit) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -740,30 +749,52 @@ func (downOp TopKInit) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
 }
 
 func (downOp DownstreamSimpleTopKAdd) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
-	addProto, toReplicate := protobuf.GetTopkOp().GetAdds()[0], true
-	downOp.Id, downOp.Score, downOp.Data, downOp.ToReplicate = addProto.GetId(), addProto.GetScore(), tools.ByteSliceGetOrDefault(addProto.Data, emptyData), &toReplicate
+	//addProto, toReplicate := protobuf.GetTopkOp().GetAdds()[0], true
+	//downOp.Id, downOp.Score, downOp.Data, downOp.ToReplicate = addProto.GetId(), addProto.GetScore(), tools.ByteSliceGetOrDefault(addProto.Data, emptyData), &toReplicate
+	addProto, toReplicate := protobuf.GetTopkOp(), true
+	downOp.Id, downOp.Score, downOp.ToReplicate = addProto.GetPlayerIds()[0], addProto.GetScores()[0], &toReplicate
+	if len(addProto.Data) > 0 {
+		downOp.Data = tools.NewByteSlicePtr(addProto.Data[0])
+	}
 	return downOp
 }
 
 func (downOp DownstreamSimpleTopKAdd) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	add := &proto.ProtoTopKScore{Id: pb.Int32(downOp.Id), Score: pb.Int32(downOp.Score)}
+	/*add := &proto.ProtoTopKScore{Id: pb.Int32(downOp.Id), Score: pb.Int32(downOp.Score)}
 	if downOp.Data != nil && len(*downOp.Data) > 0 {
 		add.Data = *downOp.Data
 	}
-	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_TopkOp{TopkOp: &proto.ProtoTopKDownstream{Adds: []*proto.ProtoTopKScore{add}}}}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_TopkOp{TopkOp: &proto.ProtoTopKDownstream{Adds: []*proto.ProtoTopKScore{add}}}}*/
+	topKOp := &proto.ProtoTopKDownstream{PlayerIds: []int32{downOp.Id}, Scores: []int32{downOp.Score}}
+	if downOp.Data != nil && len(*downOp.Data) > 0 {
+		topKOp.Data = [][]byte{*downOp.Data}
+	}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_TopkOp{TopkOp: topKOp}}
 }
 
 func (downOp DownstreamSimpleTopKAddAll) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
-	addProto := protobuf.GetTopkOp().GetAdds()
+	/*addProto := protobuf.GetTopkOp().GetAdds()
 	downOp.DownstreamAdds = make([]TopKScore, len(addProto))
 	for i, addP := range addProto {
 		downOp.DownstreamAdds[i] = TopKScore{Id: addP.GetId(), Score: addP.GetScore(), Data: &addP.Data}
+	}*/
+	addProto := protobuf.GetTopkOp()
+	ids, scores, data := addProto.GetPlayerIds(), addProto.GetScores(), addProto.GetData()
+	downOp.DownstreamAdds = make([]TopKScore, len(ids))
+	if len(data) == 0 {
+		for i := range ids {
+			downOp.DownstreamAdds[i] = TopKScore{Id: ids[i], Score: scores[i], Data: emptyData}
+		}
+	} else {
+		for i := range ids {
+			downOp.DownstreamAdds[i] = TopKScore{Id: ids[i], Score: scores[i], Data: tools.NewByteSlicePtr(data[i])}
+		}
 	}
 	return downOp
 }
 
 func (downOp DownstreamSimpleTopKAddAll) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
-	protoAdds := make([]*proto.ProtoTopKScore, len(downOp.DownstreamAdds))
+	/*protoAdds := make([]*proto.ProtoTopKScore, len(downOp.DownstreamAdds))
 	var curr proto.ProtoTopKScore
 	for i, add := range downOp.DownstreamAdds {
 		curr = proto.ProtoTopKScore{Id: pb.Int32(add.Id), Score: pb.Int32(add.Score)}
@@ -773,6 +804,20 @@ func (downOp DownstreamSimpleTopKAddAll) ToReplicatorObj() (protobuf *proto.Prot
 		protoAdds[i] = &curr
 	}
 	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_TopkOp{TopkOp: &proto.ProtoTopKDownstream{Adds: protoAdds}}}
+	*/
+	protoDown := proto.ProtoTopKDownstream{PlayerIds: make([]int32, len(downOp.DownstreamAdds)), Scores: make([]int32, len(downOp.DownstreamAdds))}
+	var allData [][]byte //Not initialized, in hopes it won't be needed. If at least one downstream includes data, we'll initialize the full slice.
+	for i, add := range downOp.DownstreamAdds {
+		protoDown.PlayerIds[i], protoDown.Scores[i] = add.Id, add.Score
+		if add.Data != nil && len(*add.Data) > 0 {
+			if allData == nil {
+				allData = make([][]byte, len(downOp.DownstreamAdds))
+				protoDown.Data = allData
+			}
+			allData[i] = *add.Data
+		}
+	}
+	return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_TopkOp{TopkOp: &protoDown}}
 }
 
 func (crdt *TopKCrdt) ToProtoState() (protobuf *proto.ProtoState) {
@@ -795,7 +840,7 @@ func (crdt *TopKCrdt) ToProtoState() (protobuf *proto.ProtoState) {
 	return &proto.ProtoState{State: &proto.ProtoState_Topk{Topk: &topKState}}
 }
 
-func (crdt *TopKCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCDRT CRDT) {
+func (crdt *TopKCrdt) FromProtoState(proto *proto.ProtoState, ts clocksi.Timestamp, replicaID uint16) (newCDRT CRDT) {
 	topKProto := proto.GetTopk()
 	elems := make(map[int32]TopKScore)
 	keepTiedEntries := topKProto.GetKeepTiedEntries()

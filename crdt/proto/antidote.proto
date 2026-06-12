@@ -67,6 +67,18 @@ enum DATA_type {
     FLOAT64 = 9;
 }
 
+// Used by CRDTs representing arrays of numbers (counters, floats, multiArray)
+// Represents a list of possible update types. Not all CRDTs may support all types.
+enum NumberArrayUpdType {
+    SIZE = 0;
+    INC = 1;
+    INC_ALL = 2;
+    INC_MULTI = 3;
+    INC_SUB = 4;
+    INC_RANGE = 5;
+    INC_POS = 6;
+}
+
 // Riak Error response
 message ApbErrorResp {
     required bytes errmsg = 1;
@@ -209,12 +221,19 @@ message ApbOperationResp {
 
 // Topk-rmv updates request
 message ApbTopkRmvUpdate{
-    repeated ApbIntPair adds = 1;
+    //repeated ApbIntPair adds = 1;
+    optional ApbTopKRmvAdd adds = 1;
     repeated sint32 rems = 2 [packed = true];
     //TopSum only. If multiple already existing IDs are being updated, please split the adds in two parts: the first part for non-negative scores, the second part for negative scores.
     //This is a must as, internally, TopSum's operations are different depending if it is an add or a sub, so it is essential to separate both.
     //Use the variable below to signal the number of positive elements.
     optional uint32 positiveLen = 3; 
+}
+
+message ApbTopKRmvAdd{
+    repeated sint32 playerIds = 1 [packed = true];
+    repeated sint32 scores = 2 [packed = true];
+    repeated bytes data = 3; //Optional, but if it is present, it must be present for every entry.
 }
 
 //Topk updates request
@@ -235,9 +254,21 @@ message ApbTopKInit{
 message ApbGetTopkResp {
     repeated sint32 values = 1;
 }
-*/
+// Note: This is very GC/allocation heavy, as basically for each entry it'll generate 4(!) pointers. For millions of requests/s, and big Tops, this is non-viable.
 message ApbGetTopkResp {
 	repeated ApbIntPair values = 1;
+}
+//Holds a (playerId, score, data) triple
+message ApbIntPair {
+	required sint32 playerId = 1;
+    required sint32 score = 2;
+    optional bytes data = 3;
+}
+*/
+message ApbGetTopkResp {
+    repeated sint32 playerIds = 1 [packed = true];
+    repeated sint32 scores = 2 [packed = true];
+    repeated bytes data = 3; //Optional, but if it is present, it must be present for every entry.
 }
 
 message ApbTopKAvgAggrResp {
@@ -245,19 +276,14 @@ message ApbTopKAvgAggrResp {
     optional int64 count = 2; //Used only by AVG.
 }
 
-//Holds a (playerId, score, data) triple
-message ApbIntPair {
-	required sint32 playerId = 1;
-    required sint32 score = 2;
-    optional bytes data = 3;
-}
-
 //--------------------
 // Leaderboard
 
 message ApbLeaderboardUpdate {
-	repeated ApbIntPair adds = 1;
-    repeated int32 rems = 2 [packed = true];
+	//repeated ApbIntPair adds = 1;
+    repeated sint32 playerIds = 1 [packed = true];
+    repeated sint32 scores = 2 [packed = true]; 
+    repeated int32 rems = 3 [packed = true];
 }
 
 message ApbGetLeaderboardResp {
@@ -316,6 +342,15 @@ message ApbGetPairCounterResp {
 // ArrayCounter
 
 message ApbArrayCounterUpdate {
+    optional ApbArrayCounterIncrement inc = 1;
+    optional ApbArrayCounterIncrementAll incAll = 2;
+    optional ApbArrayCounterIncrementMulti incMulti = 3;
+    optional ApbArrayCounterIncrementSub incSub = 4;
+    optional ApbArrayCounterSetSize size = 5;
+    required NumberArrayUpdType updType = 6;
+}
+
+/*message ApbArrayCounterUpdate {
     oneof upd {
         ApbArrayCounterIncrement inc = 1;
         ApbArrayCounterIncrementAll incAll = 2;
@@ -323,7 +358,7 @@ message ApbArrayCounterUpdate {
         ApbArrayCounterIncrementSub incSub = 4;
         ApbArrayCounterSetSize size = 5;
     }
-}
+}*/
 
 message ApbArrayCounterIncrement {
     required int32 index = 1;
@@ -354,6 +389,16 @@ message ApbGetArrayCounterResp {
 // ArrayFloat
 
 message ApbArrayFloatUpdate {
+    optional ApbArrayFloatIncrement inc = 1;
+    optional ApbArrayFloatIncrementAll incAll = 2;
+    optional ApbArrayFloatIncrementMulti incMulti = 3;
+    optional ApbArrayFloatIncrementSub incSub = 4;
+    optional ApbArrayFloatIncrementRange incRange = 5;
+    optional ApbArrayFloatSetSize size = 6;
+    required NumberArrayUpdType updType = 7;
+}
+
+/*message ApbArrayFloatUpdate {
     oneof upd {
         ApbArrayFloatIncrement inc = 1;
         ApbArrayFloatIncrementAll incAll = 2;
@@ -362,7 +407,7 @@ message ApbArrayFloatUpdate {
         ApbArrayFloatIncrementRange incRange = 5;
         ApbArrayFloatSetSize size = 6;
     }
-}
+}*/
 
 message ApbArrayFloatIncrement {
     required int32 index = 1;
@@ -410,8 +455,47 @@ enum MultiArrayType {
 
 message ApbMultiArrayUpdate {
     required MultiArrayType type = 1;
+    required NumberArrayUpdType updType = 8;
+    optional ApbMultiArrayIntUpdate intUpd = 2;
+    optional ApbMultiArrayFloatUpdate floatUpd = 3;
+    optional ApbMultiArrayDataUpdate dataUpd = 4;
+    optional ApbMultiArrayAvgUpdate avgUpd = 5;
+    optional ApbMultiArrayMultiUpdate multiUpd = 6;
+    optional ApbMultiArraySetSizeUpdate sizeUpd = 7;
+}
+
+message ApbMultiArrayIntUpdate {
+    optional ApbMultiArrayIntInc inc = 1;
+    optional ApbMultiArrayIntIncSingle incSingle = 2;
+    optional ApbMultiArrayIntIncPositions incPos = 3;
+    optional ApbMultiArrayIntIncRange incRange = 4;
+}
+
+message ApbMultiArrayFloatUpdate {
+    optional ApbMultiArrayFloatInc inc = 1;
+    optional ApbMultiArrayFloatIncSingle incSingle = 2;
+    optional ApbMultiArrayFloatIncPositions incPos = 3;
+    optional ApbMultiArrayFloatIncRange incRange = 4;
+}
+
+message ApbMultiArrayDataUpdate {
+    optional ApbMultiArrayDataSet set = 1;
+    optional ApbMultiArrayDataSetSingle setSingle = 2;
+    optional ApbMultiArrayDataSetPositions setPos = 3;
+    optional ApbMultiArrayDataSetRange setRange = 4;
+}
+
+message ApbMultiArrayAvgUpdate {
+    optional ApbMultiArrayAvgInc inc = 1;
+    optional ApbMultiArrayAvgIncSingle incSingle = 2;
+    optional ApbMultiArrayAvgIncPositions incPos = 3;
+    optional ApbMultiArrayAvgIncRange incRange = 4;
+}
+
+/*message ApbMultiArrayUpdate {
+    required MultiArrayType type = 1;
     oneof upd {
-        ApbMultiArrayIntUpdate intUpd = 2; //Note: incAll is not supported.
+        ApbMultiArrayIntUpdate intUpd = 2;
         ApbMultiArrayFloatUpdate floatUpd = 3;
         ApbMultiArrayDataUpdate dataUpd = 4;
         ApbMultiArrayAvgUpdate avgUpd = 5;
@@ -454,7 +538,7 @@ message ApbMultiArrayAvgUpdate {
         ApbMultiArrayAvgIncPositions incPos = 3;
         ApbMultiArrayAvgIncRange incRange = 4;
     }
-}
+}*/
 
 message ApbMultiArraySetSizeUpdate {
     optional int32 intSize = 1;
@@ -774,6 +858,7 @@ message ApbMapCounterUpdate {
     optional ApbMapIntOp intOp = 3;
     optional ApbMapDoubleOp doubleOp = 4;
     optional ApbMapCounterInit init = 5;
+    required NumberArrayUpdType updType = 6;
 }
 
 message ApbMapIntOp {
@@ -825,6 +910,7 @@ message ApbMapDoubleIncMultOp {
 }
 
 message ApbMapCounterInit {
+    //option (mempool) = true;
     required int32 size = 1;
 }
 
@@ -875,6 +961,7 @@ message ApbBoundObject {
 
 // Objects to be read
 message ApbReadObjects {
+    //option (mempool) = true; 
     repeated ApbBoundObject boundobjects = 1;
     required bytes transaction_descriptor = 2;
 }
@@ -1230,6 +1317,7 @@ message ApbRead {
 }
 
 message ApbStaticRead {
+    //option (mempool) = true; 
 	repeated ApbBoundObject fullreads = 1;
 	repeated ApbPartialRead partialreads = 2;
 	required ApbStartTransaction transaction = 3;

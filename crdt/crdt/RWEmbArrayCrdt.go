@@ -114,7 +114,7 @@ func (args EmbMapGetValueArguments) GetCRDTType() proto.CRDTType { return proto.
 
 func (args EmbMapGetValueArguments) GetREADType() proto.READType { return proto.READType_GET_POS }
 
-func (crdt *RWEmbArrayCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *RWEmbArrayCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	crdt = new & RWEmbArrayCrdt{
 		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
 		entries:               nil,
@@ -281,7 +281,7 @@ func (crdt *RWEmbArrayCrdt) applyUpdateAll(updTs clocksi.Timestamp, upds map[int
 	}
 }
 
-func (crdt *RWEmbArrayCrdt) applyRemoveAll(toRem []int, remoteID int64, remoteClk int64) (effect *Effect) {
+func (crdt *RWEmbArrayCrdt) applyRemoveAll(toRem []int, remoteID int64, remoteClk int64) (effect Effect) {
 
 }
 
@@ -294,15 +294,15 @@ func (crdt *RWEmbArrayCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 
 }
 
-func (crdt *RWEmbArrayCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *RWEmbArrayCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	return nil
 }
 
-func (crdt *RWEmbArrayCrdt) undoEffect(effect *Effect) {
+func (crdt *RWEmbArrayCrdt) undoEffect(effect Effect) {
 
 }
 
-func (crdt *RWEmbArrayCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {
+func (crdt *RWEmbArrayCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {
 
 }
 

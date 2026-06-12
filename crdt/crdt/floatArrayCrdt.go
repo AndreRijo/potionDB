@@ -212,14 +212,14 @@ func (args FloatArrayRangeArguments) HasVariables() bool        { return false }
 func (args FloatArrayExceptArguments) HasVariables() bool       { return false }
 func (args FloatArrayExceptRangeArguments) HasVariables() bool  { return false }
 
-func (crdt *FloatArrayCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *FloatArrayCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	crdt = &FloatArrayCrdt{values: make([]float64, 1)}
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *FloatArrayCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *FloatArrayCrdt) {
+func (crdt *FloatArrayCrdt) initializeFromSnapshot(startTs clocksi.Timestamp, replicaID uint16) (sameCRDT *FloatArrayCrdt) {
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
@@ -772,6 +772,11 @@ func (crdt *FloatArrayCrdt) Update(args UpdateArguments) (downstreamArgs Downstr
 			return NoOp{} //New set size is smaller than the current size... so useless operation.
 		}
 	}
+	//TODO: Remove, for debugging
+	if args.GetCRDTType() != proto.CRDTType_ARRAY_FLOAT {
+		fmt.Printf("[FloatArrayCRDT][Update]Unknown update type: %v (%T)\n", args, args)
+		return WrongOp{RecOp: args, RecOpCrdtType: args.GetCRDTType(), CrdtType: crdt.GetCRDTType(), DataType: crdt.GetDATAType()}
+	}
 	return args.(DownstreamArguments)
 }
 
@@ -784,7 +789,7 @@ func (crdt *FloatArrayCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs D
 	}
 	effect := crdt.applyDownstream(downstreamArgs)
 	//Necessary for inversibleCrdt
-	crdt.addToHistory(&updTs, &downstreamArgs, effect)
+	crdt.addToHistory(updTs, downstreamArgs, effect)
 
 	return nil
 }
@@ -796,53 +801,52 @@ func (crdt *FloatArrayCrdt) expandArray(newSize int32) {
 	crdt.values = newCounts
 }
 
-func (crdt *FloatArrayCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect *Effect) {
-	var effectValue Effect
+func (crdt *FloatArrayCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect Effect) {
 	switch typedUpd := downstreamArgs.(type) {
 	case FloatArrayIncrement:
 		if int(typedUpd.Position) >= len(crdt.values) {
-			effectValue = FloatArraySetSizeEffect(len(crdt.values)) //The value of this position before was "0" as it did not belong to the array
+			effect = FloatArraySetSizeEffect(len(crdt.values)) //The value of this position before was "0" as it did not belong to the array
 			crdt.expandArray(typedUpd.Position + 1)
 		} else {
-			effectValue = FloatArrayIncrementEffect(typedUpd)
+			effect = FloatArrayIncrementEffect(typedUpd)
 		}
 		crdt.values[typedUpd.Position] += typedUpd.Change
 	case FloatArrayDecrement:
 		if int(typedUpd.Position) >= len(crdt.values) {
-			effectValue = FloatArraySetSizeEffect(len(crdt.values))
+			effect = FloatArraySetSizeEffect(len(crdt.values))
 			crdt.expandArray(typedUpd.Position + 1)
 		} else {
-			effectValue = FloatArrayDecrementEffect(typedUpd)
+			effect = FloatArrayDecrementEffect(typedUpd)
 		}
 		crdt.values[typedUpd.Position] -= typedUpd.Change
 	case FloatArrayIncrementAll:
-		effectValue = FloatArrayIncrementAllEffect(typedUpd)
+		effect = FloatArrayIncrementAllEffect(typedUpd)
 		typedChange := float64(typedUpd)
 		for i := range crdt.values {
 			crdt.values[i] += typedChange
 		}
 	case FloatArrayDecrementAll:
-		effectValue = FloatArrayDecrementAllEffect(typedUpd)
+		effect = FloatArrayDecrementAllEffect(typedUpd)
 		typedChange := float64(typedUpd)
 		for i := range crdt.values {
 			crdt.values[i] -= typedChange
 		}
 	case FloatArrayIncrementMulti:
 		if len(typedUpd) > len(crdt.values) {
-			effectValue = FloatArrayIncMultiWithSizeEffect{IncEff: FloatArrayIncrementMultiEffect(typedUpd), OldSize: len(crdt.values)}
+			effect = FloatArrayIncMultiWithSizeEffect{IncEff: FloatArrayIncrementMultiEffect(typedUpd), OldSize: len(crdt.values)}
 			crdt.expandArray(int32(len(typedUpd)))
 		} else {
-			effectValue = FloatArrayIncrementMultiEffect(typedUpd)
+			effect = FloatArrayIncrementMultiEffect(typedUpd)
 		}
 		for i, change := range typedUpd {
 			crdt.values[i] += change
 		}
 	case FloatArrayDecrementMulti:
 		if len(typedUpd) > len(crdt.values) {
-			effectValue = FloatArrayDecMultiWithSizeEffect{DecEff: FloatArrayDecrementMultiEffect(typedUpd), OldSize: len(crdt.values)}
+			effect = FloatArrayDecMultiWithSizeEffect{DecEff: FloatArrayDecrementMultiEffect(typedUpd), OldSize: len(crdt.values)}
 			crdt.expandArray(int32(len(typedUpd)))
 		} else {
-			effectValue = FloatArrayIncrementMultiEffect(typedUpd)
+			effect = FloatArrayIncrementMultiEffect(typedUpd)
 		}
 		for i, change := range typedUpd {
 			crdt.values[i] += change
@@ -870,9 +874,9 @@ func (crdt *FloatArrayCrdt) applyDownstream(downstreamArgs DownstreamArguments) 
 			}
 		}
 		if oldSize != len(crdt.values) {
-			effectValue = FloatArrayIncSubWithSizeEffect{IncEff: FloatArrayIncrementSubEffect(typedUpd), OldSize: oldSize}
+			effect = FloatArrayIncSubWithSizeEffect{IncEff: FloatArrayIncrementSubEffect(typedUpd), OldSize: oldSize}
 		} else {
-			effectValue = FloatArrayIncrementSubEffect(typedUpd)
+			effect = FloatArrayIncrementSubEffect(typedUpd)
 		}
 	case FloatArrayDecrementSub:
 		oldSize := len(crdt.values)
@@ -893,41 +897,41 @@ func (crdt *FloatArrayCrdt) applyDownstream(downstreamArgs DownstreamArguments) 
 			}
 		}
 		if oldSize != len(crdt.values) {
-			effectValue = FloatArrayDecSubWithSizeEffect{DecEff: FloatArrayDecrementSubEffect(typedUpd), OldSize: oldSize}
+			effect = FloatArrayDecSubWithSizeEffect{DecEff: FloatArrayDecrementSubEffect(typedUpd), OldSize: oldSize}
 		} else {
-			effectValue = FloatArrayDecrementSubEffect(typedUpd)
+			effect = FloatArrayDecrementSubEffect(typedUpd)
 		}
 	case FloatArrayIncrementRange:
 		if int(typedUpd.To) > len(crdt.values) {
-			effectValue = FloatArrayIncRangeWithSizeEffect{IncEff: FloatArrayIncrementRangeEffect(typedUpd), OldSize: len(crdt.values)}
+			effect = FloatArrayIncRangeWithSizeEffect{IncEff: FloatArrayIncrementRangeEffect(typedUpd), OldSize: len(crdt.values)}
 			crdt.expandArray(typedUpd.To)
 		} else {
-			effectValue = FloatArrayIncrementRangeEffect(typedUpd)
+			effect = FloatArrayIncrementRangeEffect(typedUpd)
 		}
 		for i := typedUpd.From; i < typedUpd.To; i++ {
 			crdt.values[i] += typedUpd.Change
 		}
 	case FloatArrayDecrementRange:
 		if int(typedUpd.To) > len(crdt.values) {
-			effectValue = FloatArrayDecRangeWithSizeEffect{DecEff: FloatArrayDecrementRangeEffect(typedUpd), OldSize: len(crdt.values)}
+			effect = FloatArrayDecRangeWithSizeEffect{DecEff: FloatArrayDecrementRangeEffect(typedUpd), OldSize: len(crdt.values)}
 			crdt.expandArray(typedUpd.To)
 		} else {
-			effectValue = FloatArrayDecrementRangeEffect(typedUpd)
+			effect = FloatArrayDecrementRangeEffect(typedUpd)
 		}
 		for i := typedUpd.From; i < typedUpd.To; i++ {
 			crdt.values[i] -= typedUpd.Change
 		}
 	case FloatArraySetSize:
 		if int(typedUpd) > len(crdt.values) {
-			effectValue = FloatArraySetSizeEffect(len(crdt.values))
+			effect = FloatArraySetSizeEffect(len(crdt.values))
 			crdt.expandArray(int32(typedUpd))
 		} else { //Can still happen (e.g., two concurrent set sizes)
-			effectValue = NoEffect{}
+			effect = NoEffect{}
 		}
 	default:
 		fmt.Printf("[FloatArray][Downstream]Unsupported downstream type: %v (%T)\n", downstreamArgs, downstreamArgs)
 	}
-	return &effectValue
+	return effect
 }
 
 func (crdt *FloatArrayCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err error) {
@@ -944,12 +948,12 @@ func (crdt *FloatArrayCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
-func (crdt *FloatArrayCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *FloatArrayCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	return crdt.applyDownstream(updArgs)
 }
 
-func (crdt *FloatArrayCrdt) undoEffect(effect *Effect) {
-	switch typedEffect := (*effect).(type) {
+func (crdt *FloatArrayCrdt) undoEffect(effect Effect) {
+	switch typedEffect := (effect).(type) {
 	case FloatArrayIncrementEffect:
 		crdt.values[typedEffect.Position] -= typedEffect.Change
 	case FloatArrayDecrementEffect:
@@ -1033,7 +1037,7 @@ func (crdt *FloatArrayCrdt) undoEffect(effect *Effect) {
 	}
 }
 
-func (crdt *FloatArrayCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+func (crdt *FloatArrayCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {}
 
 func copyToNewFloat64Slice(slice []float64) []float64 {
 	newSlice := make([]float64, len(slice))
@@ -1056,7 +1060,8 @@ func (crdtOp FloatArrayIncrement) FromUpdateObject(protobuf *proto.ApbUpdateOper
 
 func (crdtOp FloatArrayIncrement) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
 	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Arrayfloatop{Arrayfloatop: &proto.ApbArrayFloatUpdate{
-		Upd: &proto.ApbArrayFloatUpdate_Inc{Inc: &proto.ApbArrayFloatIncrement{Index: pb.Int32(crdtOp.Position), Inc: pb.Float64(crdtOp.Change)}}}}}
+		UpdType: proto.NumberArrayUpdType_INC.Enum(), Inc: &proto.ApbArrayFloatIncrement{Index: pb.Int32(crdtOp.Position), Inc: pb.Float64(crdtOp.Change)}}}}
+	//Upd: &proto.ApbArrayFloatUpdate_Inc{Inc: &proto.ApbArrayFloatIncrement{Index: pb.Int32(crdtOp.Position), Inc: pb.Float64(crdtOp.Change)}}}}}
 }
 
 func (crdtOp FloatArrayDecrement) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -1066,7 +1071,8 @@ func (crdtOp FloatArrayDecrement) FromUpdateObject(protobuf *proto.ApbUpdateOper
 
 func (crdtOp FloatArrayDecrement) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
 	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Arrayfloatop{Arrayfloatop: &proto.ApbArrayFloatUpdate{
-		Upd: &proto.ApbArrayFloatUpdate_Inc{Inc: &proto.ApbArrayFloatIncrement{Index: pb.Int32(crdtOp.Position), Inc: pb.Float64(-crdtOp.Change)}}}}}
+		UpdType: proto.NumberArrayUpdType_INC.Enum(), Inc: &proto.ApbArrayFloatIncrement{Index: pb.Int32(crdtOp.Position), Inc: pb.Float64(-crdtOp.Change)}}}}
+	//Upd: &proto.ApbArrayFloatUpdate_Inc{Inc: &proto.ApbArrayFloatIncrement{Index: pb.Int32(crdtOp.Position), Inc: pb.Float64(-crdtOp.Change)}}}}}
 }
 
 func (crdtOp FloatArrayIncrementAll) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -1075,7 +1081,8 @@ func (crdtOp FloatArrayIncrementAll) FromUpdateObject(protobuf *proto.ApbUpdateO
 
 func (crdtOp FloatArrayIncrementAll) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
 	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Arrayfloatop{Arrayfloatop: &proto.ApbArrayFloatUpdate{
-		Upd: &proto.ApbArrayFloatUpdate_IncAll{IncAll: &proto.ApbArrayFloatIncrementAll{Inc: pb.Float64(float64(crdtOp))}}}}}
+		UpdType: proto.NumberArrayUpdType_INC_ALL.Enum(), IncAll: &proto.ApbArrayFloatIncrementAll{Inc: pb.Float64(float64(crdtOp))}}}}
+	//Upd: &proto.ApbArrayFloatUpdate_IncAll{IncAll: &proto.ApbArrayFloatIncrementAll{Inc: pb.Float64(float64(crdtOp))}}}}}
 }
 
 func (crdtOp FloatArrayDecrementAll) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -1084,7 +1091,8 @@ func (crdtOp FloatArrayDecrementAll) FromUpdateObject(protobuf *proto.ApbUpdateO
 
 func (crdtOp FloatArrayDecrementAll) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
 	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Arrayfloatop{Arrayfloatop: &proto.ApbArrayFloatUpdate{
-		Upd: &proto.ApbArrayFloatUpdate_IncAll{IncAll: &proto.ApbArrayFloatIncrementAll{Inc: pb.Float64(float64(-crdtOp))}}}}}
+		UpdType: proto.NumberArrayUpdType_INC_ALL.Enum(), IncAll: &proto.ApbArrayFloatIncrementAll{Inc: pb.Float64(float64(-crdtOp))}}}}
+	//Upd: &proto.ApbArrayFloatUpdate_IncAll{IncAll: &proto.ApbArrayFloatIncrementAll{Inc: pb.Float64(float64(-crdtOp))}}}}}
 }
 
 func (crdtOp FloatArrayIncrementMulti) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -1093,7 +1101,8 @@ func (crdtOp FloatArrayIncrementMulti) FromUpdateObject(protobuf *proto.ApbUpdat
 
 func (crdtOp FloatArrayIncrementMulti) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
 	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Arrayfloatop{Arrayfloatop: &proto.ApbArrayFloatUpdate{
-		Upd: &proto.ApbArrayFloatUpdate_IncMulti{IncMulti: &proto.ApbArrayFloatIncrementMulti{Incs: crdtOp}}}}}
+		UpdType: proto.NumberArrayUpdType_INC_MULTI.Enum(), IncMulti: &proto.ApbArrayFloatIncrementMulti{Incs: crdtOp}}}}
+	//Upd: &proto.ApbArrayFloatUpdate_IncMulti{IncMulti: &proto.ApbArrayFloatIncrementMulti{Incs: crdtOp}}}}}
 }
 
 func (crdtOp FloatArrayDecrementMulti) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -1111,7 +1120,8 @@ func (crdtOp FloatArrayDecrementMulti) ToUpdateObject() (protobuf *proto.ApbUpda
 		protoIncs[i] = -inc
 	}
 	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Arrayfloatop{Arrayfloatop: &proto.ApbArrayFloatUpdate{
-		Upd: &proto.ApbArrayFloatUpdate_IncMulti{IncMulti: &proto.ApbArrayFloatIncrementMulti{Incs: protoIncs}}}}}
+		UpdType: proto.NumberArrayUpdType_INC_MULTI.Enum(), IncMulti: &proto.ApbArrayFloatIncrementMulti{Incs: protoIncs}}}}
+	//Upd: &proto.ApbArrayFloatUpdate_IncMulti{IncMulti: &proto.ApbArrayFloatIncrementMulti{Incs: protoIncs}}}}}
 }
 
 func (crdtOp FloatArrayIncrementSub) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -1121,7 +1131,7 @@ func (crdtOp FloatArrayIncrementSub) FromUpdateObject(protobuf *proto.ApbUpdateO
 
 func (crdtOp FloatArrayIncrementSub) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
 	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Arrayfloatop{Arrayfloatop: &proto.ApbArrayFloatUpdate{
-		Upd: &proto.ApbArrayFloatUpdate_IncSub{IncSub: &proto.ApbArrayFloatIncrementSub{Indexes: crdtOp.Positions, Incs: crdtOp.Changes}}}}}
+		UpdType: proto.NumberArrayUpdType_INC_SUB.Enum(), IncSub: &proto.ApbArrayFloatIncrementSub{Indexes: crdtOp.Positions, Incs: crdtOp.Changes}}}}
 }
 
 func (crdtOp FloatArrayDecrementSub) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -1140,7 +1150,8 @@ func (crdtOp FloatArrayDecrementSub) ToUpdateObject() (protobuf *proto.ApbUpdate
 		protoIncs[i] = -inc
 	}
 	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Arrayfloatop{Arrayfloatop: &proto.ApbArrayFloatUpdate{
-		Upd: &proto.ApbArrayFloatUpdate_IncSub{IncSub: &proto.ApbArrayFloatIncrementSub{Indexes: crdtOp.Positions, Incs: protoIncs}}}}}
+		UpdType: proto.NumberArrayUpdType_INC_SUB.Enum(), IncSub: &proto.ApbArrayFloatIncrementSub{Indexes: crdtOp.Positions, Incs: protoIncs}}}}
+	//Upd: &proto.ApbArrayFloatUpdate_IncSub{IncSub: &proto.ApbArrayFloatIncrementSub{Indexes: crdtOp.Positions, Incs: protoIncs}}}}}
 }
 
 func (crdtOp FloatArrayIncrementRange) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -1150,7 +1161,8 @@ func (crdtOp FloatArrayIncrementRange) FromUpdateObject(protobuf *proto.ApbUpdat
 
 func (crdtOp FloatArrayIncrementRange) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
 	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Arrayfloatop{Arrayfloatop: &proto.ApbArrayFloatUpdate{
-		Upd: &proto.ApbArrayFloatUpdate_IncRange{IncRange: &proto.ApbArrayFloatIncrementRange{From: pb.Int32(crdtOp.From), To: pb.Int32(crdtOp.To), Inc: pb.Float64(crdtOp.Change)}}}}}
+		UpdType: proto.NumberArrayUpdType_INC_RANGE.Enum(), IncRange: &proto.ApbArrayFloatIncrementRange{From: pb.Int32(crdtOp.From), To: pb.Int32(crdtOp.To), Inc: pb.Float64(crdtOp.Change)}}}}
+	//Upd: &proto.ApbArrayFloatUpdate_IncRange{IncRange: &proto.ApbArrayFloatIncrementRange{From: pb.Int32(crdtOp.From), To: pb.Int32(crdtOp.To), Inc: pb.Float64(crdtOp.Change)}}}}}
 }
 
 func (crdtOp FloatArrayDecrementRange) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -1164,14 +1176,15 @@ func (crdtOp FloatArraySetSize) FromUpdateObject(protobuf *proto.ApbUpdateOperat
 
 func (crdtOp FloatArraySetSize) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
 	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Arrayfloatop{Arrayfloatop: &proto.ApbArrayFloatUpdate{
-		Upd: &proto.ApbArrayFloatUpdate_Size{Size: &proto.ApbArrayFloatSetSize{Size: pb.Int32(int32(crdtOp))}}}}}
+		UpdType: proto.NumberArrayUpdType_SIZE.Enum(), Size: &proto.ApbArrayFloatSetSize{Size: pb.Int32(int32(crdtOp))}}}}
+	//Upd: &proto.ApbArrayFloatUpdate_Size{Size: &proto.ApbArrayFloatSetSize{Size: pb.Int32(int32(crdtOp))}}}}}
 }
 
 func (crdtState FloatArrayCRDTState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
 	return FloatArrayCRDTState(protobuf.GetArrayfloat().GetValues())
 }
 
-func (crdtState FloatArrayCRDTState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState FloatArrayCRDTState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Arrayfloat{Arrayfloat: &proto.ApbGetArrayFloatResp{Values: crdtState}}}
 }
 
@@ -1179,7 +1192,7 @@ func (crdtState FloatArrayCRDTSingleState) FromReadResp(protobuf *proto.ApbReadO
 	return FloatArrayCRDTSingleState(protobuf.GetPartread().GetArrayfloat().GetValue())
 }
 
-func (crdtState FloatArrayCRDTSingleState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState FloatArrayCRDTSingleState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{
 		Reply: &proto.ApbPartialReadResp_Arrayfloat{Arrayfloat: &proto.ApbArrayFloatPartialReadResp{Value: pb.Float64(float64(crdtState))}}}}}
 }
@@ -1360,7 +1373,7 @@ func (crdt *FloatArrayCrdt) ToProtoState() (protobuf *proto.ProtoState) {
 	return &proto.ProtoState{State: &proto.ProtoState_ArrayFloat{ArrayFloat: &proto.ProtoArrayFloatState{Values: crdt.values}}}
 }
 
-func (crdt *FloatArrayCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
+func (crdt *FloatArrayCrdt) FromProtoState(proto *proto.ProtoState, ts clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	return (&FloatArrayCrdt{values: proto.GetArrayFloat().GetValues()}).initializeFromSnapshot(ts, replicaID)
 }
 

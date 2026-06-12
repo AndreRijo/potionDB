@@ -283,14 +283,14 @@ func (args CompactArrayExceptArguments) HasVariables() bool        { return fals
 func (args CompactArrayRangeArguments) HasVariables() bool         { return false }
 func (args CompactArraySubArguments) HasVariables() bool           { return false }
 
-func (crdt *CompactArrayCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *CompactArrayCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	crdt = &CompactArrayCrdt{}
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *CompactArrayCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *CompactArrayCrdt) {
+func (crdt *CompactArrayCrdt) initializeFromSnapshot(startTs clocksi.Timestamp, replicaID uint16) (sameCRDT *CompactArrayCrdt) {
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
@@ -709,17 +709,16 @@ func (crdt *CompactArrayCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs
 		}
 	}
 	effect := crdt.applyDownstream(downstreamArgs)
-	crdt.addToHistory(&updTs, &downstreamArgs, effect) //Necessary for inversibleCrdt
+	crdt.addToHistory(updTs, downstreamArgs, effect) //Necessary for inversibleCrdt
 	return nil
 }
 
-func (crdt *CompactArrayCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect *Effect) {
-	var effectValue Effect = NoEffect{}
-
+func (crdt *CompactArrayCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect Effect) {
+	effect = NoEffect{}
 	compactArrayUpd, ok := downstreamArgs.(CompactArrayUpd)
 	if !ok {
 		fmt.Printf("[CompactArrayCrdt][Downstream]Unsupported downstream type: %v (%T)\n", downstreamArgs, downstreamArgs)
-		return &effectValue
+		return
 	}
 	if compactArrayUpd.GetMinSize() > len(crdt.data) && !compactArrayUpd.IsMultiPos() {
 		crdt.expandArray(int32(compactArrayUpd.GetMinSize()))
@@ -729,21 +728,21 @@ func (crdt *CompactArrayCrdt) applyDownstream(downstreamArgs DownstreamArguments
 
 	case DownstreamCompactArraySetValue:
 		if crdt.dataTsId[typedUpd.Pos] > typedUpd.TsId { //Cannot apply
-			return &effectValue
+			return
 		}
-		effectValue = CompactArraySetValueEffect{Value: crdt.data[typedUpd.Pos], Pos: typedUpd.Pos, TsId: crdt.dataTsId[typedUpd.Pos]}
+		effect = CompactArraySetValueEffect{Value: crdt.data[typedUpd.Pos], Pos: typedUpd.Pos, TsId: crdt.dataTsId[typedUpd.Pos]}
 		crdt.data[typedUpd.Pos], crdt.dataTsId[typedUpd.Pos] = typedUpd.Value, typedUpd.TsId
 	case CompactArrayIncrement:
-		effectValue = CompactArrayCounterEffect(typedUpd)
+		effect = CompactArrayCounterEffect(typedUpd)
 		crdt.data[typedUpd.Pos] = (crdt.data[typedUpd.Pos].(int64)) + int64(typedUpd.Change)
 	case CompactArrayDecrement:
-		effectValue = CompactArrayCounterEffect{Change: -typedUpd.Change, Pos: typedUpd.Pos}
+		effect = CompactArrayCounterEffect{Change: -typedUpd.Change, Pos: typedUpd.Pos}
 		crdt.data[typedUpd.Pos] = (crdt.data[typedUpd.Pos].(int64)) - int64(typedUpd.Change)
 	case CompactArrayFloatInc:
-		effectValue = CompactArrayFloatEffect(typedUpd)
+		effect = CompactArrayFloatEffect(typedUpd)
 		crdt.data[typedUpd.Pos] = (crdt.data[typedUpd.Pos].(float64)) + float64(typedUpd.Change)
 	case CompactArrayFloatDec:
-		effectValue = CompactArrayFloatEffect{Change: -typedUpd.Change, Pos: typedUpd.Pos}
+		effect = CompactArrayFloatEffect{Change: -typedUpd.Change, Pos: typedUpd.Pos}
 		crdt.data[typedUpd.Pos] = (crdt.data[typedUpd.Pos].(float64)) - float64(typedUpd.Change)
 	case DownstreamCompactArraySetArray:
 		if len(typedUpd.Values) > len(crdt.data) { //We will use the argument slice as the new slice, avoiding an extra allocation.
@@ -756,7 +755,7 @@ func (crdt *CompactArrayCrdt) applyDownstream(downstreamArgs DownstreamArguments
 					crdt.dataTsId[i] = typedUpd.TsId //Update timestamp
 				}
 			}
-			effectValue = CompactArraySetArrayEffect{Values: crdt.data, TsId: oldTsSlice}
+			effect = CompactArraySetArrayEffect{Values: crdt.data, TsId: oldTsSlice}
 			crdt.data = typedUpd.Values //Re-use the argument slice as the new data slice
 		} else { //First, search for the first position that will need to be replaced. If none is found, can return gracefully with no data allocation.
 			i := 0
@@ -766,7 +765,7 @@ func (crdt *CompactArrayCrdt) applyDownstream(downstreamArgs DownstreamArguments
 				}
 			}
 			if i == len(typedUpd.Values) { //No position could be replaced, so this is effectively a no-op.
-				return &effectValue
+				return
 			}
 			//Will need to copy as they will be used for the effect.
 			copyData, copyDataTs := make([]any, len(crdt.data)), make([]uint64, len(crdt.data))
@@ -778,15 +777,15 @@ func (crdt *CompactArrayCrdt) applyDownstream(downstreamArgs DownstreamArguments
 					crdt.data[j], crdt.dataTsId[j] = typedUpd.Values[j], typedUpd.TsId
 				}
 			}
-			effectValue = CompactArraySetArrayEffect{Values: copyData, TsId: copyDataTs}
+			effect = CompactArraySetArrayEffect{Values: copyData, TsId: copyDataTs}
 		}
 
 	case CompactArraySetSize:
 		if int(typedUpd) > len(crdt.data) {
-			effectValue = CompactArraySetSizeEffect(typedUpd)
+			effect = CompactArraySetSizeEffect(typedUpd)
 		}
 	}
-	return &effectValue
+	return
 }
 
 func (crdt *CompactArrayCrdt) expandArray(newSize int32) {
@@ -825,12 +824,12 @@ func (crdt *CompactArrayCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
-func (crdt *CompactArrayCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *CompactArrayCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	return crdt.applyDownstream(updArgs)
 }
 
-func (crdt *CompactArrayCrdt) undoEffect(effect *Effect) {
-	switch typedEffect := (*effect).(type) {
+func (crdt *CompactArrayCrdt) undoEffect(effect Effect) {
+	switch typedEffect := (effect).(type) {
 	case CompactArraySetValueEffect:
 		crdt.data[typedEffect.Pos], crdt.dataTsId[typedEffect.Pos] = typedEffect.Value, typedEffect.TsId
 	case CompactArrayCounterEffect:
@@ -844,7 +843,7 @@ func (crdt *CompactArrayCrdt) undoEffect(effect *Effect) {
 	}
 }
 
-func (crdt *CompactArrayCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+func (crdt *CompactArrayCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {}
 
 //Protobuf functions
 
@@ -915,7 +914,7 @@ func (crdtState CompactArrayState) FromReadResp(protobuf *proto.ApbReadObjectRes
 	return CompactArrayState(tools.CopyByteSliceToAnySlice(protobuf.GetCompactarray().GetData()))
 }
 
-func (crdtState CompactArrayState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState CompactArrayState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Compactarray{Compactarray: &proto.ApbGetArrayCompResp{Data: tools.CopyAnySliceToByteSlice(crdtState)}}}
 }
 
@@ -923,7 +922,7 @@ func (crdtState CompactArraySingleString) FromReadResp(protobuf *proto.ApbReadOb
 	return CompactArraySingleString(protobuf.GetPartread().GetCompactarray().GetStringValue().GetValue())
 }
 
-func (crdtState CompactArraySingleString) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState CompactArraySingleString) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Compactarray{Compactarray: &proto.ApbCompactArrayReadResp{
 		StringValue: &proto.ApbCompactPosStringResp{Value: pb.String(string(crdtState))}}}}}}
 }
@@ -932,7 +931,7 @@ func (crdtState CompactArraySingleCounter) FromReadResp(protobuf *proto.ApbReadO
 	return CompactArraySingleCounter(protobuf.GetPartread().GetCompactarray().GetIntValue().GetValue())
 }
 
-func (crdtState CompactArraySingleCounter) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState CompactArraySingleCounter) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Compactarray{Compactarray: &proto.ApbCompactArrayReadResp{
 		IntValue: &proto.ApbCompactPosIntResp{Value: pb.Int64(int64(crdtState))}}}}}}
 }
@@ -941,7 +940,7 @@ func (crdtState CompactArraySingleFloat) FromReadResp(protobuf *proto.ApbReadObj
 	return CompactArraySingleFloat(protobuf.GetPartread().GetCompactarray().GetFloatValue().GetValue())
 }
 
-func (crdtState CompactArraySingleFloat) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState CompactArraySingleFloat) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Compactarray{Compactarray: &proto.ApbCompactArrayReadResp{
 		FloatValue: &proto.ApbCompactPosFloatResp{Value: pb.Float64(float64(crdtState))}}}}}}
 }
@@ -950,7 +949,7 @@ func (crdtState CompactArraySingleData) FromReadResp(protobuf *proto.ApbReadObje
 	return CompactArraySingleData(protobuf.GetPartread().GetCompactarray().GetDataValue().GetValue())
 }
 
-func (crdtState CompactArraySingleData) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState CompactArraySingleData) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Compactarray{Compactarray: &proto.ApbCompactArrayReadResp{
 		DataValue: &proto.ApbCompactPosDataResp{Value: crdtState}}}}}}
 }
@@ -959,7 +958,7 @@ func (crdtState CompactArraySingleAny) FromReadResp(protobuf *proto.ApbReadObjec
 	return CompactArraySingleAny{Value: protobuf.GetPartread().GetCompactarray().GetAnyValue().GetValue()}
 }
 
-func (crdtState CompactArraySingleAny) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState CompactArraySingleAny) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	stringV := any(crdtState).(string)
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Compactarray{Compactarray: &proto.ApbCompactArrayReadResp{
 		AnyValue: &proto.ApbCompactPosAnyResp{Value: unsafe.Slice(unsafe.StringData(stringV), len(stringV))}}}}}}
@@ -1108,7 +1107,7 @@ func (crdt CompactArrayCrdt) ToProtoState() (protobuf *proto.ProtoState) {
 		Data: tools.CopyAnySliceToByteSlice(crdt.data), TsId: crdt.dataTsId}}}
 }
 
-func (crdt CompactArrayCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
+func (crdt CompactArrayCrdt) FromProtoState(proto *proto.ProtoState, ts clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	protoState := proto.GetCompactArray()
 	return (&CompactArrayCrdt{data: tools.CopyByteSliceToAnySlice(protoState.GetData()), dataTsId: protoState.GetTsId()}).initializeFromSnapshot(ts, replicaID)
 }

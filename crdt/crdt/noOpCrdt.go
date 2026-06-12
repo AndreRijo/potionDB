@@ -19,7 +19,7 @@ type NoOpCrdt struct {
 func (crdt *NoOpCrdt) GetCRDTType() proto.CRDTType { return proto.CRDTType_NOOP }
 func (crdt *NoOpCrdt) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 
-func (crdt *NoOpCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *NoOpCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	return &NoOpCrdt{
 		CRDTVM: (&genericInversibleCRDT{}).initialize(crdt),
 		//Adicionar outros campos
@@ -27,7 +27,7 @@ func (crdt *NoOpCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *NoOpCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *NoOpCrdt) {
+func (crdt *NoOpCrdt) initializeFromSnapshot(startTs clocksi.Timestamp, replicaID uint16) (sameCRDT *NoOpCrdt) {
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
@@ -56,13 +56,13 @@ func (crdt *NoOpCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs Downstr
 	//A operacao em si pode ser aplicada na applyDownstream
 	//No final podes retornar nil.
 	//Por agora deixa a linha seguinte comentada: mais tarde será necessária.
-	//crdt.addToHistory(&updTs, &downstreamArgs, effect)
+	//crdt.addToHistory(updTs, downstreamArgs, effect)
 	crdt.applyDownstream(downstreamArgs) //Podes alterar esta se precisares
 	return nil
 }
 
 // Nota: este metodo nao faz parte da interface CRDT, por isso se precisares podes apaga-lo.
-func (crdt *NoOpCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect *Effect) {
+func (crdt *NoOpCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect Effect) {
 	//TODO: Metodo auxiliar do downstream.
 	//Por agora em termos de retorno podes deixar o que pus aqui
 	var effectV Effect = NoEffect{}
@@ -86,14 +86,14 @@ func (crdt *NoOpCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
-func (crdt *NoOpCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *NoOpCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	return crdt.applyDownstream(updArgs)
 }
 
-func (crdt *NoOpCrdt) undoEffect(effect *Effect) {
+func (crdt *NoOpCrdt) undoEffect(effect Effect) {
 	//Do not fill this function for now.
 }
 
-func (crdt *NoOpCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+func (crdt *NoOpCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {}
 
 func (crdt *NoOpCrdt) GetCRDT() CRDT { return crdt }

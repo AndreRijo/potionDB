@@ -5,6 +5,13 @@ option go_package = "potionDB/crdt/proto";
 
 //protoc -I=. --go_out=. ./replicator.proto
 
+/*
+protoc -I=. --go_out=. --plugin protoc-gen-go="/usr/local/bin/protoc-gen-go" \
+    --go-vtproto_out=. --plugin protoc-gen-go-vtproto="/Users/arijo/go/bin/protoc-gen-go-vtproto" \
+    --go-vtproto_opt=features=marshal+unmarshal+unmarshal_unsafe+size \
+    ./antidote.proto
+*/
+
 message ProtoStableClock {
     required int32 senderID = 1;
     required int64 replicaTs = 2;
@@ -114,7 +121,10 @@ message ProtoTopKRmvDownstream {
 }
 
 message ProtoTopKDownstream {
-    repeated ProtoTopKScore adds = 1;
+    //repeated ProtoTopKScore adds = 1;
+    repeated sint32 playerIds = 1 [packed = true];
+    repeated sint32 scores = 2 [packed = true];
+    repeated bytes data = 3; //Optional, but if it is present, it must be present for every entry.
 }
 
 message ProtoTopKRmvRemove {

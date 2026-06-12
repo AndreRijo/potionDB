@@ -28,16 +28,16 @@ import (
 	"potionDB/shared/shared"
 )
 
-// TODO: Maybe not needed @ hasdonestableclean, consider removing.
-// HasDoneStableClean:
-// //When two consecutive GCs calls have the same clock, it means PotionDB is in an stable/idle state.
-// In this situation, GC will also clean any lastCleanClk too.
-// This is currently unused.
+// When updates/reads are ongoing, we do only fast GC, to avoid hampering performance too much.
+// In fast GC, we avoid checking large embedded CRDTs and we don't allocate new slices to reduce history slice.
+// This reduces allocation needs and Go's GC pressure, thus making PotionDB's GC faster.
+// Other GC steps may also be skipped during fast GC.
+// A normal GC will be issued when it is detected that PotionDB is in idle mode.
 type GarbageCollector struct {
 	tm                    *TransactionManager
 	lastCleanClk          clocksi.Timestamp
-	hasDoneStableClean    bool
 	hasAutomaticGCStarted bool
+	wasLastGCFastGC       bool
 	manualGcChan          chan struct{}
 	manualReplyChan       chan bool
 	gcTicker              *time.Ticker
@@ -45,8 +45,8 @@ type GarbageCollector struct {
 }
 
 const (
-	GCFreq   = 10000 * time.Millisecond //ms
-	GCFreq64 = 10000
+	GCFreq   = 5000 * time.Millisecond //ms
+	GCFreq64 = 5000
 )
 
 func InitializeGarbageCollector(tm *TransactionManager) (gc *GarbageCollector) {
@@ -105,17 +105,31 @@ func (gc *GarbageCollector) doClean(isManualGC bool) bool {
 		noCleans++
 	} else {*/
 	//fmt.Printf("[GC]Clock to clean: %s. TM clock: %v\n", safeClk.ToSortedString(), tmSliceClk)
-	if safeClk.IsEqual(gc.lastCleanClk) {
+	isFastGC, didClkAdvance := false, safeClk.IsDifferent(gc.lastCleanClk)
+	if didClkAdvance && !isManualGC { //ManualGC are never fast GC.
+		isFastGC = true
+	}
+	if (!didClkAdvance || !gc.tm.anyUpdatesSinceGC) && !gc.wasLastGCFastGC { //Last GC wasn't fast and clock didn't advance - GC would achieve nothing. Just return.
 		return false
 	}
 	if isManualGC {
-		fmt.Printf("[GC]Manual GC. Clock to clean: %s\n", safeClk.ToSortedString())
+		fmt.Printf("[GC]Manual (full) GC. Clock to clean: %s\n", safeClk.ToSortedString())
+		gc.wasLastGCFastGC = false
 		//fmt.Printf("[GC]Manual GC. Clock to clean: %s. TM clock: %v\n", safeClk.ToSortedString(), tmClk.ToSortedString())
+	} else if isFastGC {
+		fmt.Printf("[GC]Automatic (fast) GC. Clock to clean: %s\n", safeClk.ToSortedString())
+		gc.wasLastGCFastGC = true
 	} else {
-		fmt.Printf("[GC]Automatic GC. Clock to clean: %s\n", safeClk.ToSortedString())
+		fmt.Printf("[GC]Automatic (full) GC. Clock to clean: %s\n", safeClk.ToSortedString())
+		gc.wasLastGCFastGC = false
 		//fmt.Printf("[GC]Automatic GC. Clock to clean: %s. TM clock: %v\n", safeClk.ToSortedString(), tmClk.ToSortedString())
 	}
-	gc.tm.mat.SendRequestToAllChannels(MaterializerRequest{MatRequestArgs: MatGCArgs{SafeClk: safeClk, ReplyChan: gc.matReplyChan}})
+	//TM opportunistically cleans itself whenever appropriate (client buffers are clean on connection loss; replication TM buffers clean themselves whenever there's nothing in queue.)
+	//Replicator detects when PotionDB is idle (i.e., when it has no txn to replicate) and cleans itself. Some other buffers are automatically clean on each replication cycle.
+	//Log does not need any cleaning, and that is automatically requested by Replicator regardless.
+	//So Mat is the only one that needs this. In theory, Replicator could request mat to clean itself, and use the last replication clock.
+	gc.tm.anyUpdatesSinceGC = false
+	gc.tm.mat.SendRequestToAllChannels(MaterializerRequest{MatRequestArgs: MatGCArgs{SafeClk: safeClk, ReplyChan: gc.matReplyChan, FastGC: isFastGC}})
 	gc.lastCleanClk = safeClk.Copy() //Shouldn't really need a copy...
 	for i := 0; i < int(nGoRoutines); i++ {
 		<-gc.matReplyChan
@@ -128,7 +142,7 @@ func (gc *GarbageCollector) cleanRoutine() {
 	//To prevent too much GC spam we only warn about "not cleaning" every 5 cleans
 	noCleans, didClean, isManualGC, gcStart, gcFinish := 0, false, false, int64(0), int64(0)
 	for {
-		fmt.Println("[GC]Waiting for a GC request...")
+		//fmt.Println("[GC]Waiting for a GC request...")
 		select { //Wait for a manual request or the ticker.
 		case <-gc.manualGcChan:
 			fmt.Println("[GC]Received manual GC request.")
@@ -140,7 +154,7 @@ func (gc *GarbageCollector) cleanRoutine() {
 				<-gc.gcTicker.C
 			}
 		case <-gc.gcTicker.C:
-			fmt.Println("[GC]Received automatic GC request.")
+			//fmt.Println("[GC]Received automatic GC request.")
 			isManualGC = false
 			//Note: If a concurrent manual GC is requested, we will still process it afterwards, in order to give a reply.
 		}
@@ -151,10 +165,12 @@ func (gc *GarbageCollector) cleanRoutine() {
 			fmt.Printf("[GC]Finished GC. Took %d ms.\n", gcFinish-gcStart)
 			noCleans = 0
 		} else {
-			if !isManualGC && noCleans%5 == 0 {
-				fmt.Printf("[GC]Not cleaning garbage as TM's clock has not advanced since the last GC round.\n Current clock: %v\n", gc.lastCleanClk.ToSortedString())
-			} else if isManualGC {
-				fmt.Printf("[GC]Manual GC call was ignored as TM's clock has not advanced since the last GC round.\n Current clock: %v\n", gc.lastCleanClk.ToSortedString())
+			if gc.lastCleanClk != nil {
+				if !isManualGC && noCleans%5 == 0 {
+					fmt.Printf("[GC]Not cleaning garbage as TM's clock has not advanced since the last GC round.\n Current clock: %v\n", gc.lastCleanClk.ToSortedString())
+				} else if isManualGC {
+					fmt.Printf("[GC]Manual GC call was ignored as TM's clock has not advanced since the last GC round.\n Current clock: %v\n", gc.lastCleanClk.ToSortedString())
+				}
 			}
 			noCleans++
 		}

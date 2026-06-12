@@ -11,7 +11,7 @@ const (
 // Vars as they come from configs
 var (
 	//PotionDB
-	IsGCDisabled          = true
+	IsGCDisabled          = false
 	IsVMDisabled          = false
 	IsReplDisabled        = false
 	IsLogDisabled         = false

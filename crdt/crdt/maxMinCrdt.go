@@ -56,14 +56,14 @@ func (args MaxAddValue) MustReplicate() bool { return true }
 func (args MinAddValue) MustReplicate() bool { return true }
 
 // Note: crdt can (and most often will be) nil
-func (crdt *MaxMinCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *MaxMinCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	crdt = &MaxMinCrdt{topValue: math.MaxInt64}
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *MaxMinCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *MaxMinCrdt) {
+func (crdt *MaxMinCrdt) initializeFromSnapshot(startTs clocksi.Timestamp, replicaID uint16) (sameCRDT *MaxMinCrdt) {
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
@@ -71,7 +71,7 @@ func (crdt *MaxMinCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, repli
 func (crdt *MaxMinCrdt) IsBigCRDT() bool { return false }
 
 func (crdt *MaxMinCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
-	if updsNotYetApplied == nil || len(updsNotYetApplied) > 0 {
+	if len(updsNotYetApplied) > 0 {
 		return crdt.GetValue()
 	}
 	result := crdt.GetValue().(MaxMinState)
@@ -120,33 +120,32 @@ func (crdt *MaxMinCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs Downs
 	}
 	effect := crdt.applyDownstream(downstreamArgs)
 	//Necessary for inversibleCrdt
-	crdt.addToHistory(&updTs, &downstreamArgs, effect)
+	crdt.addToHistory(updTs, downstreamArgs, effect)
 
 	return nil
 }
 
-func (crdt *MaxMinCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect *Effect) {
-	var effectValue Effect
+func (crdt *MaxMinCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect Effect) {
 	previousValue := crdt.topValue
 	switch typedUpd := downstreamArgs.(type) {
 	case MaxAddValue:
 		crdt.topValue = crdt.max(crdt.topValue, typedUpd.Value)
 		if previousValue == crdt.topValue {
-			effectValue = NoEffect{}
+			effect = NoEffect{}
 		} else {
-			effectValue = MaxMinAddValueEffect{PreviousValue: previousValue}
+			effect = MaxMinAddValueEffect{PreviousValue: previousValue}
 		}
 	case MinAddValue:
 		crdt.topValue = crdt.min(crdt.topValue, typedUpd.Value)
 		if previousValue == crdt.topValue {
-			effectValue = NoEffect{}
+			effect = NoEffect{}
 		} else {
-			effectValue = MaxMinAddValueEffect{PreviousValue: previousValue}
+			effect = MaxMinAddValueEffect{PreviousValue: previousValue}
 		}
 	default:
 		fmt.Printf("[MaxMin][Downstream]Unsupported downstream type: %v (%T)\n", downstreamArgs, downstreamArgs)
 	}
-	return &effectValue
+	return
 }
 
 func (crdt *MaxMinCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err error) {
@@ -180,19 +179,19 @@ func (crdt *MaxMinCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
-func (crdt *MaxMinCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *MaxMinCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	return crdt.applyDownstream(updArgs)
 }
 
-func (crdt *MaxMinCrdt) undoEffect(effect *Effect) {
-	typedEffect := (*effect).(MaxMinAddValueEffect)
+func (crdt *MaxMinCrdt) undoEffect(effect Effect) {
+	typedEffect := (effect).(MaxMinAddValueEffect)
 	if crdt.topValue != typedEffect.PreviousValue {
 		//Value changed due to this update, so we revert to the previous value
 		crdt.topValue = typedEffect.PreviousValue
 	}
 }
 
-func (crdt *MaxMinCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+func (crdt *MaxMinCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {}
 
 //Protobuf functions
 
@@ -219,7 +218,7 @@ func (crdtState MaxMinState) FromReadResp(protobuf *proto.ApbReadObjectResp) (st
 	return crdtState
 }
 
-func (crdtState MaxMinState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState MaxMinState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Maxmin{Maxmin: &proto.ApbGetMaxMinResp{Value: pb.Int64(crdtState.Value)}}}
 }
 
@@ -246,7 +245,7 @@ func (crdt *MaxMinCrdt) ToProtoState() (protobuf *proto.ProtoState) {
 	return &proto.ProtoState{State: &proto.ProtoState_Maxmin{Maxmin: &proto.ProtoMaxMinState{Value: &topValue}}}
 }
 
-func (crdt *MaxMinCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
+func (crdt *MaxMinCrdt) FromProtoState(proto *proto.ProtoState, ts clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	return (&MaxMinCrdt{topValue: proto.GetMaxmin().GetValue()}).initializeFromSnapshot(ts, replicaID)
 }
 

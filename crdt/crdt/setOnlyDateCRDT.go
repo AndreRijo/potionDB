@@ -55,7 +55,7 @@ func (args DownstreamSetTsSetOnly) GetCRDTType() proto.CRDTType { return proto.C
 func (args DownstreamSetTsSetOnly) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 func (args DownstreamSetTsSetOnly) MustReplicate() bool         { return true }
 
-func (crdt *SetOnlyDateCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *SetOnlyDateCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	return &SetOnlyDateCrdt{
 		CRDTVM: (&genericInversibleCRDT{}).initialize(crdt),
 		dateTs: GregorianToTs(1, 1, 1), writeTs: math.MinInt64, replicaID: math.MaxInt16, localReplicaID: replicaID,
@@ -63,7 +63,7 @@ func (crdt *SetOnlyDateCrdt) Initialize(startTs *clocksi.Timestamp, replicaID ui
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *SetOnlyDateCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *SetOnlyDateCrdt) {
+func (crdt *SetOnlyDateCrdt) initializeFromSnapshot(startTs clocksi.Timestamp, replicaID uint16) (sameCRDT *SetOnlyDateCrdt) {
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
@@ -112,23 +112,21 @@ func (crdt *SetOnlyDateCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs 
 		}
 		return nil
 	}
-	crdt.addToHistory(&updTs, &downstreamArgs, crdt.applyDownstream(downstreamArgs))
+	crdt.addToHistory(updTs, downstreamArgs, crdt.applyDownstream(downstreamArgs))
 	return nil
 }
 
-func (crdt *SetOnlyDateCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect *Effect) {
+func (crdt *SetOnlyDateCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect Effect) {
 	typedArgs, ok := downstreamArgs.(DownstreamSetTsSetOnly)
-	var effectValue Effect
 	if ok {
 		if typedArgs.Ts > crdt.writeTs || (typedArgs.Ts == crdt.writeTs && typedArgs.ReplicaID <= crdt.replicaID) {
-			effectValue = SetTsSetOnlyEffect{OldTs: crdt.dateTs, OldValue: crdt.dateTs, OldReplicaID: crdt.replicaID}
+			effect = SetTsSetOnlyEffect{OldTs: crdt.dateTs, OldValue: crdt.dateTs, OldReplicaID: crdt.replicaID}
 			crdt.dateTs, crdt.writeTs, crdt.replicaID = typedArgs.Value, typedArgs.Ts, typedArgs.ReplicaID
 		} else {
-			effectValue = NoEffect{}
+			effect = NoEffect{}
 		}
-		return &effectValue
 	} else {
-		effectValue = NoEffect{}
+		effect = NoEffect{}
 		fmt.Printf("[SetOnlyDateCrdt][Downstream]Unsupported downstream type: %v (%T)\n", downstreamArgs, downstreamArgs)
 	}
 	return
@@ -150,12 +148,12 @@ func (crdt *SetOnlyDateCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
-func (crdt *SetOnlyDateCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *SetOnlyDateCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	return crdt.applyDownstream(updArgs)
 }
 
-func (crdt *SetOnlyDateCrdt) undoEffect(effect *Effect) {
-	switch typedEffect := (*effect).(type) {
+func (crdt *SetOnlyDateCrdt) undoEffect(effect Effect) {
+	switch typedEffect := (effect).(type) {
 	case SetTsSetOnlyEffect:
 		crdt.dateTs = typedEffect.OldValue
 		crdt.writeTs = typedEffect.OldTs
@@ -165,7 +163,7 @@ func (crdt *SetOnlyDateCrdt) undoEffect(effect *Effect) {
 	}
 }
 
-func (crdt *SetOnlyDateCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+func (crdt *SetOnlyDateCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {}
 
 //Protobuf functions - most are already defined in simpleDateCrdt. Only need to define downstream, ProtoState and SetMS.
 
@@ -192,7 +190,7 @@ func (crdt *SetOnlyDateCrdt) ToProtoState() (state *proto.ProtoState) {
 	}}}
 }
 
-func (crdt *SetOnlyDateCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (sameCRDT *SetOnlyDateCrdt) {
+func (crdt *SetOnlyDateCrdt) FromProtoState(proto *proto.ProtoState, ts clocksi.Timestamp, replicaID uint16) (sameCRDT *SetOnlyDateCrdt) {
 	protoState := proto.GetSetOnlyDate()
 	crdt.dateTs, crdt.writeTs, crdt.replicaID = protoState.GetDateTs(), protoState.GetWriteTs(), uint16(protoState.GetReplicaID())
 	return crdt

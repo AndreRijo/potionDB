@@ -7,6 +7,7 @@ import (
 	"potionDB/crdt/proto"
 
 	//pb "github.com/golang/protobuf/proto"
+
 	pb "google.golang.org/protobuf/proto"
 )
 
@@ -41,6 +42,36 @@ func createProtoReplicateGroupTxn(replicaID uint16, allTxns []RemoteTxn, bucketO
 	return &proto.ProtoReplicateGroupTxn{SenderID: pb.Int32(int32(replicaID)), Txns: protos, MinTxnID: pb.Int32(initialCount), MaxTxnID: pb.Int32(txnCount)}
 }*/
 
+// Re-uses previous protobuf buffers, whenever possible. Most users should just use createProtoReplicateTxn for safety, unless optimizing GC/malloc pressure.
+func createProtoReplicateTxnReuse(replicaID uint16, clk clocksi.Timestamp, upds map[int][]crdt.UpdateObjectParams, txnCount int32, reuseBuf *proto.ProtoReplicateTxn) {
+	if len(upds) == 0 || clk == nil {
+		fmt.Printf("[ReplicatorProtoLib][createProtoReplicateTxnReuse]WARNING - Received a nil map or a nil clk!!! Map len: %d. Clk: %v.\n", len(upds), clk)
+	}
+	reuseBuf.Part = reuseBuf.Part[:cap(reuseBuf.Part)] //Unlock full buffer.
+	i := 0
+	if len(upds) < len(reuseBuf.Part) { //Can fully re-use. Fast path.
+		for partID, partUpds := range upds {
+			createProtoNewRemoteTxnReuse(int64(partID), partUpds, reuseBuf.Part[i])
+			i++
+		}
+		reuseBuf.Part = reuseBuf.Part[:len(upds)] //Lock buffer to the actual size.
+	} else { //Can partially re-use, slower path.
+		newPart := make([]*proto.ProtoNewRemoteTxn, len(upds))
+		copy(newPart, reuseBuf.Part)
+		for partID, partUpds := range upds {
+			if i < len(reuseBuf.Part) { //Re-use existing buffer.
+				createProtoNewRemoteTxnReuse(int64(partID), partUpds, newPart[i])
+			} else { //Need to alloc new buffer.
+				newPart[i] = createProtoNewRemoteTxn(int64(partID), partUpds)
+			}
+			i++
+		}
+		reuseBuf.Part = newPart
+	}
+	clk.ToBytesBuf(reuseBuf.Timestamp)
+	*reuseBuf.SenderID, *reuseBuf.TxnID = int32(replicaID), txnCount
+}
+
 func createProtoReplicateTxn(replicaID uint16, clk clocksi.Timestamp, upds map[int][]crdt.UpdateObjectParams, txnCount int32) (protobuf *proto.ProtoReplicateTxn) {
 	if len(upds) == 0 || clk == nil {
 		fmt.Printf("[ReplicatorProtoLib][createProtoReplicateTxn]WARNING - Received a nil map or a nil clk!!! Map len: %d. Clk: %v.\n", len(upds), clk)
@@ -56,6 +87,11 @@ func createProtoReplicateTxn(replicaID uint16, clk clocksi.Timestamp, upds map[i
 
 func createProtoNewRemoteTxn(partID int64, upds []crdt.UpdateObjectParams) (protobuf *proto.ProtoNewRemoteTxn) {
 	return &proto.ProtoNewRemoteTxn{PartitionID: &partID, Upds: createProtoDownstreamUpds(upds)}
+}
+
+func createProtoNewRemoteTxnReuse(partID int64, upds []crdt.UpdateObjectParams, reuseBuf *proto.ProtoNewRemoteTxn) {
+	reuseBuf.PartitionID = &partID
+	reuseBuf.Upds = createProtoDownstreamUpdsReuse(upds, reuseBuf.Upds)
 }
 
 /*
@@ -78,6 +114,36 @@ func createProtoDownstreamUpds(upds []crdt.UpdateObjectParams) (protobufs []*pro
 		}
 	}
 	return protobufs
+}
+
+func createProtoDownstreamUpdsReuse(upds []crdt.UpdateObjectParams, reuseBuf []*proto.ProtoDownstreamUpd) (protobufs []*proto.ProtoDownstreamUpd) {
+	if len(upds) <= cap(reuseBuf) { //Fastest path, can fully re-use.
+		reuseBuf = reuseBuf[:len(upds)]
+		for i, upd := range upds {
+			createBoundObjectReuse(upd.Key, upd.CrdtType, upd.Bucket, reuseBuf[i].KeyParams)
+			reuseBuf[i].Op = (upd.UpdateArgs).(crdt.ProtoDownUpd).ToReplicatorObj()
+		}
+		protobufs = reuseBuf
+	} else { //Will need to alloc new sadly. (i.e., len(upds) > cap(reuseBuf))
+		protobufs = make([]*proto.ProtoDownstreamUpd, len(upds))
+		reuseBuf = reuseBuf[:cap(reuseBuf)]
+		copy(protobufs, reuseBuf)
+		var upd crdt.UpdateObjectParams
+		i := 0
+		for ; i < len(reuseBuf); i++ { //Note: reuseBuf is < upds, as otherwise we would be in the if above.
+			upd = upds[i]
+			createBoundObjectReuse(upd.Key, upd.CrdtType, upd.Bucket, reuseBuf[i].KeyParams)
+			protobufs[i].Op = (upd.UpdateArgs).(crdt.ProtoDownUpd).ToReplicatorObj()
+		}
+		for ; i < len(upds); i++ {
+			upd = upds[i]
+			protobufs[i] = &proto.ProtoDownstreamUpd{
+				KeyParams: createBoundObject(upd.Key, upd.CrdtType, upd.Bucket),
+				Op:        (upd.UpdateArgs).(crdt.ProtoDownUpd).ToReplicatorObj(),
+			}
+		}
+	}
+	return
 }
 
 func createProtoRemoteID(replicaID uint16, myBuckets []string, myIP string) (protobuf *proto.ProtoRemoteID) {

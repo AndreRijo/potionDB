@@ -19,7 +19,7 @@ type InternalClient struct {
 }
 
 func (ic InternalClient) Initialize(tm *TransactionManager) InternalClient {
-	ic.tmChan = tm.CreateClientHandler(TM_INTERNAL_CLIENT)
+	ic.tmChan = tm.CreateClientHandler()
 	return ic
 }
 

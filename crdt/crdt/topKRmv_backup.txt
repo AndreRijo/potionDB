@@ -367,7 +367,7 @@ var (
 	defaultTopKSize = 100 //Default number of top positions
 )
 
-func (crdt *TopKRmvCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *TopKRmvCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	return crdt.InitializeWithSize(startTs, replicaID, defaultTopKSize)
 }
 
@@ -388,7 +388,7 @@ func (crdt *TopKRmvCrdt) InitializeWithSize(startTs *clocksi.Timestamp, replicaI
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *TopKRmvCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *TopKRmvCrdt) {
+func (crdt *TopKRmvCrdt) initializeFromSnapshot(startTs clocksi.Timestamp, replicaID uint16) (sameCRDT *TopKRmvCrdt) {
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
@@ -1045,7 +1045,7 @@ func (crdt *TopKRmvCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs Down
 	}
 	effect, otherDownstreamArgs := crdt.applyDownstream(downstreamArgs)
 	//Necessary for inversibleCrdt
-	crdt.addToHistory(&updTs, &downstreamArgs, effect)
+	crdt.addToHistory(updTs, downstreamArgs, effect)
 	return
 }
 
@@ -1628,12 +1628,12 @@ func (crdt *TopKRmvCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
-func (crdt *TopKRmvCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *TopKRmvCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	effect, _ = crdt.applyDownstream(updArgs)
 	return
 }
 
-func (crdt *TopKRmvCrdt) undoEffect(effect *Effect) {
+func (crdt *TopKRmvCrdt) undoEffect(effect Effect) {
 	switch typedEffect := (*effect).(type) {
 	case TopKRmvAddEffect:
 		crdt.undoAddEffect(&typedEffect)
@@ -1767,7 +1767,7 @@ func (crdt *TopKRmvCrdt) undoRemoveAllEffect(effect *TopKRmvRemoveAllEffect) {
 	}
 }
 
-func (crdt *TopKRmvCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+func (crdt *TopKRmvCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {}
 
 /*
 func (crdt *TopKRmvCrdt) applyRemove(op *DownstreamTopKRemove) (effect *Effect, otherDownstreamArgs DownstreamArguments) {
@@ -1922,7 +1922,7 @@ func (crdtState TopAggrAvgState) FromReadResp(protobuf *proto.ApbReadObjectResp)
 	return TopAggrAvgState{Sum: aggrProto.GetAggrResult(), Count: int64(aggrProto.GetCount())}
 }
 
-func (crdtState TopKValueState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState TopKValueState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	protos := make([]*proto.ApbIntPair, len(crdtState.Scores))
 	for i, score := range crdtState.Scores {
 		protos[i] = &proto.ApbIntPair{PlayerId: pb.Int32(score.Id), Score: pb.Int32(score.Score), Data: *score.Data}
@@ -1930,11 +1930,11 @@ func (crdtState TopKValueState) ToReadResp() (protobuf *proto.ApbReadObjectResp)
 	return &proto.ApbReadObjectResp{Topk: &proto.ApbGetTopkResp{Values: protos}}
 }
 
-func (crdtState TopAggrState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState TopAggrState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Partread: &proto.ApbPartialReadResp{Topk: &proto.ApbTopkPartialReadResp{Aggr: &proto.ApbTopKAvgAggrResp{AggrResult: pb.Int64(int64(crdtState))}}}}
 }
 
-func (crdtState TopAggrAvgState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState TopAggrAvgState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Partread: &proto.ApbPartialReadResp{Topk: &proto.ApbTopkPartialReadResp{
 		Aggr: &proto.ApbTopKAvgAggrResp{AggrResult: pb.Int64(crdtState.Sum), Count: pb.Int64(crdtState.Count)}}}}
 }
@@ -2100,7 +2100,7 @@ func (crdt *TopKRmvCrdt) ToProtoState() (protobuf *proto.ProtoState) {
 		NotTop: protoNotTop, Smallest: smallest, MaxElems: pb.Int32(int32(crdt.maxElems)), Vc: crdt.vc.ToBytes()}}
 }
 
-func (crdt *TopKRmvCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
+func (crdt *TopKRmvCrdt) FromProtoState(proto *proto.ProtoState, ts clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	topKProto, nReplicas := proto.GetTopkrmv(), int(NReplicas)
 	elems, rems, notTop := make(map[int32]TopKElement), make(map[int32]clocksi.Timestamp), make(map[int32]setTopKElement)
 

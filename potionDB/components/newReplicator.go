@@ -2,11 +2,13 @@ package components
 
 import (
 	fmt "fmt"
+	"math"
 	"potionDB/crdt/clocksi"
 	"potionDB/crdt/crdt"
 	"potionDB/crdt/proto"
 	"potionDB/potionDB/utilities"
 	"potionDB/shared/shared"
+	"sync/atomic"
 	"time"
 
 	"github.com/AndreRijo/go-tools/src/tools"
@@ -17,19 +19,25 @@ type Replicator struct {
 	localPartitions  []Logger
 	currTxnCache     []tools.SliceWithHideable[PairClockUpdates]   //First index: partitionID. Contains the oldest slice of txns obtained from each log.
 	overflowTxnCache []tools.SliceWithHideable[[]PairClockUpdates] //Contains the non-oldest slices of txns obtained from each log.
-	lastLogClk       []clocksi.Timestamp                           //The last received stable clk from each partition, in order to what clock to request from each partition.
-	maxCommonClk     clocksi.Timestamp                             //The highest clk common to all replicas.
-	remote           *RemoteGroup
-	started          bool
-	replicaID        uint16
-	buckets          []string
+	lastLogClk       []clocksi.Timestamp                           //The last received stable clk from each partition, in order to know what clock to request from each partition.
+	//maxCommonClk     clocksi.Timestamp                             //The highest clk common to all partitions.
+	maxCommonTs int64 //Max clock value of this replica that is common to all partitions.
+	remote      *RemoteGroup
+	created     bool //True if Replicator instance has already been initialized.
+	replicaID   uint16
+	buckets     []string
 	JoinInfo
 	allReplicaIDs []uint16 //Stores the replicaIDs of all replicas
 	partsChan     chan StableClkUpdatesPair
+	allPartsDone  bool //Set to true when currTxnCache and overflowTxnCache are fully empty. It's set to false as soon as a txn comes from the Logs.
 
 	//New things added
 	partUpdsBuf        []tools.SliceWithCounter[crdt.UpdateObjectParams]                                  //Re-usable buffer that holds upds (of a txn/merged txn) per partition.
 	logBuffersToReturn tools.SliceWithCounter[tools.Pair[int, tools.SliceWithHideable[PairClockUpdates]]] //Buffers to return to the logger, when it is convenient.
+	replicationStarted atomic.Bool                                                                        //True if doReplication() has already been called                                                                //Set this to true to speed up replication of initial data loading.
+	//Protocol: 0 means false, 2 means it got requested. 1 means we already got informed by TPC-H dataload that all data has been sent to the loggers.
+	//This way, even if TPC-H dataload finishes before we even start Replication (due to RabbitMQ taking long to start), we will still know that we need to do initial data replication.
+	initialDataFastRepl atomic.Int64
 }
 
 type JoinInfo struct {
@@ -134,16 +142,22 @@ type ReplyBucket struct {
 type ReplyEmpty struct{}
 
 const (
-	//tsSendDelay time.Duration = 2000 //milliseconds
-	tsSendDelay time.Duration = 20000
-	//tsSendDelay         time.Duration = 500
-	cacheInitialSize           = 100
-	toSendInitialSize          = 10
-	joinHoldInitialSize        = 100
-	DO_JOIN                    = "doJoin"
-	MAX_TXN_MERGE              = 1000
+	//TS_SEND_DELAY time.Duration = 2000 //milliseconds
+	TS_SEND_DELAY time.Duration = 5000
+	//TS_SEND_DELAY time.Duration = 20000
+	//TS_SEND_DELAY         time.Duration = 500
+	cacheInitialSize    = 100
+	toSendInitialSize   = 10
+	joinHoldInitialSize = 100
+	DO_JOIN             = "doJoin"
+	//REPL_MAX_TXN_MERGE  = 1000
+	REPL_MAX_TXN_MERGE         = 5000
 	OVERFLOW_INITIAL_SIZE      = 3
 	PART_UPDS_BUF_INITIAL_SIZE = 100
+	//when the amount of time spent preparing txns to be remote is very short, it is assumed that PotionDB is under low load.
+	//If the variable below is true, at those times we'll perform the next replication much sooner.
+	FAST_REPL_WHEN_LOW_LOAD                         = true
+	INITIAL_DATA_REPL_CHECK_FREQUENCY time.Duration = 100 //(ms). While PotionDB is loading initial data, if initialDataFastRepl is true, the replicator will check for new txns with this frequency.
 )
 
 var (
@@ -206,6 +220,11 @@ func (req ReplyEmpty) getSenderID() uint16 {
 	return 0
 }
 
+func (repl *Replicator) DisableInitialDataloadMode() {
+	repl.initialDataFastRepl.Add(-1)
+	fmt.Printf("[REPL]Requested disabling of initial data loading replication mode at %s.\n", time.Now().Format("15:04:05.000"))
+}
+
 //TODO: Some GC mechanism to reduce the size of the buffers?
 
 func (repl *Replicator) Reset() {
@@ -226,16 +245,19 @@ func (repl *Replicator) Reset() {
 				repl.partUpdsBuf[id] = tools.NewSliceWithCounter[crdt.UpdateObjectParams](PART_UPDS_BUF_INITIAL_SIZE)
 			}
 		}
-		fmt.Println("[REPL]Reset complete.")
+		fmt.Printf("[REPL]Reset complete at %s.\n", time.Now().Format("15:04:05.000"))
 	}
 }
 
-func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, buckets []string, replicaID uint16) {
+func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, buckets []string, replicaID uint16, initialDataLoad bool) {
 	if !shared.IsReplDisabled {
-		if !repl.started {
+		if !repl.created {
 			repl.tm = tm
-			repl.started = true
+			repl.created = true
 			repl.localPartitions = loggers
+			if initialDataLoad {
+				repl.initialDataFastRepl.Add(2) //Set to 2 to indicate that initial data loading is requested.
+			}
 			bucketsToListen := buckets
 
 			remoteConn := CreateRemoteGroupStruct(bucketsToListen, replicaID)
@@ -243,7 +265,6 @@ func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, buc
 			repl.buckets = bucketsToListen
 			repl.replicaID = replicaID
 			repl.partsChan = make(chan StableClkUpdatesPair, nGoRoutines)
-			//TODO: Other initializations?
 			repl.currTxnCache, repl.overflowTxnCache = make([]tools.SliceWithHideable[PairClockUpdates], nGoRoutines), make([]tools.SliceWithHideable[[]PairClockUpdates], nGoRoutines)
 			repl.lastLogClk, repl.partUpdsBuf = make([]clocksi.Timestamp, nGoRoutines), make([]tools.SliceWithCounter[crdt.UpdateObjectParams], nGoRoutines)
 			for i := 0; i < int(nGoRoutines); i++ {
@@ -264,82 +285,196 @@ func (repl *Replicator) Initialize(tm *TransactionManager, loggers []Logger, buc
 				crdt.NReplicas = int32(remoteConn.nReplicas + 1)
 				fmt.Printf("[REPL]Not doing join, will wait for replicaID of existing replicas. IDs to receive: %d, number of replicas (including self): %d\n",
 					repl.JoinInfo.waitFor, crdt.NReplicas)
-				remoteConn.sendReplicaID(bucketsToListen, localPotionIP)
+				go remoteConn.sendReplicaID(bucketsToListen, localPotionIP)
 				go repl.receiveRemoteTxns()
-				//go repl.replicateCycle()
+				//go repl.doReplication()
 				//If there's no other replica, we can start right away
 				if len(remoteConn.conns) == 0 {
 					fmt.Println("[REPL] PotionDB in single server mode.")
 					repl.allDone = true
-					go repl.replicateCycle()
-					go repl.tm.SendRemoteMsg(TMStart{}) //Different thread to avoid blocking
+					//go repl.replicateCycle()
+					ok := repl.replicationStarted.CompareAndSwap(false, true)
+					if ok {
+						go repl.doReplication()
+					}
+					//go repl.tm.SendRemoteMsg(TMStart{}) //Different thread to avoid blocking
+					repl.tm.SendRemoteMsg(TMStart{}) //OK as channel is non-blocking.
 				}
 			}
 		}
 	} else {
-		fmt.Println("[REPL] Warning - replicator is disabled. PotionDB started in single server mode.")
-		go tm.SendRemoteMsg(TMStart{})
+		fmt.Println("[REPL] Warning - replicator is disabled. Starting PotionDB in single server mode.")
+		tm.SendRemoteMsg(TMStart{})
 	}
 }
 
+func (repl *Replicator) doReplication() {
+	if repl.initialDataFastRepl.Load() > 0 {
+		repl.initialDataReplCycle()                  //This will only return once initialDataFastRepl is set to false and an extra cycle is done.
+		time.Sleep(TS_SEND_DELAY * time.Millisecond) //Wait a bit before starting the main replication cycle.
+	}
+	repl.replicateCycle()
+}
+
+func (repl *Replicator) initialDataReplCycle() {
+	//Do this until initialDataFastRepl gets disabled.
+	//Here we don't need maxCommonTs shenanigans, namely no need to choose which txns to replicate - all can be replicated as all have a dummy clk of 0.
+	//Also, no stableClk.
+	//Note: while we send to the logger the last clk returned by that logger, the logger ignores that clk. He'll simply return all operations in the log.
+	done := false
+	logRequest := LoggerRequest{LogRequestArgs: LogTxnArgs{lastClock: clocksi.DummyTs.Copy(), ReplyChan: repl.partsChan}}
+	//updsCache := make([][]PairClockUpdates, nGoRoutines) //Cache to store updates to send. First index: partitionID.
+	var toSleep time.Duration
+	emptyInARow := 0
+	nReplicated := 0
+	dummyClk := clocksi.DummyTs.Copy()
+	fmt.Printf("[REPL]Initial data loading replication started at %s. Replication will proceed at a fast pace.\n", time.Now().Format("15:04:05.000"))
+	for !done {
+		//This works as when initialDataFastRepl gets set to false, we know all operations are already in the logger's channels (or in their slices even).
+		//The nReplicated > 0 is to protect against the dataload finishing before we connect to TM.
+		if repl.initialDataFastRepl.Load() <= 1 && nReplicated > 0 {
+			done = true //Still do this replication cycle though.
+		}
+		start := time.Now().UnixNano()
+		for _, part := range repl.localPartitions {
+			part.SendLoggerRequest(logRequest)
+		}
+		nPartsWithUpds := 0
+		for id := 0; id < int(nGoRoutines); id++ {
+			upds := (<-repl.partsChan).upds
+			if len(upds) > 0 {
+				count := 0
+				for _, pair := range upds {
+					count += len(pair.upds)
+				}
+				hold := make([]crdt.UpdateObjectParams, count)
+				pos := 0
+				for _, pair := range upds {
+					copy(hold[pos:], pair.upds)
+					pos += len(pair.upds)
+				}
+				repl.remote.SendTxn(RemoteTxn{Clk: dummyClk, Upds: map[int][]crdt.UpdateObjectParams{id: hold}})
+				nPartsWithUpds++
+				repl.logBuffersToReturn.Append(tools.Pair[int, tools.SliceWithHideable[PairClockUpdates]]{First: id, Second: tools.ToSliceWithHideable(upds)})
+			}
+		}
+		if nPartsWithUpds > 0 {
+			/*txn := RemoteTxn{Clk: clocksi.DummyTs.Copy(), Upds: updsMap}
+			updsMap = make(map[int][]crdt.UpdateObjectParams, nGoRoutines/2)
+			repl.remote.SendTxn(txn)*/
+			emptyInARow = 0
+			repl.remote.SendStableClk(0) //To signal that the txn(s) have ended.
+			repl.returnBuffersToLog()
+			nReplicated++
+		} else {
+			emptyInARow++
+		}
+		finish := time.Now()
+		taken := time.Duration((finish.UnixNano() - start) / 1000000)
+		toSleep = INITIAL_DATA_REPL_CHECK_FREQUENCY - taken
+		if toSleep > 10 {
+			if nPartsWithUpds == 0 && emptyInARow&7 == 1 {
+				fmt.Printf("[REPL]Initial data loading - nothing to replicate, sleeping %dms, at %s.\n", toSleep, finish.Format("15:04:05.000"))
+			} else if nPartsWithUpds > 0 {
+				fmt.Printf("[REPL]Initial data loading - replicated data from %d partitions, took %dms to prepare, sleeping %dms, at %s.\n", nPartsWithUpds, taken, toSleep, finish.Format("15:04:05.000"))
+			}
+			time.Sleep(toSleep * time.Millisecond)
+		} else {
+			fmt.Printf("[REPL]Initial data loading - took %d ms, replicated data from %d partitions, will check again right away, at %s.\n", taken, nPartsWithUpds, finish.Format("15:04:05.000"))
+		}
+	}
+	fmt.Printf("[REPL]Exitting initial data loading replication cycle at %s. Will proceed with normal replication cycle now.\n", time.Now().Format("15:04:05.000"))
+	repl.initialDataFastRepl.Add(-1)
+}
+
+// Implementation note: Replicas recognize that all txns have been sent by receiving a stable clk.
+// More precisely, a replica knows it has received a txn fully when it starts receiving the next txn (it identifies a different txnID)
+// Thus, for the last txn, it needs to receive a stable clk to recognize the end of that txn.
 func (repl *Replicator) replicateCycle() {
 	replSinceLastGC := false //Unused for now. In the future, if we need to do some cleaning/GC, we can use this to detect when that might be needed.
 	count, start, finish, toSleep, taken := time.Duration(0), int64(0), int64(0), time.Duration(0), time.Duration(0)
 	var startFull time.Time
-	nTxns, prevNTxns, nTotalTxns := 0, 0, 0
+	nTxns, prevNTxns, nTotalTxns, nTotalTxnGroups, nTxnGroups := 0, 0, 0, 0, 0
 
 	dataChan := make(chan tools.Pair[RemoteTxn, int], 50) //Channel to receive data from prepareData. Size is somewhat arbitrary.
+
+	fmt.Printf("[REPL]Replication cycle started at %s. Ready to replicate txns.\n", time.Now().Format("15:04:05.000"))
 
 	for {
 		startFull = time.Now()
 		start = startFull.UnixNano()
 
-		fmt.Printf("[REPL]Requesting new txns...\n")
+		//fmt.Printf("[REPL]Requesting new txns...\n")
 		repl.getNewTxns()
-		fmt.Printf("[REPL]Requesting data preparation...\n")
-		go repl.prepareData(dataChan)
-		count++
-		for pair := <-dataChan; pair.Second != 0; pair = <-dataChan { //Keep receiving until prepareData signals that we're done (i.e., return 0)
-			fmt.Printf("[REPL]Got txn/grouped txn from dataChan, with %d merged txns. Total so far: %d. Clock: %s. NParts of txn: %d.\n", pair.Second, nTxns+pair.Second, pair.First.Clk.ToString(), len(pair.First.Upds))
-			replSinceLastGC = true
-			if pair.Second != 0 {
-				repl.remote.SendTxn(pair.First)
-				nTxns += pair.Second
+		//fmt.Printf("[REPL]Requesting data preparation...\n")
+		if !repl.allPartsDone {
+			go repl.prepareData(dataChan)
+			count++
+			for pair := <-dataChan; pair.Second != 0; pair = <-dataChan { //Keep receiving until prepareData signals that we're done (i.e., return 0)
+				//fmt.Printf("[REPL]Got txn/grouped txn from dataChan, with %d merged txns. Total so far: %d. Clock: %s. NParts of txn: %d. Real life time: %s\n", pair.Second, nTxns+pair.Second, pair.First.Clk.ToString(), len(pair.First.Upds), time.Now().Format("15:04:05.000"))
+				replSinceLastGC = true
+				if pair.Second != 0 {
+					repl.remote.SendTxn(pair.First)
+					nTxns += pair.Second
+					nTxnGroups++
+				}
 			}
-		}
-		//Send clock to ensure all replicas receive the latest clock.
-		//This is also used to know that the last transaction sent has ended.
-		fmt.Printf("[REPL]Sending stableClk.\n")
-		repl.remote.SendStableClk(repl.maxCommonClk.GetPos(shared.SortedReplicaID))
-		finish = time.Now().UnixNano()
-		if nTxns > 0 {
-			fmt.Printf("[REPL]Requested sending of %d txns, at %s. Took %dms preparing.\n", nTxns, time.Now().Format("15:04:05.000"), (finish-start)/1000000)
-			repl.returnBuffersToLog()
-		} else if nTxns == 0 && replSinceLastGC { //Take the opportunity to do some GC. We would be sleeping this routine anyway.
-			repl.cleanState()
-			replSinceLastGC = false
-		}
+			//Send clock to ensure all replicas receive the latest clock.
+			//This is also used to know that the last transaction sent has ended.
+			fmt.Printf("[REPL]Got %d txns, sending stableClk of %d (our replicaID: %d).\n", nTxns, repl.maxCommonTs, repl.replicaID)
+			repl.remote.SendStableClk(repl.maxCommonTs)
+			//repl.remote.SendStableClk(repl.maxCommonClk.GetPos(shared.SortedReplicaID))
+			finish = time.Now().UnixNano()
+			if nTxns > 0 {
+				fmt.Printf("[REPL]Requested sending of %d txns, split across %d groups, at %s. Took %dms preparing.\n", nTxns, nTxnGroups, time.Now().Format("15:04:05.000"), (finish-start)/1000000)
+				nTotalTxns += nTxns
+				nTotalTxnGroups += nTxnGroups
+				repl.returnBuffersToLog()
+			} else if nTxns == 0 && replSinceLastGC { //Take the opportunity to do some GC. We would be sleeping this routine anyway.
+				fmt.Printf("[REPL]Didn't get any txn, but sent stableClk.\n")
+				repl.cleanState()
+				replSinceLastGC = false
+			}
+		} /*else {
+			repl.remote.SendStableClk(repl.maxCommonClk.GetPos(shared.SortedReplicaID)) //Keep sending a clk update.
+		}*/
 		finish = time.Now().UnixNano()
 		taken = time.Duration((finish - start) / 1000000)
-		toSleep = tsSendDelay - taken
-		if nTxns > 0 && toSleep > 10 && taken*9 < tsSendDelay { //Idea: replication was very fast, so PotionDB is likely under light load. Attempt early replication.
-			fmt.Printf("[REPL]Last replication of %d txns was fast (%dms to prepare), will sleep short time.\n", nTxns, taken)
-			time.Sleep(tools.Max(tsSendDelay/10, 100) * time.Millisecond)
+		toSleep = TS_SEND_DELAY - taken
+		if FAST_REPL_WHEN_LOW_LOAD && nTxns > 0 && toSleep > 10 && taken*5 < TS_SEND_DELAY { //Idea: replication was very fast, so PotionDB is likely under light load. Attempt early replication.
+			if nTxns < 200 && taken < 5 { //Very fast replication, might be just NuCRDT ops. Very short sleep and send again.
+				toSleep = 10
+				time.Sleep(10 * time.Millisecond)
+			} else {
+				toSleep = tools.Max(TS_SEND_DELAY/10, 100)
+				fmt.Printf("[REPL]Last replication of %d txns was fast (%dms to prepare), will sleep only for %d ms.\n", nTxns, taken, toSleep)
+				time.Sleep(toSleep * time.Millisecond)
+			}
 		} else if toSleep > 10 {
 			time.Sleep(toSleep * time.Millisecond)
+		} else {
+			fmt.Printf("[REPL]Warning - Replicator might be falling behind! Took %dms to prepare %d txns, but replication frequency is every %dms.\n", taken, nTxns, TS_SEND_DELAY)
 		}
-		if nTxns == 0 && (prevNTxns > 0 || count*tsSendDelay%60000 == 0) {
-			fmt.Println("[REPL]No txns to send.")
+		if nTxns == 0 && (prevNTxns > 0 || count*TS_SEND_DELAY%60000 == 0) {
+			fmt.Printf("[REPL]No txns to send. Total txns, groups replicated so far: %d, %d\n", nTotalTxns, nTotalTxnGroups)
 		}
 		prevNTxns = nTxns
-		nTxns = 0
+		nTxns, nTxnGroups = 0, 0
 	}
-	ignore(nTotalTxns)
 }
 
+// This is called only when Replicator is idle - that is, no new txns can be sent. So it's a great GC opportunity.
 func (repl *Replicator) cleanState() {
 	for i := 0; i < len(repl.partUpdsBuf); i++ {
 		repl.partUpdsBuf[i].DeepClear()
+	}
+	//logBuffersToReturn's buffers are always deeply cleaned after each iteration, and returned to the respective logers.
+	//currTxnCache's entries are freed during prepareData(), anytime that there's no more updates to replicate.
+	//overflowTxnCache's is also deeply clean during prepareData(), anytime that the remaining updates fit in a single buffer. The inner slices are simply freed, so Go's GC will clean them later.
+	//So, when Replicator is idle, logBuffersToReturn, currTxnCache and overflowTxnCache are empty and clean.
+	//It's a good opportunity to request Logs to clean themselves.
+	for _, part := range repl.localPartitions {
+		part.SendLoggerRequest(LoggerRequest{LogRequestArgs: LogGCArgs{}})
 	}
 }
 
@@ -349,31 +484,42 @@ func (repl *Replicator) getNewTxns() {
 		part.SendLoggerRequest(LoggerRequest{LogRequestArgs: LogTxnArgs{lastClock: repl.lastLogClk[id], ReplyChan: repl.partsChan}})
 	}
 
-	repl.maxCommonClk = clocksi.HighestTs
-	nPartsWithTxn := 0 //TODO: DEBUG
+	/*prevMaxClk := repl.maxCommonClk
+	if prevMaxClk == nil {
+		prevMaxClk = clocksi.DummyTs
+	}
+	repl.maxCommonClk = clocksi.HighestTs*/
+	repl.maxCommonTs = math.MaxInt64
+	ourReplicaID := shared.SortedReplicaID
+	nPartsWithTxn := 0 //TODO: REMOVE, DEBUG
 	//Receive replies and cache and also determines the latest common (to all partitions) clk
 	for id := uint64(0); id < nGoRoutines; id++ {
 		reply := <-repl.partsChan
+		intPartID := int(reply.partID)
 		if len(reply.upds) > 0 { //This may happen if the partition didn't receive any updates
-			partCache := repl.currTxnCache[int(reply.partID)]
+			partCache := repl.currTxnCache[intPartID]
 			nPartsWithTxn++
 			if partCache.Len() > 0 { //Put in overflow, we still have leftovers from last time.
-				repl.overflowTxnCache[int(reply.partID)].Append(reply.upds)
+				repl.overflowTxnCache[intPartID].Append(reply.upds)
 			} else {
-				repl.currTxnCache[int(reply.partID)] = tools.ToSliceWithHideable(reply.upds)
+				repl.currTxnCache[intPartID] = tools.ToSliceWithHideable(reply.upds)
 			}
-			for i, upd := range reply.upds {
-				if upd.clk == nil {
-					fmt.Printf("[REPL][GetNewTxns()]WARNING - Received a nil clk for part %d, pos %d NUpds: %d!!!\n", reply.partID, i, len(upd.upds))
-				}
-			}
-		}
-		repl.lastLogClk[int(reply.partID)] = reply.stableClock
-		if reply.stableClock.IsLower(repl.maxCommonClk) {
+			//fmt.Printf("[REPL][GetNewTxns()]Received %d txns from part %d with safe clk %s.\n", len(reply.upds), reply.partID, reply.stableClock.ToString())
+		} /*else {
+			fmt.Printf("[REPL][GetNewTxns()]No txns from part %d. Safe clk: %s.\n", reply.partID, reply.stableClock.ToString())
+		}*/
+		repl.lastLogClk[intPartID] = reply.stableClock
+		/*if reply.stableClock.IsLower(repl.maxCommonClk) {
 			repl.maxCommonClk = reply.stableClock
-		}
+		}*/
+		repl.maxCommonTs = min(repl.maxCommonTs, reply.stableClock.GetPos(ourReplicaID))
 	}
-	fmt.Printf("[REPL][GetNewTxns()]Received new txns from %d/%d partitions. Max common clk: %s.\n", nPartsWithTxn, nGoRoutines, repl.maxCommonClk.ToString())
+	if nPartsWithTxn > 0 {
+		repl.allPartsDone = false
+		//fmt.Printf("[REPL][GetNewTxns()]Received new txns from %d/%d partitions. Max common clk: %s Prev common clk: %s.\n", nPartsWithTxn, nGoRoutines, repl.maxCommonClk.ToString(), prevMaxClk.ToString())
+	} /*else {
+		fmt.Printf("[REPL][GetNewTxns()]No new txns from any partition.\n")
+	}*/
 }
 
 // This new version merges multiple txns that were executed sequentially, without the ts of any other replica changing inbetween txns.
@@ -384,19 +530,26 @@ func (repl *Replicator) prepareData(replyChan chan tools.Pair[RemoteTxn, int]) {
 	var currClk, prevClk clocksi.Timestamp
 	var partCache tools.SliceWithHideable[PairClockUpdates]
 	var firstEntryClk clocksi.Timestamp
-	var clkCompare, maxClkComp clocksi.TsResult
+	//var clkCompare , maxClkComp clocksi.TsResult
+	startTs := time.Now().UnixNano()
 
 	nParts, ourReplicaID := int(nGoRoutines), shared.SortedReplicaID
 	partsForThisClk := tools.NewSliceWithCounter[int](nParts)
-	done, nPartsDone := false, 0
+	done, nPartsDone, nGroups := false, 0, 0
 	partsDone := tools.NewBitSet(int(nGoRoutines))
 	nIterations := 0 //Every once in a while, we'll check if some partitions are already done or not. This avoids some non-necessary clk comparisons, buffers resets and similar.
 	nInGroup := 1    //We count right away the "first" txn.
+	maxGroupSize := 0
 
 	partsForGroup := tools.NewBitSet(nParts)
+	maxCommonTs := repl.maxCommonTs
+	currTs := int64(math.MaxInt64)
+	var prevTs int64 //TODO: Remove, only for debugging purposes.
+	var compTs int64
 
 	//fmt.Printf("[REPL][PrepareData]Starting to prepare data. Max common clk: %s.\n", repl.maxCommonClk.ToString())
 	//Before starting, check if any partition does not have txns to replicate. We'll mark them as done.
+	nEmpty, nHigher := 0, 0
 	for id, partC := range repl.currTxnCache {
 		/*fmt.Printf("[REPL][PrepareData]Checking partition %d, len %d, hidden len %d, isEmpty %v.\n", id, partC.Len(), partC.LenHiddenHead(), partC.IsEmpty())
 		if partC.Len() > 0 {
@@ -404,105 +557,118 @@ func (repl *Replicator) prepareData(replyChan chan tools.Pair[RemoteTxn, int]) {
 				fmt.Printf("[REPL][PrepareData]First entry: clk %v, nUpds %d. Full entries: %v. Visible entries: %v.\n", partC.Head().clk, len(partC.Head().upds), partC.ToFullSlice(), partC.ToSlice())
 			}
 		}*/
-		if partC.IsEmpty() || partC.Head().clk.IsHigher(repl.maxCommonClk) { //This partition has no txns to replicate, or all txns have a clk higher than the maximum common clk.
+		//if partC.IsEmpty() || partC.Head().clk.IsHigher(repl.maxCommonClk) { //This partition has no txns to replicate, or all txns have a clk higher than the maximum common clk.
+		if partC.IsEmpty() || partC.Head().clk.GetPos(ourReplicaID) > maxCommonTs { //This partition has no txns to replicate, or all txns have a clk higher than the maximum common clk.
 			partsDone.Set(id)
 			nPartsDone++
+			if partC.IsEmpty() {
+				nEmpty++
+			} else { //If we don't enter here due to partC.IsEmpty(), then it means we entered by the condition of > maxCommonTs.
+				nHigher++
+			}
 		}
 	}
 	if nPartsDone == nParts { //Nothing to replicate: most likely we didn't get any txns.
-		//fmt.Printf("[REPL][PrepareData]No data to prepare, all partitions are done! Max common clk: %s. Returning.\n", repl.maxCommonClk.ToString())
+		if nEmpty == nParts {
+			repl.allPartsDone = true
+			//fmt.Printf("[REPL][PrepareData]No data to prepare, all partitions have been fully replicated! Max common clk: %s. Returning.\n", repl.maxCommonClk.ToString())
+			//fmt.Printf("[REPL][PrepareData]No data to prepare, all partitions are done! Max common clk: %s. Empty partitions: %d. Not empty but higher than maxCommonClk: %d. Returning.\n", repl.maxCommonClk.ToString(), nEmpty, nHigher)
+		} else {
+			//fmt.Printf("[REPL][PrepareData]No data that can be prepared, but some partitions still have txns to replicate later. Max common clk: %s. Empty partitions: %d. Not empty but higher than maxCommonClk: %d. Returning.\n", repl.maxCommonClk.ToString(), nEmpty, nHigher)
+			fmt.Printf("[REPL][PrepareData]No data that can be prepared, but some partitions still have txns to replicate later. Max common ts: %d. Empty partitions: %d. Not empty but higher than maxCommonTs: %d. Returning.\n", repl.maxCommonTs, nEmpty, nHigher)
+		}
 		replyChan <- tools.Pair[RemoteTxn, int]{Second: 0}
 		return
 	}
 	//fmt.Printf("[REPL][PrepareData]HighestTs: %s. Max common clk: %s.\n", clocksi.HighestTs.ToString(), repl.maxCommonClk.ToString())
 
+	//TODO: Remove this.
+	for id := 0; id < nParts; id++ {
+		lastLocalTs := int64(0)
+		var prevClk clocksi.Timestamp
+		cacheSlice := repl.currTxnCache[id].ToSlice()
+		for i, entry := range cacheSlice {
+			if entry.clk.GetPos(ourReplicaID) < lastLocalTs {
+				panic(fmt.Sprintf("[REPL][PrepareData]Error while checking currTxnCache - partition %d has txns with non-monotonic clk values for our replicaID. Entry %d has ts %d, previous entry had ts %d. Current clk, previous clk: %s, %s. Our replicaID: %d.\n",
+					id, i, entry.clk.GetPos(ourReplicaID), lastLocalTs, entry.clk.ToString(), prevClk.ToString(), ourReplicaID))
+			}
+			lastLocalTs = entry.clk.GetPos(ourReplicaID)
+			prevClk = entry.clk
+		}
+		for _, sliceEntry := range repl.overflowTxnCache[id].ToSlice() {
+			for j, entry := range sliceEntry {
+				if entry.clk.GetPos(ourReplicaID) < lastLocalTs {
+					panic(fmt.Sprintf("[REPL][PrepareData]Error while checking overflowTxnCache - partition %d has txns with non-monotonic clk values for our replicaID. Entry %d has ts %d, previous entry had ts %d. Current clk, previous clk: %s, %s. Our replicaID: %d.\n",
+						id, j, entry.clk.GetPos(ourReplicaID), lastLocalTs, entry.clk.ToString(), prevClk.ToString(), ourReplicaID))
+				}
+				lastLocalTs = entry.clk.GetPos(ourReplicaID)
+				prevClk = entry.clk
+			}
+		}
+	}
+
 	prevClk = clocksi.HighestTs
 	hasPrevClk := false //Bool to ensure that we process correctly the first txn.
 	for !done {         //We have guarantee that there's always at least one txn to replicate until we break out of the cycle.
-		/*if nIterations > 0 && nIterations%1000000 == 0 {
-			fmt.Printf("[REPL]Prepare data is stuck in an infinite loop? Iteration %d. Parts done: %d/%d. Has prev clk? %t. Prev clk: %s. Max common clk: %s.\n", nIterations, nPartsDone, nParts, hasPrevClk, prevClk.ToString(), repl.maxCommonClk.ToString())
-		}*/
-		currClk = clocksi.HighestTs
+		//if nIterations > 0 && nIterations%500000 == 0 {
+		if nIterations > 0 && nIterations&0x7FFFF == 0 { //Aprox every 500k iterations (524288 to be exact), check this condition. Cheaper than doing %.
+			fmt.Printf("[REPL]Prepare data is stuck in an infinite loop? Iteration %d. Parts done: %d/%d. Has prev clk? %t. Prev clk: %s. Max common ts: %d (our sorted replicaID: %d).\n", nIterations, nPartsDone, nParts, hasPrevClk, prevClk.ToString(), repl.maxCommonTs, ourReplicaID)
+		}
+		currClk, currTs = clocksi.HighestTs, math.MaxInt64
 		for id := 0; id < nParts; id++ { //1st phase: find the minimum common clock, and collect partitions involved.
-			if partsDone.GetBit(id) { //This partition has no txns left to replicate, or all txns have a clk higher than the maximum common clk.
-				continue
+			if !partsDone.GetBit(id) { //PartsDone is true when the partition has no txns left to replicate, or all txns have a local ts higher than the maximum common ts.
+				partCache = repl.currTxnCache[id]
+				firstEntryClk = partCache.Head().clk
+				compTs = firstEntryClk.GetPos(ourReplicaID)
+				if compTs < currTs {
+					partsForThisClk.Clear()
+					partsForThisClk.AddToEnd(id)
+					currTs, currClk = compTs, firstEntryClk
+				} else if compTs == currTs { //Add this partition
+					partsForThisClk.AddToEnd(id)
+				} //else: ignore, this partition does not belong to this txn.
+				/*clkCompare = firstEntryClk.Compare(currClk)
+				if clkCompare == clocksi.LowerTs { //Reset
+					partsForThisClk.Clear()
+					partsForThisClk.AddToEnd(id)
+					currClk = firstEntryClk
+				} else if clkCompare == clocksi.EqualTs { //Add this partition
+					partsForThisClk.AddToEnd(id)
+				} //else: ignore, this partition does not belong to this txn*/
 			}
-			partCache = repl.currTxnCache[id]
-			firstEntryClk = partCache.Head().clk
-			clkCompare = firstEntryClk.Compare(currClk)
-			if clkCompare == clocksi.LowerTs { //Reset
-				partsForThisClk.Clear()
-				partsForThisClk.AddToEnd(id)
-				currClk = firstEntryClk
-			} else if clkCompare == clocksi.EqualTs { //Add this partition
-				partsForThisClk.AddToEnd(id)
-			} //else: ignore, this partition does not belong to this txn
 		}
 
-		maxClkComp = currClk.Compare(repl.maxCommonClk)
-		/*if maxClkComp == clocksi.EqualTs || maxClkComp == clocksi.LowerTs { //This txn can be replicated
-			if currClk.IsEqualExceptForSelf(prevClk, ourReplicaID) { //Can merge together with current txn
-				nInGroup++
-				sliceP := partsForThisClk.ToSlice()
-				for _, partID := range sliceP {
-					partsForGroup.Set(partID)
-					partCache = repl.currTxnCache[partID]
-					repl.partUpdsBuf[partID].AppendAll(partCache.GetAndHideHead().upds)
-					if partCache.IsEmpty() {
-						next := repl.overflowTxnCache[partID].GetAndHideHead()
-						if next == nil {
-							partsDone.Set(partID)
-							nPartsDone++
-							repl.overflowTxnCache[partID].DeepClear() //Very fast to execute, as this is a slice of slices (and with few entries)
-							if nPartsDone == nParts {
-								done = true
-							}
-						} else {
-							repl.currTxnCache[partID] = tools.ToSliceWithHideable(next)
-						}
-						repl.logBuffersToReturn.Append(tools.Pair[int, tools.SliceWithHideable[PairClockUpdates]]{First: partID, Second: partCache})
-					} else {
-						repl.currTxnCache[partID] = partCache
-					}
-				}
-				if nInGroup == MAX_TXN_MERGE {
-					repl.prepareMergedTxnHelper(&partsForGroup, currClk, nInGroup, replyChan)
-					nInGroup = 0
-				}
-			} else if hasPrevClk { //Send previous (possibly merged) txn, start new one.
-				repl.prepareMergedTxnHelper(&partsForGroup, prevClk, nInGroup, replyChan)
-				nInGroup, prevClk = 1, currClk //Counting with the current txn (currClk)
-			} else { //We just started the cycle. Keep iterating and do nothing.
-				hasPrevClk, prevClk = true, currClk
-			}
-			partsForThisClk.Clear() //Clear the partitions for the next iteration
-			nIterations++
-			prevClk = currClk          //We always update prevClk, so that it matches the latest txn put in the group
-			if nIterations%1000 == 0 { //We check if some more partitions are already done (i.e., their next clk is too high).
-				for i := 0; i < nParts; i++ {
-					if !partsDone.GetBit(i) && !repl.currTxnCache[i].Get(0).clk.Copy().IsLowerOrEqual(repl.maxCommonClk) {
-						partsDone.Set(i)
-						nPartsDone++
-					}
-				}
-			}
-		} else {
-			done = true
-		}*/
-		if maxClkComp == clocksi.EqualTs || maxClkComp == clocksi.LowerTs { //This txn can be replicated
+		//maxClkComp = currClk.Compare(repl.maxCommonClk)
+		//if maxClkComp == clocksi.EqualTs || maxClkComp == clocksi.LowerTs { //This txn can be replicated
+		//if currClk.GetPos(ourReplicaID) <= maxCommonTs { //This txn can be replicated.
+		if currTs <= maxCommonTs { //This txn can be replicated.
 			//Can't merge together. We first send the previous (possibly merged) txn, and then start a new one.
 			//hasPrevClk ensures that on the first iteration we don't send an empty group (as at that time, there's not yet a proper prevClk)
-			if (!currClk.IsEqualExceptForSelf(prevClk, ourReplicaID) || nInGroup == MAX_TXN_MERGE) && hasPrevClk {
+			if (!currClk.IsEqualExceptForSelf(prevClk, ourReplicaID) || nInGroup == REPL_MAX_TXN_MERGE) && hasPrevClk {
 				repl.prepareMergedTxnHelper(&partsForGroup, prevClk, nInGroup, replyChan)
+				maxGroupSize = max(maxGroupSize, nInGroup)
 				nInGroup = 0
+				nGroups++
 			}
 			//Merge txn into the current (possibly new) group.
 			nInGroup++
 			sliceP := partsForThisClk.ToSlice()
+			nPartsDoneThisCycle := 0 //TODO: Remove, debug
 			for _, partID := range sliceP {
 				partsForGroup.Set(partID)
 				partCache = repl.currTxnCache[partID]
-				repl.partUpdsBuf[partID].AppendAll(partCache.GetAndHideHead().upds)
+				//TODO: UNDO, debug
+				last := partCache.GetAndHideHead()
+				if last.clk.GetPos(ourReplicaID) != currTs {
+					panic(fmt.Sprintf("[REPL][PrepareData]Error - adding in the same txn two partitions with different values for the clk of our replicaID. CurrTs: %d. PrevTs: %d. This partition's txn currTs: %d. Current clock: %s. This partition's clk: %s. Our replicaID: %d. PartID: %d. NPartsDoneThisCycle: %d\n",
+						currTs, prevTs, last.clk.GetPos(ourReplicaID), currClk.ToString(), last.clk.ToString(), ourReplicaID, partID, nPartsDoneThisCycle))
+				}
+				if hasPrevClk && last.clk.GetPos(ourReplicaID) < prevClk.GetPos(ourReplicaID) {
+					panic(fmt.Sprintf("[REPL][PrepareData]Error - current txn to replicate has a lower entry value for our replicaID than the previous txn!!! CurrTs: %d. PrevTs: %d. Curr txn clk: %s. Previous txn clk: %s. Our replicaID: %d. PartID: %d. NPartsDoneThisCycle: %d\n",
+						currTs, prevTs, last.clk.ToString(), prevClk.ToString(), ourReplicaID, partID, nPartsDoneThisCycle))
+				}
+				repl.partUpdsBuf[partID].AppendAll(last.upds)
+				//repl.partUpdsBuf[partID].AppendAll(partCache.GetAndHideHead().upds)
 				if partCache.IsEmpty() {
 					next := repl.overflowTxnCache[partID].GetAndHideHead()
 					if next == nil {
@@ -520,27 +686,35 @@ func (repl *Replicator) prepareData(replyChan chan tools.Pair[RemoteTxn, int]) {
 				} else {
 					repl.currTxnCache[partID] = partCache
 				}
+				nPartsDoneThisCycle++
 			}
-			hasPrevClk, prevClk = true, currClk //We always update prevClk, so that it matches the latest txn put in the group
-			partsForThisClk.Clear()             //Clear the partitions for the next iteration
+			hasPrevClk, prevClk, prevTs = true, currClk, currTs //We always update prevClk, so that it matches the latest txn put in the group
+			partsForThisClk.Clear()                             //Clear the partitions for the next iteration
 			nIterations++
-			if nIterations%1000 == 0 { //We check if some more partitions are already done (i.e., their next clk is too high).
+			if nIterations&0x3FF == 0 { //We check if some more partitions are already done (i.e., their next clk is too high) aproximately every 1024 iterations. Cheaper than doing %.
 				for i := 0; i < nParts; i++ {
-					if !partsDone.GetBit(i) && !repl.currTxnCache[i].Get(0).clk.Copy().IsLowerOrEqual(repl.maxCommonClk) {
+					//if !partsDone.GetBit(i) && !repl.currTxnCache[i].Get(0).clk.IsLowerOrEqual(repl.maxCommonClk) {
+					if !partsDone.GetBit(i) && repl.currTxnCache[i].Get(0).clk.GetPos(ourReplicaID) > maxCommonTs {
 						partsDone.Set(i)
 						nPartsDone++
 					}
 				}
 			}
 		} else {
+			currClk = prevClk //Just for printing purposes, so that the clock we print is the last one replicated.
 			done = true
 		}
 	}
 	//if hasPrevClk && nInGroup > 0 { //There's at least one txn that is OK to send.
 	if hasPrevClk { //There'll always be at least one txn left to send, as when iterating, the currentTxn is always added to the group after the check for prepareMergedTxnHelper.
 		repl.prepareMergedTxnHelper(&partsForGroup, prevClk, nInGroup, replyChan)
+		maxGroupSize = max(maxGroupSize, nInGroup)
+		nGroups++
 	}
-	//fmt.Printf("[REPL][PrepareData]Done preparing data. Total txns prepared: %d. All partitions finish? %d==%d. Max common clk: %s. Curr clk: %s.\n", nIterations, nPartsDone, nParts, repl.maxCommonClk.ToString(), currClk.ToString())
+	//fmt.Printf("[REPL][PrepareData]Done preparing data. Total txns prepared: %d. All partitions finish? %d==%d. Max common clk: %s. Curr clk: %s. Current time: %s\n", nIterations, nPartsDone, nParts, repl.maxCommonClk.ToString(), currClk.ToString(), time.Now().Format("15:04:05.000"))
+	end := time.Now()
+	fmt.Printf("[REPL][PrepareData]Done preparing data. Total txns prepared: %d. Total groups prepared: %d. Biggest group size: %d. All partitions finish? %d==%d. Max common ts: %d. Our replicaID: %d. Last clock replicated: %s. Current time: %s. Time taken: %dms.\n",
+		nIterations, nGroups, maxGroupSize, nPartsDone, nParts, maxCommonTs, repl.replicaID, currClk.ToString(), end.Format("15:04:05.000"), (end.UnixNano()-startTs)/1000000)
 	replyChan <- tools.Pair[RemoteTxn, int]{Second: 0} //Indicates that we have sent all txns for this cycle.
 }
 
@@ -549,7 +723,7 @@ func (repl *Replicator) prepareMergedTxnHelper(bitset *tools.BitSet, prevClk clo
 	txns := make(map[int][]crdt.UpdateObjectParams, partsForGroup.GetNBitsSet(int(nGoRoutines)))
 	for i := 0; i < int(nGoRoutines); i++ {
 		if partsForGroup.GetBit(i) {
-			txns[i] = repl.partUpdsBuf[i].Copy().ToSlice()
+			txns[i] = repl.partUpdsBuf[i].CopyGoSlice()
 			repl.partUpdsBuf[i].Clear()
 		}
 	}
@@ -571,11 +745,20 @@ func (repl *Replicator) returnBuffersToLog() {
 func (repl *Replicator) returnBuffersToLogHelper(buffers []tools.Pair[int, tools.SliceWithHideable[PairClockUpdates]]) {
 	for _, buffer := range buffers {
 		buffer.Second.DeepClear()
+		//Sanity check is OK.
+		/*fullSlice := buffer.Second.ToFullSlice()
+		if len(fullSlice) != cap(fullSlice) {
+			panic(fmt.Sprintf("[REPL][returnBuffersToLogHelper]Broken mechanisms of SliceWithHideable: len of full slice and cap don't match. Len/cap: %d, %d.\n", len(fullSlice), cap(fullSlice)))
+		}
+		for i, entry := range fullSlice {
+			if entry.clk != nil || entry.upds != nil {
+				panic(fmt.Sprintf("[REPL][returnBuffersToLogHelper]Broken DeepClear() of SliceWithHideable: found an element that isn't nil. Index: %d. Clk: %v. Upds: %v.\n", i, entry.clk, entry.upds))
+			}
+		}*/
+		//fmt.Printf("[REPL][returnBuffersToLogHelper]Sanity check of buffer DeepClear is OK. Returning buf with len, hidden len, cap: %d, %d, %d.\n", buffer.Second.Len(), buffer.Second.LenHiddenHead(), buffer.Second.Cap())
 		repl.localPartitions[buffer.First].SendLoggerRequest(LoggerRequest{LogRequestArgs: LogBufferReturnArgs{Buf: buffer.Second.ToFullSlice()}})
 	}
 }
-
-//TODO: Receiving.
 
 func (repl *Replicator) receiveRemoteTxns() {
 	fmt.Println("[REPL]Ready to receive requests from RabbitMQ.")
@@ -608,7 +791,13 @@ func (repl *Replicator) handleRemoteRequest(remoteReq ReplicatorMsg) {
 		if repl.waitFor == 0 {
 			repl.allDone = true
 			fmt.Println("[REPL]All IDs received, sending signal to TM at", time.Now().Format("15:04:05.000"))
-			go repl.replicateCycle()
+			//go repl.replicateCycle()
+			if !repl.replicationStarted.Load() {
+				ok := repl.replicationStarted.CompareAndSwap(false, true)
+				if ok {
+					go repl.doReplication()
+				}
+			}
 			repl.tm.SendRemoteMsg(TMStart{})
 		}
 	case RemoteTrigger:
@@ -708,13 +897,13 @@ func (repl *Replicator) createConnAndReplyEmpty(req *Join) {
 }
 
 func (repl *Replicator) joinGroup() {
-	fmt.Println("joinGroup")
+	fmt.Println("[REPL]joinGroup")
 	go repl.queueRemoteRequests()
 	repl.waitFor = len(repl.remote.conns)
 	crdt.NReplicas = int32(repl.waitFor + 1)
 	repl.holdReplyJoins = make([]*ReplyJoin, repl.waitFor)
-	fmt.Println("Requesting remoteGroup to send join")
-	repl.remote.SendJoin(repl.buckets, repl.replicaID)
+	fmt.Println("[REPL]Requesting remoteGroup to send join")
+	go repl.remote.SendJoin(repl.buckets, repl.replicaID)
 }
 
 // While the replica is in joining process, this method is used to queue any non-join related msg to a queue.

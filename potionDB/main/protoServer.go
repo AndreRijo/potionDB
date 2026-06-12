@@ -83,6 +83,8 @@ const (
 	PROTO_TEST_SINGLE_CRDT       = 4
 	PROTO_TEST_SINGLE_STATE      = 5
 	PROTO_TEST_SINGLE_MARSHALLED = 6
+	START_CLIENT_BUF_SIZE        = 1024 //1KB.
+
 )
 
 var trash []byte
@@ -97,7 +99,9 @@ func main() {
 	go checkSigtermUntilStartupFinishes(cancelChan, readyChan)
 	//go forceGC()
 
-	rand.Seed(time.Now().UTC().UnixNano())
+	currTs := time.Now().UTC().UnixNano()
+	rand.Seed(currTs)
+	rng := rand.New(rand.NewSource(currTs))
 	configs := loadConfigs()
 	trash = make([]byte, configs.GetIntConfig("initialMem", 0)) //TODO: Maybe can just clear this after a short while.
 	floatSize := float64(len(trash))
@@ -118,13 +122,13 @@ func main() {
 	shared.ReplicaID = id
 
 	antidote.SetVMToUse()
-	tm := antidote.Initialize(id)
-	sqlP := antidote.InitializeSQLProcessor(tm)
-	go handleTC(configs)
-	time.Sleep(150 * time.Millisecond)
-
 	doDataload := configs.GetBoolConfig(DO_TPCH_DATALOAD, false)
 	fmt.Println(configs.GetConfig(DO_TPCH_DATALOAD))
+	tm := antidote.Initialize(id, doDataload)
+	sqlP := antidote.InitializeSQLProcessor(tm)
+	go handleTC(configs)
+	//time.Sleep(150 * time.Millisecond) //Should no longer be necessary.
+
 	dp := antidote.DataloadParameters{}
 	if doDataload {
 		sf, dataLoc, region := configs.GetFloatConfig("scale", 1.0), configs.GetConfig("dataLoc"), int8(configs.GetIntConfig("region", -1))
@@ -135,7 +139,8 @@ func main() {
 				IsGlobal: configs.GetBoolConfig("isGlobal", true), IndexFullData: configs.GetBoolConfig("indexFullData", true),
 				UseTopKAll: configs.GetBoolConfig("useTopKAll", true), UseTopSum: configs.GetBoolConfig("useTopSum", true),
 				//QueryNumbers: strings.Split(configs.GetOrDefault("queryNumbers", "3 5 11 14 15 18"), " "),
-				QueryNumbers: strings.Split(configs.GetOrDefault("queryNumbers", "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22"), " "),
+				QueryNumbers:  strings.Split(configs.GetOrDefault("queryNumbers", "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22"), " "),
+				DoesIndexLoad: doIndexload,
 			}
 			fmt.Println("[PS]Doing dataload and indexload. QueryNumbers: ", dp.QueryNumbers)
 			if protobufTestMode > 0 { //Pretend to be region 0 so that indexes still load
@@ -153,7 +158,7 @@ func main() {
 	connChan := make(chan net.Conn, 500)
 	listenerChans := make([]chan bool, len(ports))
 
-	time.Sleep(250 * time.Millisecond)
+	//time.Sleep(250 * time.Millisecond)
 	//Start listeners early but only start processing once TM is ready
 	//This is helpful to speed up the dataloading process and initial creation of S2S connections.
 	for i, port := range ports {
@@ -184,17 +189,18 @@ func main() {
 	//stopProfiling(configs)
 
 	//startListener(ports[0], id, tm)
+	txnDescSize := tm.GetClkByteSize() + 8 //+8 for the txnId in the descriptor
 
 	nConns, done := len(connChan), false
 	for ; nConns < 0; nConns-- {
 		conn := <-connChan
-		go processConnection(conn, tm, sqlP, id)
+		go processConnection(conn, tm, sqlP, id, txnDescSize, antidote.ClientId(rng.Uint64()))
 	}
 	timer := time.NewTimer(3 * time.Second)
 	for !done { //Try again in case we receive some late connection attempt
 		select {
 		case conn := <-connChan:
-			go processConnection(conn, tm, sqlP, id)
+			go processConnection(conn, tm, sqlP, id, txnDescSize, antidote.ClientId(rng.Uint64()))
 		case <-timer.C:
 			done = true
 		}
@@ -202,6 +208,7 @@ func main() {
 
 	if protobufTestMode > 0 {
 		time.Sleep(15 * time.Second)
+		stateBuf := crdt.NewBufsToReturn()
 		crdtTestMap, stateTestMap, marshallTestMap = make(map[uint64]crdt.CRDT), make(map[uint64]crdt.State), make(map[uint64][]byte)
 		ic := antidote.InternalClient{}.Initialize(tm)
 		//One CRDT per year + region.
@@ -221,7 +228,8 @@ func main() {
 			crdtTestMap[getHash(reads[i])] = currCRDT
 			state := currCRDT.Read(crdt.StateReadArguments{}, []crdt.UpdateArguments{})
 			stateTestMap[getHash(reads[i])] = state
-			marshallTestMap[getHash(reads[i])] = antidote.GetProtoMarshal(antidote.CreateStaticReadResp([]crdt.State{state}, txnId, clientClk))
+			marshallTestMap[getHash(reads[i])] = antidote.GetProtoMarshal(antidote.CreateStaticReadResp([]crdt.State{state}, txnId, clientClk, stateBuf))
+			stateBuf.ReturnBufs()
 		}
 		firstKeyHash := getHash(reads[0])
 		testCRDT, testState, marshalledTestData = crdtTestMap[firstKeyHash], stateTestMap[firstKeyHash], marshallTestMap[firstKeyHash]
@@ -265,9 +273,20 @@ func main() {
 	fmt.Printf("[PS]Listening for shutdown signal at %s...\n", time.Now().String())
 	sig := <-cancelChan
 	fmt.Printf("[PS]Caught signal %v at %s: sending shut down signal to TM.\n", sig, time.Now().String())
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 	start := time.Now().UnixNano()
-	tm.ShutDown()
+	shutDownChan := make(chan struct{}, 1)
+	go func() {
+		tm.ShutDown()
+		shutDownChan <- struct{}{}
+	}()
+	select {
+	case <-shutDownChan:
+
+	case <-time.After(2 * time.Second):
+		fmt.Printf("[PS]Internals did not shut down in time, a connection may be stuck. Forcing shutdown.\n")
+		os.Exit(1)
+	}
 	end := time.Now().UnixNano()
 	diffMs := (end - start) / int64(time.Millisecond)
 	if diffMs < 500 {
@@ -285,11 +304,13 @@ func listenBeforePotionDBStart(port string, id uint16, tm *antidote.TransactionM
 	utilities.CheckErr(utilities.PORT_ERROR, err)
 	waitingConns := make([]net.Conn, 0, 10)
 	tmReady := false
+	rng := rand.New(rand.NewSource(time.Now().UTC().UnixNano()))
 	for !tmReady {
 		select {
 		case tmReady = <-ready:
+			txnDescSize := tm.GetClkByteSize() + 8 //+8 for the txnId in the descriptor
 			for _, conn := range waitingConns {
-				go processConnection(conn, tm, sqlP, id)
+				go processConnection(conn, tm, sqlP, id, txnDescSize, antidote.ClientId(rng.Uint64()))
 			}
 		default:
 			conn, err := server.Accept()
@@ -310,13 +331,14 @@ func startS2SListener(port string, id uint16, tm *antidote.TransactionManager) {
 	//Stop listening to port on shutdown
 	defer server.Close()
 	fmt.Printf("[PS]Started S2S-only listener at port %s at %s.\n", port, time.Now().Format("15:04:05.000"))
+	rng := rand.New(rand.NewSource(time.Now().UTC().UnixNano()))
 
 	for {
 		//fmt.Printf("[PS]Waiting for S2S connection on port %s...\n", port)
 		conn, err := server.Accept()
 		//fmt.Printf("[PS]Accepted S2S connection on port %s...\n", port)
 		utilities.CheckErr(utilities.NEW_CONN_ERROR, err)
-		go processS2SConnection(conn, tm, id)
+		go processS2SConnection(conn, tm, id, antidote.ClientId(rng.Uint64()))
 	}
 }
 
@@ -327,14 +349,16 @@ func startListener(port string, id uint16, tm *antidote.TransactionManager, conn
 	defer server.Close()
 	ready := false
 	fmt.Printf("[PS]Started listener at port %s at %s.\n", port, time.Now().Format("15:04:05.000"))
+	var txnDescSize int
+	rng := rand.New(rand.NewSource(time.Now().UTC().UnixNano()))
 
 	for !ready {
 		conn, err := server.Accept()
 		utilities.CheckErr(utilities.NEW_CONN_ERROR, err)
 		select {
 		case <-listenerChan:
-			ready = true
-			go processConnection(conn, tm, sqlP, id)
+			ready, txnDescSize = true, tm.GetClkByteSize()+8 //+8 for the txnId in the descriptor
+			go processConnection(conn, tm, sqlP, id, txnDescSize, antidote.ClientId(rng.Uint64()))
 		default:
 			connChan <- conn
 		}
@@ -343,7 +367,7 @@ func startListener(port string, id uint16, tm *antidote.TransactionManager, conn
 	for {
 		conn, err := server.Accept()
 		utilities.CheckErr(utilities.NEW_CONN_ERROR, err)
-		go processConnection(conn, tm, sqlP, id)
+		go processConnection(conn, tm, sqlP, id, txnDescSize, antidote.ClientId(rng.Uint64()))
 	}
 }
 
@@ -365,14 +389,22 @@ func startListener(port string, id int16, tm *antidote.TransactionManager) {
 }
 */
 
-func processS2SConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID uint16) {
+/*func processS2SConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID uint16) {
 	defer conn.Close()
 	tmChan := tm.CreateClientHandler(antidote.TM_SERVER_CLIENT)
 	var s2sChan chan antidote.TMS2SReply
+	buf := make([]byte, START_CLIENT_BUF_SIZE)
+	var protoType byte
+	var protobuf pb.Message
+	var err error
+	txnDescSize := -1
+	var clientBufs *antidote.ClientBuffers
+	stateBuf := crdt.NewBufsToReturn()
 
 	for {
 		//fmt.Printf("[PS][S2SConnection]Waiting for proto,\n")
-		protoType, protobuf, err := antidote.ReceiveProto(conn)
+		//protoType, protobuf, err := antidote.ReceiveProto(conn)
+		protoType, protobuf, err, buf = antidote.ReceiveProtoReusableBufferVT(conn, buf)
 		//fmt.Printf("[PS][S2SConnection]Received proto %v\n", protoType)
 		if err != nil {
 			conn.Close()
@@ -381,14 +413,42 @@ func processS2SConnection(conn net.Conn, tm *antidote.TransactionManager, replic
 		switch protoType {
 		case antidote.ServerConnReplicaID:
 			//fmt.Println("[PS][S2SConnection]Received ServerConnReplicaID")
-			s2sChan = handleServerConnReplicaID(protobuf.(*proto.ApbServerConnReplicaID), tmChan, conn)
+			s2sChan = handleServerConnReplicaID(protobuf.(*proto.ApbServerConnReplicaID), tmChan, conn, stateBuf, clientBufs)
 			//fmt.Println("[PS][S2SConnection]Finished processing ServerConnReplicaID")
 		case antidote.S2S:
-			handleServerToServer(protobuf.(*proto.S2SWrapper), tmChan, s2sChan, conn, tm)
+			if txnDescSize == -1 {
+				txnDescSize = tm.GetClkByteSize() + 8 //+8 for the txnId in the descriptor
+				clientBufs = antidote.InitializeClientBuffers(txnDescSize)
+			}
+			handleServerToServer(protobuf.(*proto.S2SWrapper), tmChan, s2sChan, conn, tm, stateBuf, clientBufs)
 		default:
 			fmt.Println("[WARNING][PS][S2SConnection]Received unknown proto, ignored... sort of")
 		}
 	}
+}*/
+
+func processS2SConnection(conn net.Conn, tm *antidote.TransactionManager, replicaID uint16, clientId antidote.ClientId) {
+	reqChan, replyChan := tm.CreateClientS2SHandler()
+	var protoType byte
+	var protobuf pb.Message
+	var err error
+	inBuf, outBuf := make([]byte, START_CLIENT_BUF_SIZE), make([]byte, START_CLIENT_BUF_SIZE)
+	stateBuf := crdt.NewBufsToReturn()
+
+	protoType, protobuf, err, inBuf = antidote.ReceiveProtoReusableBufferVT(conn, inBuf)
+	if err != nil {
+		fmt.Printf("[PS][processS2SConnection]Error on receiving early S2S connection - maybe the sender server crashed? Error: %v. Closing connection.\n", err)
+		conn.Close()
+		return
+	}
+	txnDescSize := tm.GetClkByteSize() + 8
+	if txnDescSize == 8 { //Most likely the clock size is unknown at this point, as we're discovering the existing replicas. Set buffer to a "big enough" size.
+		txnDescSize = 200
+	}
+	clientBuf := antidote.InitializeClientBuffers(txnDescSize)
+	*clientBuf.PbBuffers = proto.PbBuffers{}
+	clientBuf.S2SInit()
+	handleS2SConn(conn, reqChan, replyChan, clientId, protoType, protobuf, inBuf, outBuf, stateBuf, clientBuf)
 }
 
 /*
@@ -399,22 +459,29 @@ Note that this is the same interaction type as in antidote.
 
 conn - the TCP connection between the client and this server.
 */
-func processConnection(conn net.Conn, tm *antidote.TransactionManager, sqlP *antidote.SQLProcessor, replicaID uint16) {
+func processConnection(conn net.Conn, tm *antidote.TransactionManager, sqlP *antidote.SQLProcessor, replicaID uint16, txnDescSize int, clientId antidote.ClientId) {
 	utilities.FancyDebugPrint(utilities.PROTO_PRINT, replicaID, "Accepted connection.")
 	defer conn.Close()
-	tmChan := tm.CreateClientHandler(antidote.TM_NORMAL_CLIENT)
-	//TODO: Change this to a random ID generated inside the transaction. This ID should be different from transaction to transaction
-	//The current solution can give problems in the Materializer when a commited transaction is put on hold and another transaction from the same client arrives
-	var clientId antidote.ClientId = antidote.ClientId(rand.Uint64())
+	tmChan := tm.CreateClientHandler()
 	clientCI := antidote.CodingInfo{}.Initialize()
 
-	var replyType byte = 0
-	var reply pb.Message = nil
-	var s2sChan chan antidote.TMS2SReply = nil //Used if this is a server to server communication
+	var replyType, protoType byte = 0, 0
+	var reply, protobuf pb.Message = nil, nil
+	//var s2sChan chan antidote.TMS2SReply = nil //Used if this is a server to server communication
+	var err error
+	isS2SConn := false //If we detect this to be a S2S (Server-To-Server) conn, we will later lock into methods that only handle S2S requests.
+
+	//Two buffers are needed, as some reads may re-use the reads' data as part of the reply. Namely with unsafe.
+	inBuf, outBuf := make([]byte, START_CLIENT_BUF_SIZE), make([]byte, START_CLIENT_BUF_SIZE) //Buffers for reading from and writing to the client. Re-usable to avoid recurrent allocs and GC pressure.
+	ignore(outBuf)
+	//buf := make([]byte, START_CLIENT_BUF_SIZE)         //Re-usable buffer used by both ReceiveProtoReusableBuffer and SendProtoReusable buffer, to avoid recurrent allocs and GC pressure for data sending/receiving
+	stateBuf := crdt.NewBufsToReturn()                          //Collects large buffers that are used by CRDT states. These buffers should be returned after the states are Marshalled (or after sent to the client).
+	clientBufs := antidote.InitializeClientBuffers(txnDescSize) //Declaring some re-usable reply protobufs, to reduce GC pressure.
 
 	if protobufTestMode == PROTO_TEST_MARSHALLED_MAP || protobufTestMode == PROTO_TEST_SINGLE_MARSHALLED {
 		for {
-			protoType, protobuf, err := antidote.ReceiveProto(conn)
+			//protoType, protobuf, err := antidote.ReceiveProto(conn)
+			protoType, protobuf, err, inBuf = antidote.ReceiveProtoReusableBufferVT(conn, inBuf)
 			if err != nil {
 				conn.Close()
 				return
@@ -444,10 +511,25 @@ func processConnection(conn net.Conn, tm *antidote.TransactionManager, sqlP *ant
 		}
 	}
 
+	//queryResult := make([]pb.Message, 23) //TODO: Temporary, remove.
+	//queryResult := make([][]byte, 23)
+	//queryResult := make([]tools.Triple[[]crdt.State, antidote.TransactionId, clocksi.Timestamp], 23)
+	//var stateReply tools.Triple[[]crdt.State, antidote.TransactionId, clocksi.Timestamp] //Temporary.
+	//nQueryResult := 0
+	//var wasNil bool
+	//targetQuery := 23
+
 	for {
 		//Read protobuf
 		//utilities.FancyDebugPrint(utilities.PROTO_PRINT, replicaID, "Waiting for client's request...")
-		protoType, protobuf, err := antidote.ReceiveProto(conn)
+		//TODO: UNDO.
+		//protoType, protobuf, err := antidote.ReceiveProto(conn)
+		//protoType, protobuf, err, inBuf = antidote.ReceiveProtoReusableBufferVT(conn, inBuf)
+		//protoType, protobuf, err := antidote.ReceiveProtoVT(conn)
+		//inBuf = make([]byte, START_CLIENT_BUF_SIZE) //TODO: Remove.
+		protoType, protobuf, err, inBuf = antidote.ReceiveProtoReusableBufferVTClientBuf(conn, inBuf, clientBufs)
+		//TODO: Remove, only for debugging.
+		start := time.Now().UnixNano()
 		//This works in MacOS, but not on windows. For now we'll add any error here
 		//if err == io.EOF
 		if err != nil {
@@ -471,15 +553,16 @@ func processConnection(conn net.Conn, tm *antidote.TransactionManager, sqlP *ant
 		}
 		utilities.CheckErr(utilities.NETWORK_READ_ERROR, err)
 
+		//if nQueryResult < targetQuery {
 		switch protoType {
 		case antidote.ReadObjs:
 			utilities.FancyDebugPrint(utilities.PROTO_PRINT, replicaID, "Received proto of type ApbReadObjects")
 			replyType = antidote.ReadObjsReply
-			reply = handleReadObjects(protobuf.(*proto.ApbReadObjects), tmChan, clientId)
+			reply = handleReadObjects(protobuf.(*proto.ApbReadObjects), tmChan, clientId, stateBuf)
 		case antidote.Read:
 			utilities.FancyDebugPrint(utilities.PROTO_PRINT, replicaID, "Received proto of type ApbRead")
 			replyType = antidote.ReadObjsReply
-			reply = handleRead(protobuf.(*proto.ApbRead), tmChan, clientId)
+			reply = handleRead(protobuf.(*proto.ApbRead), tmChan, clientId, stateBuf)
 		case antidote.UpdateObjs:
 			utilities.FancyDebugPrint(utilities.PROTO_PRINT, replicaID, "Received proto of type ApbUpdateObjects")
 			replyType = antidote.OpReply
@@ -499,29 +582,35 @@ func processConnection(conn net.Conn, tm *antidote.TransactionManager, sqlP *ant
 		case antidote.StaticUpdateObjs:
 			utilities.FancyDebugPrint(utilities.PROTO_PRINT, replicaID, "Received proto of type ApbStaticUpdateObjects")
 			replyType = antidote.CommitTransReply
-			reply = handleStaticUpdateObjects(protobuf.(*proto.ApbStaticUpdateObjects), tmChan, clientId)
+			reply = handleStaticUpdateObjects(protobuf.(*proto.ApbStaticUpdateObjects), tmChan, clientId, clientBufs)
 		case antidote.StaticReadObjs:
 			utilities.FancyDebugPrint(utilities.PROTO_PRINT, replicaID, "Received proto of type ApbStaticReadObjects")
 			replyType = antidote.StaticReadObjsReply
 			//antidote.SendProtoMarshal(replyType, defaultTopKMarshal, conn)
 			//continue
 			//reply = defaultTopKProto
+			//if nQueryResult < targetQuery {
 			if protobufTestMode > 0 {
-				reply = handleProtoTestRead(protobuf, protoType)
+				reply = handleProtoTestRead(protobuf, protoType, stateBuf)
 			} else {
-				reply = handleStaticReadObjects(protobuf.(*proto.ApbStaticReadObjects), tmChan, clientId)
+				reply = handleStaticReadObjects(protobuf.(*proto.ApbStaticReadObjects), tmChan, clientId, stateBuf, clientBufs)
+				//stateReply = handleStaticReadObjectsDebug(protobuf.(*proto.ApbStaticReadObjects), tmChan, clientId)
 			}
+			//}
 		case antidote.StaticRead:
 			utilities.FancyDebugPrint(utilities.PROTO_PRINT, replicaID, "Received proto of type ApbStaticRead")
 			replyType = antidote.StaticReadObjsReply
 			//antidote.SendProtoMarshal(replyType, defaultTopKMarshal, conn)
 			//continue
 			//reply = defaultTopKProto
+			//if nQueryResult < targetQuery {
 			if protobufTestMode > 0 {
-				reply = handleProtoTestRead(protobuf, protoType)
+				reply = handleProtoTestRead(protobuf, protoType, stateBuf)
 			} else {
-				reply = handleStaticRead(protobuf.(*proto.ApbStaticRead), tmChan, clientId)
+				reply = handleStaticRead(protobuf.(*proto.ApbStaticRead), tmChan, clientId, stateBuf, clientBufs)
+				//stateReply = handleStaticReadDebug(protobuf.(*proto.ApbStaticRead), tmChan, clientId)
 			}
+			//}
 		case antidote.NewTrigger:
 			utilities.FancyDebugPrint(utilities.PROTO_PRINT, replicaID, "Received proto of type ApbNewTrigger")
 			replyType = antidote.NewTriggerReply
@@ -534,15 +623,22 @@ func processConnection(conn net.Conn, tm *antidote.TransactionManager, sqlP *ant
 			fmt.Println("Starting to reset PotionDB")
 			replyType = antidote.ResetServerReply
 			reply = handleResetServer(tm)
-		case antidote.ServerConn:
-			s2sChan = handleServerConn(tmChan, conn)
-			continue
-		case antidote.S2S:
-			handleServerToServer(protobuf.(*proto.S2SWrapper), tmChan, s2sChan, conn, tm)
+		/*case antidote.ServerConn:
+			s2sChan = handleServerConn(tmChan, conn, stateBuf, clientBufs)
 			continue
 		case antidote.ServerConnReplicaID:
-			s2sChan = handleServerConnReplicaID(protobuf.(*proto.ApbServerConnReplicaID), tmChan, conn)
-			continue
+			s2sChan = handleServerConnReplicaID(protobuf.(*proto.ApbServerConnReplicaID), tmChan, conn, stateBuf, clientBufs)
+			continue*/
+		case antidote.ServerConn, antidote.ServerConnReplicaID:
+			//From now on, the connection will be treated as S2S-only and managed in handleNewS2SConn.
+			upgradeToS2SConn(conn, tm, tmChan, clientId, protoType, protobuf, inBuf, outBuf, stateBuf, clientBufs)
+			isS2SConn = true
+			//If we ever break out from there, it means the connection was closed. We jump to the finallizer.
+			goto S2SFinallizer
+		//No longer possible here.
+		/*case antidote.S2S:
+		handleServerToServer(protobuf.(*proto.S2SWrapper), tmChan, s2sChan, conn, tm, stateBuf, clientBufs)
+		continue*/
 		case antidote.SQLString:
 			handleSQLString(protobuf.(*proto.ApbStringSQL), tmChan, sqlP, clientId)
 			continue //TODO
@@ -552,25 +648,175 @@ func processConnection(conn net.Conn, tm *antidote.TransactionManager, sqlP *ant
 		case antidote.MultiConnect:
 			nClients := int(*protobuf.(*proto.ApbMultiClientConnect).NClients)
 			channels, replyChan := tm.UpgradeHandlerToMultiClient(tmChan, nClients)
-			handleMultiClient(conn, channels, replyChan, nClients, clientId)
+			handleMultiClient(conn, channels, replyChan, nClients, clientId, txnDescSize)
 			return //If we ever get here, it means the connection was closed and we should just return gracefully.
 		default:
 			utilities.FancyErrPrint(utilities.PROTO_PRINT, replicaID, "Received unknown proto, ignored... sort of")
-			fmt.Println("I don't know how to handle this proto", protoType)
+			fmt.Println("[PS]I don't know how to handle this proto", protoType)
+			panic("[PS]Unknown proto type received. Code: " + strconv.Itoa(int(protoType)))
 		}
-		utilities.FancyDebugPrint(utilities.PROTO_PRINT, replicaID, "Sending reply proto")
-		if reply == nil {
-			fmt.Println("[ProtoServer]Warning - Nil reply!")
-		}
+		//utilities.FancyDebugPrint(utilities.PROTO_PRINT, replicaID, "Sending reply proto")
+		//}
 		//tsStart := time.Now().UnixNano()
-		err = antidote.SendProtoNoCheck(replyType, reply, conn)
+		//err = antidote.SendProtoNoCheck(replyType, reply, conn)
+		/*if replyType == antidote.StaticReadObjsReply { //TODO: Tmp, remove
+		var apbBoundObj *proto.ApbBoundObject
+		var apbBoundKey []byte
+		if protoType == antidote.StaticRead {
+			apbBoundObj = protobuf.(*proto.ApbStaticRead).GetPartialreads()[0].GetObject()
+		} else {
+			apbBoundObj = protobuf.(*proto.ApbStaticReadObjects).GetObjects()[0]
+		}
+		apbBoundKey = apbBoundObj.GetKey()
+		var readResultProto pb.Message
+		//var readResultProto []byte
+		//var readResultProto tools.Triple[[]crdt.State, antidote.TransactionId, clocksi.Timestamp]
+		var protoPos byte
+		//Q1 is safe, it's literally only Q1.
+		//Q2 can be 20~24 (region) + typesSize (0~50). TopK
+		//Q20 then has a 4 digits year.
+		//Q21 will have nats (00-24). TopSum
+		//Q22 has two: one of Q22+region, another of q22AVG + region.
+		//Others is straightforward.
+		firstDigit := apbBoundKey[1] //[0] is 'q'
+		if (firstDigit >= '3' && firstDigit <= '9') || (firstDigit == '1' && len(apbBoundKey) == 2) {
+			protoPos = firstDigit - '1' //we take away '1', as queries start on '1', but the slice starts at 0.
+		} else if firstDigit == '1' { //Q10-Q19, just check 2nd digit
+			protoPos = 9 + (apbBoundKey[2] - '0') //Q10 will be on 9 (as Q1 is on 0)
+		} else { //firstDigit is '2'. Cases: Q2, Q20, Q21, Q22.
+			//Q2 is 4 to 5 length.
+			//Q20 is 7 length.
+			//Q21 is 5 length always.
+			//Q22 is always 4 length. Q22AVG is always 7 length.
+			if len(apbBoundKey) == 7 { //Q22 AVG or Q20. Check 'A'
+				if apbBoundKey[3] == 'A' { //Q22 AVG
+					protoPos = 22
+				} else { //Q20
+					protoPos = 19
+				}
+			} else { //Q2, Q21 or Q22. The length isn't enough to conclude. Numbers also aren't: they can overlap. Have to look at the CRDTType.
+				//Example overlap: Q21 with nat 10: Q2110. Q2 with region 1, typeSize 10: Q2110.
+				crdtType := apbBoundObj.GetType()
+				if crdtType == proto.CRDTType_TOPK { //Q2
+					protoPos = 1
+				} else if crdtType == proto.CRDTType_TOPSUM { //Q21
+					protoPos = 20
+				} else { //Q22.
+					protoPos = 21
+				}
+			}
+		}
+		readResultProto = queryResult[protoPos]
+		wasNil = (readResultProto == nil)
+		/*if readResultProto.First == nil {
+			readResultProto.First, readResultProto.Second, readResultProto.Third = stateReply.First, stateReply.Second, stateReply.Third
+			queryResult[protoPos] = readResultProto
+			nQueryResult++
+		}
+		reply = antidote.CreateStaticReadResp(readResultProto.First, readResultProto.Second, readResultProto.Third, stateBuf)*/ /*
+			if readResultProto == nil {
+				readResultProto = antidote.CreateStaticReadResp(stateReply.First, stateReply.Second, stateReply.Third, stateBuf)
+				queryResult[protoPos] = readResultProto
+				nQueryResult++
+			}
+			reply = readResultProto*/
+		/*if readResultProto == nil {
+			apb := antidote.CreateStaticReadResp(stateReply.First, stateReply.Second, stateReply.Third, stateBuf)
+			reply = apb
+			size := apb.SizeVT() + 5
+			buf := make([]byte, size)
+			apb.MarshalToSizedBufferVT(buf[5:])
+			binary.BigEndian.PutUint32(buf[0:4], uint32(size-4)) //include protoType.
+			buf[4] = replyType
+			readResultProto = buf
+			queryResult[protoPos] = readResultProto
+			nQueryResult++
+		}
+		//reply = readResultProto
+		_, err = conn.Write(readResultProto)
 		if err != nil {
 			conn.Close()
-			fmt.Printf("[ProtoServer]Error on sending proto to client: %s. Closing connection.\n", err)
+			fmt.Printf("[PS]Error on sending proto to client: %s. Closing connection.\n", err)
+			return
+		}*/
+		/*if !wasNil {
+				collectBufsFromState(stateReply.First, stateBuf) //This is only needed when we don't convert to protobufs, as it's when we do this conversion that we mark the buffers for re-use.
+			}
+			//stateBuf.ReturnBufs() //Uncomment this for when storing directly the byte buf.
+			//continue //Uncomment this for when storing directly the byte buf.
+		}*/
+		//ignore(wasNil)
+		/*staticRead, ok := reply.(*proto.ApbStaticReadObjectsResp)
+		if ok {
+			objs := staticRead.Objects
+			if len(objs.Objects) == 2 {
+				if objs.Objects[0].GetPartread().GetMap() == nil {
+					fmt.Printf("[PS]Q22 protobuf detected, but it's first phase: ignoring.")
+				} else {
+					fmt.Printf("[PS]Q22 protobuf reply detected.\n")
+					fmt.Printf("[PS]First object: %+v.\n", objs.Objects[0])
+					fmt.Printf("[PS]Second object: %+v.\n", objs.Objects[1])
+					//buf := make([]byte, staticRead.SizeVT())
+					outBuf = outBuf[:staticRead.SizeVT()]
+					for i := 0; i < len(outBuf); i++ {
+						outBuf[i] = 0
+					}
+					nWritten, err := staticRead.MarshalToSizedBufferVT(outBuf)
+					if err != nil {
+						fmt.Printf("[PS]Error on marshalling Q22 reply: %s\n", err)
+					}
+					if nWritten != len(outBuf) {
+						fmt.Printf("[PS]Error on marshalling Q22 reply: marshalled size %d does not match expected size %d\n", nWritten, len(outBuf))
+					}
+					newProto := (&proto.ApbStaticReadObjectsResp{})
+					err = newProto.UnmarshalVTUnsafe(outBuf)
+					if err != nil {
+						fmt.Printf("[PS]Error on unmarshalling Q22 reply: %s\n", err)
+					}
+					fmt.Printf("[PS](VT)Marshalled and unmarshalled Q22 reply.\n")
+					firstP, secondP := newProto.Objects.Objects[0].GetPartread().GetMap().Getvalues.GetValues(), newProto.Objects.Objects[1].GetPartread().GetMap().Getvalues.GetValues()
+					fmt.Printf("[PS]First object: (len %d) %+v.\n", len(firstP), newProto.Objects.Objects[0])
+					fmt.Printf("[PS]Second object: (len %d) %+v.\n", len(secondP), newProto.Objects.Objects[1])
+					normalUnmP := (&proto.ApbStaticReadObjectsResp{})
+					err = pb.Unmarshal(outBuf, normalUnmP)
+					if err != nil {
+						fmt.Printf("[PS]Error on normal unmarshalling Q22 reply: %s\n", err)
+					}
+					fmt.Printf("[PS](Google PB)Normally unmarshalled Q22 reply.\n")
+					firstP, secondP = normalUnmP.Objects.Objects[0].GetPartread().GetMap().Getvalues.GetValues(), normalUnmP.Objects.Objects[1].GetPartread().GetMap().Getvalues.GetValues()
+					fmt.Printf("[PS]First object: (len %d) %+v.\n", len(firstP), normalUnmP.Objects.Objects[0])
+					fmt.Printf("[PS]Second object: (len %d) %+v.\n", len(secondP), normalUnmP.Objects.Objects[1])
+					outBuf = outBuf[:cap(outBuf)]
+				}
+			}
+		}*/
+		//antidote.SendProto(replyType, reply, conn)
+		err, outBuf = antidote.SendProtoReusableBufVT(replyType, reply, conn, outBuf)
+		/*if !wasNil { //This if is only needed when we cache the protobufs directly.
+			stateBuf.ReturnBufs()
+		} else { //Only needed when we cache the protobufs directly.
+			stateBuf.Reset()
+		}*/
+		stateBuf.ReturnBufs()
+		if err != nil {
+			conn.Close()
+			fmt.Printf("[PS]Error on sending proto to client: %s. Closing connection.\n", err)
 			return
 		}
+		end := time.Now().UnixNano()
+		diff := end - start
+		if diff >= int64(1*time.Second) {
+			fmt.Printf("[PS%d]Client request took too long - %.2fms!!! Request type: %v\n", clientId&0xFFFF, float64(diff)/float64(time.Millisecond), protoType)
+		}
+		//buf = make([]byte, 1000) //TODO: Remove.
 		//tsEnd := time.Now().UnixNano()
 		//fmt.Printf("[PS]Protobuf sending took %d microseconds.\n", (tsEnd-tsStart)/int64(time.Duration(time.Microsecond)))
+	}
+S2SFinallizer: //We jump here if this was a S2S connection and the connection was terminated.
+	if isS2SConn {
+		//Can do something here if needed, e.g., print something. For now, we do nothing.
+	} else {
+		//Client-connection. But we never break out of the loop if it's a client connection, so the code never reaches here.
 	}
 }
 
@@ -636,44 +882,83 @@ func prepareTopKProtobuf() {
 }*/
 
 func handleStaticReadObjects(proto *proto.ApbStaticReadObjects,
-	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbStaticReadObjectsResp) {
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId, stateBuf *crdt.BufsToReturnToPool, clientBufs *antidote.ClientBuffers) (respProto *proto.ApbStaticReadObjectsResp) {
 
-	replyChan, txnId := sendTMStaticReadObjectsRequest(proto, tmChan, clientId)
-	reply := <-replyChan
-	close(replyChan)
-	return antidote.CreateStaticReadResp(reply.States, txnId, reply.Timestamp)
+	//replyChan, txnId := sendTMStaticReadObjectsRequest(proto, tmChan, clientId, clientBufs)
+	txnId := sendTMStaticReadObjectsRequest(proto, tmChan, clientId, clientBufs)
+	clientBufs.ReuseReadProtos()
+	reply := <-clientBufs.TMStaticReadChan
+	//close(replyChan)
+	return antidote.CreateStaticReadRespReuse(reply.States, txnId, reply.Timestamp, stateBuf, clientBufs.StaticReadRespProto)
+	//return antidote.CreateStaticReadResp(reply.States, txnId, reply.Timestamp, stateBuf)
 }
 
 func sendTMStaticReadObjectsRequest(proto *proto.ApbStaticReadObjects,
-	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (replyChan chan antidote.TMStaticReadReply, txnId antidote.TransactionId) {
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId, bufs *antidote.ClientBuffers) (txnId antidote.TransactionId) { //(replyChan chan antidote.TMStaticReadReply, txnId antidote.TransactionId) {
 
-	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransaction().GetTimestamp())
-	objs := antidote.ProtoObjectsToAntidoteObjects(proto.GetObjects())
-	replyChan = make(chan antidote.TMStaticReadReply)
-	tmChan <- createTMRequest(antidote.TMStaticReadArgs{ReadParams: objs, ReplyChan: replyChan}, txnId, clientClock)
-	return replyChan, txnId
+	txnId, clientClock := antidote.DecodeTxnDescriptorReuse(proto.GetTransaction().GetTimestamp(), bufs.Clk)
+	objs := antidote.ProtoObjectsToAntidoteObjectsReuse(proto.GetObjects(), bufs.ReadBuf)
+	//replyChan = make(chan antidote.TMStaticReadReply)
+	tmChan <- createTMRequest(antidote.TMStaticReadArgs{ReadParams: objs, ReplyChan: bufs.TMStaticReadChan}, txnId, clientClock)
+	bufs.ReadBuf = objs
+	return txnId
+	//return replyChan, txnId
 }
 
 func handleStaticRead(proto *proto.ApbStaticRead,
-	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbStaticReadObjectsResp) {
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId, stateBuf *crdt.BufsToReturnToPool, clientBufs *antidote.ClientBuffers) (respProto *proto.ApbStaticReadObjectsResp) {
 
-	replyChan, txnId := sendTMStaticReadRequest(proto, tmChan, clientId)
-	reply := <-replyChan
-	close(replyChan)
-	return antidote.CreateStaticReadResp(reply.States, txnId, reply.Timestamp)
+	txnId := sendTMStaticReadRequest(proto, tmChan, clientId, clientBufs)
+	clientBufs.ReuseReadProtos()
+	reply := <-clientBufs.TMStaticReadChan
+	//close(replyChan)
+	return antidote.CreateStaticReadRespReuse(reply.States, txnId, reply.Timestamp, stateBuf, clientBufs.StaticReadRespProto)
+	//return antidote.CreateStaticReadResp(reply.States, txnId, reply.Timestamp, stateBuf)
 }
 
 func sendTMStaticReadRequest(proto *proto.ApbStaticRead,
-	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (replyChan chan antidote.TMStaticReadReply, txnId antidote.TransactionId) {
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId, bufs *antidote.ClientBuffers) (txnId antidote.TransactionId) { //(replyChan chan antidote.TMStaticReadReply, txnId antidote.TransactionId) {
 
-	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransaction().GetTimestamp())
-	objs := antidote.ProtoReadToAntidoteObjects(proto.GetFullreads(), proto.GetPartialreads())
-	replyChan = make(chan antidote.TMStaticReadReply)
-	tmChan <- createTMRequest(antidote.TMStaticReadArgs{ReadParams: objs, ReplyChan: replyChan}, txnId, clientClock)
-	return replyChan, txnId
+	txnId, clientClock := antidote.DecodeTxnDescriptorReuse(proto.GetTransaction().GetTimestamp(), bufs.Clk)
+	objs := antidote.ProtoReadToAntidoteObjectsReuse(proto.GetFullreads(), proto.GetPartialreads(), bufs.ReadBuf)
+	//replyChan = make(chan antidote.TMStaticReadReply)
+	tmChan <- createTMRequest(antidote.TMStaticReadArgs{ReadParams: objs, ReplyChan: bufs.TMStaticReadChan}, txnId, clientClock)
+	bufs.ReadBuf = objs
+	return txnId
+	//return replyChan, txnId
+}
+
+// Return the internal state, to allow reusage of protobufs, for performance debugging.
+func handleStaticReadDebug(proto *proto.ApbStaticRead,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId, bufs *antidote.ClientBuffers) (resp tools.Triple[[]crdt.State, antidote.TransactionId, clocksi.Timestamp]) {
+
+	txnId := sendTMStaticReadRequest(proto, tmChan, clientId, bufs)
+	reply := <-bufs.TMStaticReadChan
+	return tools.Triple[[]crdt.State, antidote.TransactionId, clocksi.Timestamp]{First: reply.States, Second: txnId, Third: reply.Timestamp}
+}
+
+// Return the internal state, to allow reusage of protobufs, for performance debugging.
+func handleStaticReadObjectsDebug(proto *proto.ApbStaticReadObjects,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId, bufs *antidote.ClientBuffers) (resp tools.Triple[[]crdt.State, antidote.TransactionId, clocksi.Timestamp]) {
+
+	txnId := sendTMStaticReadObjectsRequest(proto, tmChan, clientId, bufs)
+	reply := <-bufs.TMStaticReadChan
+	return tools.Triple[[]crdt.State, antidote.TransactionId, clocksi.Timestamp]{First: reply.States, Second: txnId, Third: reply.Timestamp}
 }
 
 func handleStaticUpdateObjects(proto *proto.ApbStaticUpdateObjects,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId, bufs *antidote.ClientBuffers) (respProto *proto.ApbCommitResp) {
+
+	//replyChan, _ := sendTMStaticUpdateObjects(proto, tmChan, clientId, bufs)
+	sendTMStaticUpdateObjects(proto, tmChan, clientId, bufs)
+	bufs.ReuseUpdateProtos()
+	reply := <-bufs.TMStaticUpdateChan
+	//close(replyChan)
+	//ignore(reply.Err)
+	return antidote.CreateCommitOkRespReuse(reply.TransactionId, reply.Timestamp, bufs.CommitRespProto)
+}
+
+/*func handleStaticUpdateObjects(proto *proto.ApbStaticUpdateObjects,
 	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbCommitResp) {
 
 	replyChan, _ := sendTMStaticUpdateObjects(proto, tmChan, clientId)
@@ -681,9 +966,18 @@ func handleStaticUpdateObjects(proto *proto.ApbStaticUpdateObjects,
 	close(replyChan)
 	ignore(reply.Err)
 	return antidote.CreateCommitOkResp(reply.TransactionId, reply.Timestamp)
-}
+}*/
 
 func sendTMStaticUpdateObjects(proto *proto.ApbStaticUpdateObjects,
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId, bufs *antidote.ClientBuffers) { //(replyChan chan antidote.TMStaticUpdateReply, txnId antidote.TransactionId) {
+
+	txnId, clk := antidote.DecodeTxnDescriptorReuse(proto.GetTransaction().GetTimestamp(), bufs.Clk)
+	upds := antidote.ProtoUpdateOpToAndidoteUpdateReuse(proto.GetUpdates(), bufs.Upds)
+	tmChan <- createTMRequest(antidote.TMStaticUpdateArgs{UpdateParams: upds, ReplyChan: bufs.TMStaticUpdateChan}, txnId, clk)
+	bufs.Clk, bufs.Upds = clk, upds
+}
+
+/*func sendTMStaticUpdateObjects(proto *proto.ApbStaticUpdateObjects,
 	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (replyChan chan antidote.TMStaticUpdateReply, txnId antidote.TransactionId) {
 
 	txnId, clientClock := antidote.DecodeTxnDescriptor(proto.GetTransaction().GetTimestamp())
@@ -691,15 +985,15 @@ func sendTMStaticUpdateObjects(proto *proto.ApbStaticUpdateObjects,
 	replyChan = make(chan antidote.TMStaticUpdateReply)
 	tmChan <- createTMRequest(antidote.TMStaticUpdateArgs{UpdateParams: updates, ReplyChan: replyChan}, txnId, clientClock)
 	return replyChan, txnId
-}
+}*/
 
 func handleReadObjects(proto *proto.ApbReadObjects,
-	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbReadObjectsResp) {
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId, stateBuf *crdt.BufsToReturnToPool) (respProto *proto.ApbReadObjectsResp) {
 
 	replyChan, _ := sendTMReadObjects(proto, tmChan, clientId)
 	reply := <-replyChan
 	close(replyChan)
-	return antidote.CreateReadObjectsResp(reply)
+	return antidote.CreateReadObjectsResp(reply, stateBuf)
 }
 
 func sendTMReadObjects(proto *proto.ApbReadObjects,
@@ -713,12 +1007,12 @@ func sendTMReadObjects(proto *proto.ApbReadObjects,
 }
 
 func handleRead(proto *proto.ApbRead,
-	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId) (respProto *proto.ApbReadObjectsResp) {
+	tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId, stateBuf *crdt.BufsToReturnToPool) (respProto *proto.ApbReadObjectsResp) {
 
 	replyChan, _ := sendTMRead(proto, tmChan, clientId)
 	reply := <-replyChan
 	close(replyChan)
-	return antidote.CreateReadObjectsResp(reply)
+	return antidote.CreateReadObjectsResp(reply, stateBuf)
 }
 
 func sendTMRead(proto *proto.ApbRead,
@@ -854,46 +1148,320 @@ func handleResetServer(tm *antidote.TransactionManager) (respProto *proto.ApbRes
 	return &proto.ApbResetServerResp{}
 }
 
-func handleServerConnReplicaID(protobuf *proto.ApbServerConnReplicaID, tmChan chan antidote.TransactionManagerRequest, conn net.Conn) chan antidote.TMS2SReply {
-	fmt.Printf("[PS]Got ServerConnReplicaID from %d at %s\n", protobuf.GetReplicaID(), time.Now().Format("15:04:05:000"))
-	tmChan <- createTMRequest(antidote.TMReplicaID{ReplicaID: uint16(protobuf.GetReplicaID()), IP: protobuf.GetMyIP(), Buckets: protobuf.GetMyBuckets()}, 0, nil)
-	return handleServerConn(tmChan, conn)
+// Used when it is known from the start that the connection is S2S.
+func handleS2SConn(conn net.Conn, reqChan chan antidote.TransactionManagerRequest, replyChan chan antidote.TMS2SReply, clientId antidote.ClientId, protoType byte, msg pb.Message, inBuf, outBuf []byte, stateBuf *crdt.BufsToReturnToPool, clientBufs *antidote.ClientBuffers) {
+	switch protoType {
+	case antidote.ServerConnReplicaID:
+		protobuf := msg.(*proto.ApbServerConnReplicaID)
+		reqChan <- createTMRequest(antidote.TMReplicaID{ReplicaID: uint16(protobuf.GetReplicaID()), IP: protobuf.GetMyIP(), Buckets: protobuf.GetMyBuckets(), ReplyChan: replyChan}, 0, nil)
+	case antidote.ServerConn:
+		reqChan <- createTMRequest(antidote.TMServerConn{ReplyChan: replyChan}, 0, nil)
+	}
+
+	go s2sReplySender(conn, replyChan, stateBuf, clientBufs, outBuf)
+	handleS2SRequests(conn, reqChan, inBuf, clientBufs)
 }
 
-func handleServerConn(tmChan chan antidote.TransactionManagerRequest, conn net.Conn) chan antidote.TMS2SReply {
+// Refactored S2S handler.
+// The idea now is that, when processConn receives a new S2S connection (i.e., ServerConnReplicaID or ServerConn), this handler is called to manage this conn as a S2S-only connection.
+func upgradeToS2SConn(conn net.Conn, tm *antidote.TransactionManager, tmChan chan antidote.TransactionManagerRequest, clientId antidote.ClientId, protoType byte, msg pb.Message, inBuf, outBuf []byte, stateBuf *crdt.BufsToReturnToPool, clientBufs *antidote.ClientBuffers) {
+	replyChan := make(chan antidote.TMS2SReply, 10)
+	reqChan := tm.MakeS2SReqChan()
+	switch protoType {
+	case antidote.ServerConnReplicaID:
+		protobuf := msg.(*proto.ApbServerConnReplicaID)
+		tmChan <- createTMRequest(antidote.TMReplicaID{ReplicaID: uint16(protobuf.GetReplicaID()), IP: protobuf.GetMyIP(), Buckets: protobuf.GetMyBuckets(), ReplyChan: replyChan, ReqChan: reqChan}, 0, nil)
+	case antidote.ServerConn:
+		tmChan <- createTMRequest(antidote.TMServerConn{ReplyChan: replyChan, ReqChan: reqChan}, 0, nil)
+	}
+	*clientBufs.PbBuffers = proto.PbBuffers{}
+	clientBufs.S2SInit()
+
+	go s2sReplySender(conn, replyChan, stateBuf, clientBufs, outBuf)
+	handleS2SRequests(conn, reqChan, inBuf, clientBufs)
+}
+
+func s2sReplySender(conn net.Conn, replyChan chan antidote.TMS2SReply, stateBuf *crdt.BufsToReturnToPool, clientBufs *antidote.ClientBuffers, outBuf []byte) {
+	//Note that stateBuf is only used by this goroutine, but clientBufs is shared with S2S receiver. However they use separate fields from clientBufs.
+	//var msg pb.Message
+	var err error
+	/*idsReply := tools.NewSliceWithCounter[uint64](1000)
+	var startID, endID uint64
+	go func() {
+		lastPrinted := 0
+		for {
+			time.Sleep(2 * time.Second)
+			if !idsReply.IsEmpty() && lastPrinted < idsReply.Len() {
+				ids := idsReply.ToSlice()
+				fmt.Printf("[PS]Sent S2S replies with client IDs: %v\n", ids[lastPrinted:])
+				lastPrinted = len(ids)
+			}
+		}
+	}()*/
+	replyWrapper := &proto.S2SWrapperReply{ClientID: new(uint64), MsgID: new(proto.WrapperType)}
+
+	for {
+		//Wait on replyChan forever, do a switch with received item, send back on connection
+		for wrapper := range replyChan {
+			//startID = wrapper.ClientID
+			//Create protobuf
+			switch reply := wrapper.Reply.(type) {
+			case antidote.TMStaticReadReply:
+				//msg = antidote.CreateStaticReadRespReuse(reply.States, wrapper.TxnID, reply.Timestamp, stateBuf, clientBufs.StaticReadRespProto)
+				replyWrapper.StaticReadObjs = antidote.CreateStaticReadRespReuse(reply.States, wrapper.TxnID, reply.Timestamp, stateBuf, clientBufs.StaticReadRespProto)
+			case antidote.TMStartTxnReply:
+				//msg = antidote.CreateStartTransactionResp(wrapper.TxnID, reply.Timestamp)
+				replyWrapper.StartTxn = antidote.CreateStartTransactionResp(wrapper.TxnID, reply.Timestamp)
+			case []crdt.State:
+				//msg = antidote.CreateReadObjectsResp(reply, stateBuf)
+				replyWrapper.ReadObjs = antidote.CreateReadObjectsResp(reply, stateBuf)
+			case antidote.TMUpdateReply:
+				//msg = antidote.CreateOperationResp()
+				replyWrapper.Upd = antidote.CreateOperationResp()
+			case antidote.TMStaticUpdateReply:
+				//msg = antidote.CreateCommitOkRespReuse(wrapper.TxnID, reply.Timestamp, clientBufs.CommitRespProto)
+				replyWrapper.CommitTxn = antidote.CreateCommitOkRespReuse(wrapper.TxnID, reply.Timestamp, clientBufs.CommitRespProto)
+			case antidote.TMCommitReply:
+				//msg = antidote.CreateCommitOkRespReuse(wrapper.TxnID, reply.Timestamp, clientBufs.CommitRespProto)
+				replyWrapper.CommitTxn = antidote.CreateCommitOkRespReuse(wrapper.TxnID, reply.Timestamp, clientBufs.CommitRespProto)
+			default:
+				fmt.Printf("[PS]S2S unknown proto type (%d, %T, %v+)\n", wrapper.ReplyType, reply, reply)
+				panic(fmt.Sprintf("[PS]S2S unknown proto type (%d, %T, %v+)\n", wrapper.ReplyType, reply, reply))
+			}
+			*replyWrapper.ClientID, *replyWrapper.MsgID = wrapper.ClientID, wrapper.ReplyType
+			err, outBuf = antidote.SendProtoReusableBufVT(antidote.S2SReply, replyWrapper, conn, outBuf)
+			//err, outBuf = antidote.SendProtoReusableBufVT(antidote.S2SReply, antidote.CreateS2SWrapperReplyProto(wrapper.ClientID, wrapper.ReplyType, msg), conn, outBuf)
+			//protoToSend := antidote.CreateS2SWrapperReplyProto(wrapper.ClientID, wrapper.ReplyType, msg)
+			//antidote.SendProtoS2SReplyDebug(antidote.S2SReply, protoToSend, conn)
+			stateBuf.ReturnBufs()
+			/*endID = protoToSend.GetClientID()
+			if startID != endID {
+				panic(fmt.Sprintf("[PS]S2S reply routine, clientID changed from start (%d) to end (%d).\n", startID, endID))
+			}
+			idsReply.Append(wrapper.ClientID)*/
+
+			//Need to clean the re-used S2SWrapperReplyProto
+			switch wrapper.Reply.(type) {
+			case antidote.TMStaticReadReply:
+				replyWrapper.StaticReadObjs = nil
+			case antidote.TMStartTxnReply:
+				replyWrapper.StartTxn = nil
+			case []crdt.State:
+				replyWrapper.ReadObjs = nil
+			case antidote.TMStaticUpdateReply:
+				replyWrapper.CommitTxn = nil
+			case antidote.TMCommitReply:
+				replyWrapper.CommitTxn = nil
+			}
+
+			if err != nil {
+				conn.Close()
+				fmt.Printf("[PS]Error on sending S2S reply proto to server: %s. Closing connection.\n", err)
+			}
+		}
+	}
+}
+
+func handleS2SRequests(conn net.Conn, tmChan chan antidote.TransactionManagerRequest, inBuf []byte, clientBufs *antidote.ClientBuffers) {
+	//Note: It is not safe here to re-use non-protobuf buffers ([]crdt.UpdateObjectParams or []crdt.ReadObjectParams), as this connection may handle multiple clients while TM is processing.
+	//We'd need some kind of pooling mechanism to re-use those buffers, or some identification and having s2sReplySender notify us when a certain buffer is safe to be re-used.
+	//Protobuf buffers can still be re-used here through.
+	var protoType byte
+	var protobuf pb.Message
+	var err error
+	var req antidote.TMRequestArgs
+	var txnId antidote.TransactionId
+	var clientClock clocksi.Timestamp
+	var clientID /*, endID*/ uint64
+
+	/*idsRec := tools.NewSliceWithCounter[uint64](1000)
+	go func() {
+		lastPrinted := 0
+		time.Sleep(1 * time.Second) //Give some difference to the S2SReplySender.
+		for {
+			time.Sleep(2 * time.Second)
+			if !idsRec.IsEmpty() && lastPrinted < idsRec.Len() {
+				ids := idsRec.ToSlice()
+				fmt.Printf("[PS]Received S2S requests with client IDs: %v\n", ids[lastPrinted:])
+				lastPrinted = len(ids)
+			}
+		}
+	}()
+	ignore(inBuf)*/
+	//TODO: In theory we could use a pool (or slice) of byte slices and use ReceiveProtoReusableBufferVT with unsafe marshal for max memory re-usage.
+	//However, this would imply having to ask for the s2sReplySender to give us back the byte slices when done (which he doesn't even have access to, only the replies? Maybe have to associate to clientID)
+	//A less (memory-wise) efficient solution is to simply use the buffer only for reading in the bytes, and use unsafe when unmarshalling.
+	//This way the byte slice can be re-used immediately. The protobuf info can also be re-used if we want to.
+	//In unmarshallProtoVT, used by ReceiveProtoReusableBufferVT, we force S2S messages to use the safe version.
+	//TODO: Support re-usafe of S2S protobufs? At least the wrapper part. It is safe as we won't use the protobuf after sending the request to TM.
+	//(Just be careful with string/byte slice re-using)
+	for {
+		protoType, protobuf, err, inBuf = antidote.ReceiveProtoReusableBufferVTClientBuf(conn, inBuf, clientBufs)
+		//protoType, protobuf, err = antidote.ReceiveProtoVT(conn)
+		if err != nil {
+			if err == io.EOF {
+				conn.Close()
+				tmChan <- antidote.TransactionManagerRequest{Args: antidote.TMConnLostArgs{}}
+			} else {
+				conn.Close()
+				date := time.Now().String()
+				fmt.Printf("[ProtoServer]Error on reading proto from client, closing connection.. Type: %v, proto: %v, error: %s, time: %s\n", protoType, protobuf, err, date)
+				tmChan <- antidote.TransactionManagerRequest{Args: antidote.TMConnLostArgs{}}
+			}
+			break
+		} else {
+			s2sPb, ok := protobuf.(*proto.S2SWrapper)
+			if !ok {
+				fmt.Printf("[ProtoServer]Error: expected S2SWrapper, got %T\n", protobuf)
+				panic(fmt.Sprintf("[ProtoServer]Error: expected S2SWrapper, got %T\n", protobuf))
+			}
+			clientID = s2sPb.GetClientID()
+			switch s2sPb.GetMsgID() {
+			case proto.WrapperType_STATIC_READ_OBJS:
+				inProto := s2sPb.StaticReadObjs
+				txnId, clientClock = antidote.DecodeTxnDescriptor(inProto.GetTransaction().GetTimestamp())
+				objs := antidote.ProtoObjectsToAntidoteObjects(inProto.GetObjects())
+				req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.TMStaticReadArgs{ReadParams: objs}}
+				tmChan <- createTMRequest(req, txnId, clientClock)
+			case proto.WrapperType_STATIC_READ:
+				inProto := s2sPb.StaticRead
+				txnId, clientClock = antidote.DecodeTxnDescriptor(inProto.GetTransaction().GetTimestamp())
+				objs := antidote.ProtoReadToAntidoteObjects(inProto.GetFullreads(), inProto.GetPartialreads())
+				req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.TMStaticReadArgs{ReadParams: objs}}
+				tmChan <- createTMRequest(req, txnId, clientClock)
+			case proto.WrapperType_STATIC_SINGLE_READ:
+				inProto := s2sPb.SingleRead
+				obj := antidote.S2SSingleReadToAntidote(inProto)
+				req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.TMSingleReadArgs{ReadParams: obj}}
+				tmChan <- createTMRequest(req, 578902378, nil) //Random txnID value
+			case proto.WrapperType_STATIC_UPDATE:
+				inProto := s2sPb.StaticUpd
+				txnId, clientClock = antidote.DecodeTxnDescriptor(inProto.GetTransaction().GetTimestamp())
+				updates := antidote.ProtoUpdateOpToAntidoteUpdate(inProto.GetUpdates())
+				req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.TMStaticUpdateArgs{UpdateParams: updates}}
+				tmChan <- createTMRequest(req, txnId, clientClock)
+			case proto.WrapperType_START_TXN:
+				inProto := s2sPb.StartTxn
+				txnId, clientClock = antidote.DecodeTxnDescriptor(inProto.GetTimestamp())
+				req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.TMStartTxnArgs{}}
+				tmChan <- createTMRequest(req, txnId, clientClock)
+			case proto.WrapperType_READ_OBJS:
+				inProto := s2sPb.ReadObjs
+				txnId, clientClock = antidote.DecodeTxnDescriptor(inProto.GetTransactionDescriptor())
+				objs := antidote.ProtoObjectsToAntidoteObjects(inProto.GetBoundobjects())
+				req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.TMReadArgs{ReadParams: objs}}
+				tmChan <- createTMRequest(req, txnId, clientClock)
+			case proto.WrapperType_READ:
+				inProto := s2sPb.Read
+				txnId, clientClock = antidote.DecodeTxnDescriptor(inProto.GetTransactionDescriptor())
+				objs := antidote.ProtoReadToAntidoteObjects(inProto.GetFullreads(), inProto.GetPartialreads())
+				req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.TMReadArgs{ReadParams: objs}}
+				tmChan <- createTMRequest(req, txnId, clientClock)
+
+			case proto.WrapperType_UPD:
+				inProto := s2sPb.Upd
+				txnId, clientClock = antidote.DecodeTxnDescriptor(inProto.GetTransactionDescriptor())
+				updates := antidote.ProtoUpdateOpToAntidoteUpdate(inProto.GetUpdates())
+				req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.TMUpdateArgs{UpdateParams: updates}}
+				tmChan <- createTMRequest(req, txnId, clientClock)
+
+			case proto.WrapperType_COMMIT:
+				inProto := s2sPb.CommitTxn
+				txnId, clientClock = antidote.DecodeTxnDescriptor(inProto.GetTransactionDescriptor())
+				req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.TMCommitArgs{}}
+				tmChan <- createTMRequest(req, txnId, clientClock)
+
+			case proto.WrapperType_ABORT:
+				inProto := s2sPb.AbortTxn
+				txnId, clientClock = antidote.DecodeTxnDescriptor(inProto.GetTransactionDescriptor())
+				req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.TMAbortArgs{}}
+				tmChan <- createTMRequest(req, txnId, clientClock)
+
+			case proto.WrapperType_BC_PERMS_REQ:
+				inProto := s2sPb.BcPermsReq
+				req = antidote.TMS2SRequest{ClientID: clientID, Args: antidote.ProtoBCPermissionsReqToTM(inProto)}
+				tmChan <- createTMRequest(req, 578902378, nil) //Random txID value
+
+			default:
+				fmt.Printf("[PS]S2S unknown wrapper type: %d\n", s2sPb.GetMsgID())
+				panic(fmt.Sprintf("[PS]S2S unknown wrapper type: %d\n", s2sPb.GetMsgID()))
+			}
+			/*if s2sPb.GetMsgID() != proto.WrapperType_STATIC_UPDATE { //TODO: Remove, just for debug.
+				fmt.Printf("[PS]Unexpected S2S wrapper type: was expecting STATIC_UPDATE, got %d\n", *s2sPb.MsgID)
+				panic(fmt.Sprintf("[PS]Unexpected S2S wrapper type: was expecting STATIC_UPDATE, got %d\n", *s2sPb.MsgID))
+			}
+			endID = s2sPb.GetClientID()
+			if clientID != endID {
+				panic(fmt.Sprintf("[PS]S2S request routine, clientID changed from start (%d) to end (%d).\n", clientID, endID))
+			}
+			idsRec.Append(clientID)*/
+		}
+	}
+}
+
+/*
+func handleServerConnReplicaID(protobuf *proto.ApbServerConnReplicaID, tmChan chan antidote.TransactionManagerRequest, conn net.Conn,
+	stateBuf *crdt.BufsToReturnToPool, clientBufs *antidote.ClientBuffers) chan antidote.TMS2SReply {
+	fmt.Printf("[PS]Got ServerConnReplicaID from %d at %s\n", protobuf.GetReplicaID(), time.Now().Format("15:04:05:000"))
+	if clientBufs == nil {
+		clientBufs = antidote.InitializeClientBuffers(200) //Arbitrary size that is definitely big enough.
+	}
+	tmChan <- createTMRequest(antidote.TMReplicaID{ReplicaID: uint16(protobuf.GetReplicaID()), IP: protobuf.GetMyIP(), Buckets: protobuf.GetMyBuckets()}, 0, nil)
+	return handleServerConn(tmChan, conn, stateBuf, clientBufs)
+}
+
+func handleServerConn(tmChan chan antidote.TransactionManagerRequest, conn net.Conn,
+	stateBuf *crdt.BufsToReturnToPool, clientBufs *antidote.ClientBuffers) chan antidote.TMS2SReply {
+	//Note that stateBuf and clientBufs are shared with the sender routine.
+	//
 	replyChan := make(chan antidote.TMS2SReply, 10)
 	tmChan <- createTMRequest(antidote.TMServerConn{ReplyChan: replyChan}, 0, nil)
 
 	go func() {
+		buf := make([]byte, START_CLIENT_BUF_SIZE)
+		ignore(buf)
 		var err error
+		ignore(err)
 		var msg pb.Message
 		//fmt.Println("[PS]S2S receiver - ready")
 		//Wait on replyChan forever, do a switch with received item, send back on connection
 		for wrapper := range replyChan {
+			debugChan := make(chan struct{}, 1)
+			go func(dChan chan struct{}) {
+				select {
+				case <-dChan:
+					return
+				case <-time.After(10 * time.Second):
+					fmt.Printf("[PS]S2S reply sender - stuck! Last msg: %T, %+v ClientID: %d. TxnID: %d. ReplyType: %d.\n",
+						wrapper.Reply, wrapper.Reply, wrapper.ClientID, wrapper.TxnID, wrapper.ReplyType)
+					time.Sleep(2000)
+					os.Exit(0)
+				}
+			}(debugChan)
 			//fmt.Println("[PS]S2S receiver - got reply (clientID, replyType)", wrapper.ClientID, wrapper.ReplyType)
 			switch reply := wrapper.Reply.(type) {
 			case antidote.TMStaticReadReply:
-				msg = antidote.CreateStaticReadResp(reply.States, wrapper.TxnID, reply.Timestamp)
+				msg = antidote.CreateStaticReadRespReuse(reply.States, wrapper.TxnID, reply.Timestamp, stateBuf, clientBufs.StaticReadRespProto)
 			case antidote.TMStartTxnReply:
 				msg = antidote.CreateStartTransactionResp(wrapper.TxnID, reply.Timestamp)
 			case []crdt.State:
-				msg = antidote.CreateReadObjectsResp(reply)
+				msg = antidote.CreateReadObjectsResp(reply, stateBuf)
 			case antidote.TMUpdateReply:
 				msg = antidote.CreateOperationResp()
 			case antidote.TMStaticUpdateReply:
-				msg = antidote.CreateCommitOkResp(wrapper.TxnID, reply.Timestamp)
+				msg = antidote.CreateCommitOkRespReuse(wrapper.TxnID, reply.Timestamp, clientBufs.CommitRespProto)
 			case antidote.TMCommitReply:
-				msg = antidote.CreateCommitOkResp(wrapper.TxnID, reply.Timestamp)
+				msg = antidote.CreateCommitOkRespReuse(wrapper.TxnID, reply.Timestamp, clientBufs.CommitRespProto)
 			default:
 				fmt.Printf("[PS]S2S unknown proto type (%d, %T, %v+)\n", wrapper.ReplyType, reply, reply)
 			}
 			//fmt.Println("[PS]S2S sending reply")
-			err = antidote.SendProtoNoCheck(antidote.S2SReply, antidote.CreateS2SWrapperReplyProto(wrapper.ClientID, wrapper.ReplyType, msg), conn)
+			//err = antidote.SendProtoNoCheck(antidote.S2SReply, antidote.CreateS2SWrapperReplyProto(wrapper.ClientID, wrapper.ReplyType, msg), conn) //TODO: Go back.
+			antidote.SendProtoS2SReplyDebug(antidote.S2SReply, antidote.CreateS2SWrapperReplyProto(wrapper.ClientID, wrapper.ReplyType, msg), conn) //TODO: Go back.
+			//err, buf = antidote.SendProtoReusableBufVT(antidote.S2SReply, antidote.CreateS2SWrapperReplyProto(wrapper.ClientID, wrapper.ReplyType, msg), conn, buf) //TODO: UNDO
 			//fmt.Println("[PS]S2S sent reply")
-			if err != nil {
-				fmt.Println("[PS]Error on S2S send:", nil)
-				break
-			}
+			stateBuf.ReturnBufs()
+			debugChan <- struct{}{}
 		}
 	}()
 
@@ -901,7 +1469,7 @@ func handleServerConn(tmChan chan antidote.TransactionManagerRequest, conn net.C
 }
 
 func handleServerToServer(protobf *proto.S2SWrapper, tmChan chan antidote.TransactionManagerRequest, s2sChan chan antidote.TMS2SReply,
-	conn net.Conn, tm *antidote.TransactionManager) {
+	conn net.Conn, tm *antidote.TransactionManager, stateBufs *crdt.BufsToReturnToPool, clientBufs *antidote.ClientBuffers) {
 	//"Just" send appropriate request
 	var req antidote.TMRequestArgs
 	var txnId antidote.TransactionId
@@ -910,6 +1478,18 @@ func handleServerToServer(protobf *proto.S2SWrapper, tmChan chan antidote.Transa
 	var replyType proto.WrapperType
 	clientID := protobf.GetClientID()
 	//fmt.Println("[PS]S2S request type:", *protobf.MsgID)
+	debugChan := make(chan struct{}, 1)
+	go func(dChan chan struct{}) {
+		select {
+		case <-dChan:
+			return
+		case <-time.After(10 * time.Second):
+			fmt.Printf("[PS]S2S applier - stuck! Last msg type: %T. ClientID: %d. TxnID: %d. ReplyType: %d. Clk: %s.\n",
+				*protobf.MsgID, clientID, txnId, replyType, clientClock.ToString())
+			time.Sleep(1500)
+			os.Exit(0)
+		}
+	}(debugChan)
 	switch *protobf.MsgID {
 	case proto.WrapperType_STATIC_READ_OBJS:
 		inProto, replyChan := protobf.StaticReadObjs, make(chan antidote.TMStaticReadReply, 1)
@@ -996,27 +1576,39 @@ func handleServerToServer(protobf *proto.S2SWrapper, tmChan chan antidote.Transa
 
 	default:
 		fmt.Println("[PROTOSERVER]Error - Unknown type of S2S message:", protobf.MsgID)
-		return
+		panic(0)
 	}
-	s2sChan <- antidote.TMS2SReply{ClientID: clientID, TxnID: 2, ReplyType: replyType, Reply: reply}
-}
+	if *protobf.MsgID != proto.WrapperType_STATIC_UPDATE {
+		fmt.Printf("[PS]Unexpected S2S wrapper type: was expecting STATIC_UPDATE, got %d\n", *protobf.MsgID)
+		os.Exit(0)
+	}
+	//Before TxnID was hardcoded to be 2 on TMS2SReply. Why?
+	s2sChan <- antidote.TMS2SReply{ClientID: clientID, TxnID: txnId, ReplyType: replyType, Reply: reply}
+	debugChan <- struct{}{}
+}*/
 
-func handleMultiClient(conn net.Conn, tmChans []chan antidote.TransactionManagerRequest, replyChan chan antidote.TMMultiClientReply, nClients int, clientId antidote.ClientId) {
+func handleMultiClient(conn net.Conn, tmChans []chan antidote.TransactionManagerRequest, replyChan chan antidote.TMMultiClientReply, nClients int, clientId antidote.ClientId, txnDescSize int) {
 	go handleMultiClientReplies(conn, replyChan)
 	clientIds := make([]antidote.ClientId, nClients)
 	clientIds[0] = clientId
+	clientBufs := make([]*antidote.ClientBuffers, nClients)
+	rng := rand.New(rand.NewSource(int64(clientId)))
 	for i := 1; i < nClients; i++ {
-		clientIds[i] = antidote.ClientId(rand.Uint64())
+		clientIds[i] = antidote.ClientId(rng.Uint64())
+		clientBufs[i] = antidote.InitializeClientBuffers(txnDescSize)
 	}
 
 	var protobuf pb.Message
 	var protoType byte
 	var client uint16
 	var err error
+	buf := make([]byte, START_CLIENT_BUF_SIZE) //Re-usable byte buffer for ReceiveProtoMultiClient.
+	doesUpdates := false
 
 	fmt.Printf("[ProtoServer]Handling multi-client connection with %d clients\n", nClients)
 	for {
-		protoType, client, protobuf, err = antidote.ReceiveProtoMultiClient(conn)
+		//protoType, client, protobuf, err = antidote.ReceiveProtoMultiClient(conn)
+		protoType, client, protobuf, err, buf = antidote.ReceiveProtoMultiClientReusableBuf(conn, buf)
 		//fmt.Printf("[ProtoServer][MultiClient]Received proto of type %d from client %d\n", protoType, client)
 		if err != nil {
 			if err == io.EOF {
@@ -1045,17 +1637,29 @@ func handleMultiClient(conn net.Conn, tmChans []chan antidote.TransactionManager
 		case antidote.UpdateObjs:
 			sendTMUpdateObjects(protobuf.(*proto.ApbUpdateObjects), tmChans[client], clientIds[client])
 		case antidote.StartTrans:
+			if !doesUpdates {
+				doesUpdates = true
+				for i := 0; i < nClients; i++ {
+					clientBufs[i].UpdateInit()
+				}
+			}
 			sendTMStartTxn(protobuf.(*proto.ApbStartTransaction), tmChans[client], clientIds[client])
 		case antidote.AbortTrans:
 			sendTMAbortTxn(protobuf.(*proto.ApbAbortTransaction), tmChans[client], clientIds[client])
 		case antidote.CommitTrans:
 			sendTMCommitTxn(protobuf.(*proto.ApbCommitTransaction), tmChans[client], clientIds[client])
 		case antidote.StaticUpdateObjs:
-			sendTMStaticUpdateObjects(protobuf.(*proto.ApbStaticUpdateObjects), tmChans[client], clientIds[client])
+			if !doesUpdates {
+				doesUpdates = true
+				for i := 0; i < nClients; i++ {
+					clientBufs[i].UpdateInit()
+				}
+			}
+			sendTMStaticUpdateObjects(protobuf.(*proto.ApbStaticUpdateObjects), tmChans[client], clientIds[client], clientBufs[client])
 		case antidote.StaticReadObjs:
-			sendTMStaticReadObjectsRequest(protobuf.(*proto.ApbStaticReadObjects), tmChans[client], clientIds[client])
+			sendTMStaticReadObjectsRequest(protobuf.(*proto.ApbStaticReadObjects), tmChans[client], clientIds[client], clientBufs[client])
 		case antidote.StaticRead:
-			sendTMStaticReadRequest(protobuf.(*proto.ApbStaticRead), tmChans[client], clientIds[client])
+			sendTMStaticReadRequest(protobuf.(*proto.ApbStaticRead), tmChans[client], clientIds[client], clientBufs[client])
 		}
 	}
 }
@@ -1065,16 +1669,19 @@ func handleMultiClientReplies(conn net.Conn, replyChan chan antidote.TMMultiClie
 	var respProto pb.Message
 	var replyType byte
 	var err error
+	buf := make([]byte, START_CLIENT_BUF_SIZE) //Re-usable byte buffer for SendProtoMultiClientNoCheck.
+	stateBuf := crdt.NewBufsToReturn()         //Collects large buffers that are used by CRDT states. These buffers should be returned after the states are Marshalled (or after sent to the client).
+
 	for {
 		reply := <-replyChan
 		//fmt.Printf("[ProtoServer][MultiClient]Got reply from TM: %v\n", reply)
 		switch typedReply := reply.Reply.(type) {
 		case antidote.TMStaticReadReply: //Replies to both static read and static read objects are the same
-			respProto, replyType = antidote.CreateStaticReadResp(typedReply.States, reply.TxnId, typedReply.Timestamp), antidote.StaticReadObjsReply
+			respProto, replyType = antidote.CreateStaticReadResp(typedReply.States, reply.TxnId, typedReply.Timestamp, stateBuf), antidote.StaticReadObjsReply
 		case antidote.TMStaticUpdateReply:
 			respProto, replyType = antidote.CreateCommitOkResp(reply.TxnId, typedReply.Timestamp), antidote.CommitTransReply
 		case []crdt.State: //Reply to both read and read objects are the same
-			respProto, replyType = antidote.CreateReadObjectsResp(typedReply), antidote.ReadObjsReply
+			respProto, replyType = antidote.CreateReadObjectsResp(typedReply, stateBuf), antidote.ReadObjsReply
 		case antidote.TMUpdateReply:
 			respProto, replyType = antidote.CreateOperationResp(), antidote.OpReply
 		case antidote.TMStartTxnReply:
@@ -1083,7 +1690,8 @@ func handleMultiClientReplies(conn net.Conn, replyChan chan antidote.TMMultiClie
 			respProto, replyType = antidote.CreateCommitOkResp(reply.TxnId, typedReply.Timestamp), antidote.CommitTransReply
 
 		}
-		err = antidote.SendProtoMultiClientNoCheck(replyType, uint16(reply.ClientID), respProto, conn)
+		//err = antidote.SendProtoMultiClientNoCheck(replyType, uint16(reply.ClientID), respProto, conn)
+		err, buf = antidote.SendProtoMultiClientNoCheckReusableBuf(replyType, uint16(reply.ClientID), respProto, conn, buf)
 		if err != nil {
 			conn.Close()
 			fmt.Println("[ProtoServer]Error on sending proto to multi client:", err)
@@ -1093,7 +1701,7 @@ func handleMultiClientReplies(conn net.Conn, replyChan chan antidote.TMMultiClie
 
 }
 
-func handleProtoTestRead(protobuf pb.Message, protoType byte) *proto.ApbStaticReadObjectsResp {
+func handleProtoTestRead(protobuf pb.Message, protoType byte, stateBuf *crdt.BufsToReturnToPool) *proto.ApbStaticReadObjectsResp {
 	var txnId antidote.TransactionId
 	var clientClock clocksi.Timestamp
 	var objs []crdt.ReadObjectParams
@@ -1126,7 +1734,7 @@ func handleProtoTestRead(protobuf pb.Message, protoType byte) *proto.ApbStaticRe
 			states[i] = testState
 		}
 	}
-	return antidote.CreateStaticReadResp(states, txnId, clientClock)
+	return antidote.CreateStaticReadResp(states, txnId, clientClock, stateBuf)
 	/*var currObj crdt.ReadObjectParams
 	states := make([]crdt.State, len(objs))
 	for i := 0; i < len(objs); i++ {
@@ -1165,7 +1773,7 @@ func handleProtoTestRead(protobuf pb.Message, protoType byte) *proto.ApbStaticRe
 			states[i] = state
 		}
 	}
-	return antidote.CreateStaticReadResp(states, txnId, clientClock)*/
+	return antidote.CreateStaticReadResp(states, txnId, clientClock, stateBuf)*/
 }
 
 func createTMRequest(args antidote.TMRequestArgs, txnId antidote.TransactionId,
@@ -1239,22 +1847,66 @@ func checkDisabledComponents() {
 		fmt.Println("[PS][WARNING]Replication is disabled - no updates will be sent or received to/from other replicas. " +
 			"This should only be used for debugging/specific performance analysis.")
 	}
+	if shared.IsGCDisabled {
+		fmt.Println("[PS][WARNING]PotionDB's GC (Garbage Collection) is disabled. While Go's GC will still work, memory usage may grow infinitely as updates get applied. " +
+			"This should only be used for debugging/specific performance analysis.")
+	}
 }
 
 func startProfiling(configs *tools.ConfigLoader) {
+	var err error
 	if profileCPUString, has := configs.GetAndHasConfig(CPU_PROFILE_KEY); has {
-		profileCPU, _ = strconv.ParseBool(profileCPUString)
-		if profileCPU {
-			file, err := os.Create(configs.GetConfig(CPU_FILE_KEY))
-			utilities.CheckErr("Failed to create CPU profile file: ", err)
-			fmt.Println("CPU profile file created at: ", file.Name())
-			pprof.StartCPUProfile(file)
-			fmt.Println("Started CPU profiling")
+		profileCPU, err = strconv.ParseBool(profileCPUString)
+		if err != nil {
+			profileCPU = true
+			delay, err := strconv.ParseInt(profileCPUString, 10, 64)
+			if err != nil {
+				fmt.Printf("[WARNING]Invalid CPU profilling settings, CPU profile is off.\n")
+				profileCPU = false
+			} else {
+				go func(waitTime int64) {
+					fmt.Printf("Waiting for %dms before starting CPU profiling...\n", waitTime)
+					time.Sleep(time.Duration(waitTime) * time.Millisecond)
+					file, err := os.Create(configs.GetConfig(CPU_FILE_KEY))
+					utilities.CheckErr("Failed to create CPU profile file: ", err)
+					fmt.Println("CPU profile file created at: ", file.Name())
+					pprof.StartCPUProfile(file)
+					fmt.Println("Started CPU profiling")
+				}(delay)
+			}
+		} else {
+			if profileCPU {
+				file, err := os.Create(configs.GetConfig(CPU_FILE_KEY))
+				utilities.CheckErr("Failed to create CPU profile file: ", err)
+				fmt.Println("CPU profile file created at: ", file.Name())
+				pprof.StartCPUProfile(file)
+				fmt.Println("Started CPU profiling")
+			}
 		}
 	}
 	if profileMemString, has := configs.GetAndHasConfig(MEM_PROFILE_KEY); has {
-		profileMem, _ = strconv.ParseBool(profileMemString)
-		if profileMem {
+		profileMem, err = strconv.ParseBool(profileMemString)
+		if err != nil {
+			profileMem = true
+			delay, err := strconv.ParseInt(profileMemString, 10, 64)
+			if err != nil {
+				fmt.Printf("[WARNING]Invalid memory profilling settings, memory profile is off.\n")
+				profileMem = false
+			} else {
+				fileLoc := configs.GetConfig(MEM_FILE_KEY)
+				dotPos := strings.LastIndex(fileLoc, ".")
+				fileLoc = fileLoc[:dotPos] + "_base" + fileLoc[dotPos:]
+				fmt.Printf("Memory profile with delay is on. A memory profile to use for diff will be generated under name %s.\n", fileLoc)
+				go func(waitTime int64, fileLocation string) {
+					time.Sleep(time.Duration(waitTime) * time.Millisecond)
+					file, err := os.Create(fileLocation)
+					utilities.CheckErr("Failed to create base Memory profile file: ", err)
+					fmt.Println("Created memory profile file at ", file.Name())
+					pprof.WriteHeapProfile(file)
+					file.Close()
+				}(delay, fileLoc)
+			}
+		} else if profileMem {
 			fmt.Println("Started mem profiling")
 		}
 	}
@@ -1320,10 +1972,11 @@ func loadConfigs() (configs *tools.ConfigLoader) {
 	queryNumbers := flag.String("queryNumbers", "none", "list of TPC-H queries to create views for. By default views for all TPC-H queries are loaded.")
 	protoTestMode := flag.String("protoTestMode", "none", "if true, queries return a default answer in order to evaluate protobuf's performance.")
 	fastSingleRead := flag.String("fastSingleRead", "none", "if true, static reads for a single CRDT skip clock verification, thus avoiding a lock.")
-	cpuProfile := flag.String("cpuProfiling", "none", "if true, a Go log profile will be created regarding CPU usage.")
+	cpuProfile := flag.String("cpuProfiling", "none", "if true, a Go log profile will be created regarding CPU usage. Alternatively, pass a delay (in ms) to delay CPU profile starting.")
 	memoryProfile := flag.String("memProfiling", "none", "if true, a Go log profile will be created regarding memory usage.")
 	memDebug := flag.String("memDebug", "none", "if true, prints some debug info regarding memory usage. Alternatively, can also specify the interval (in ms) for printing this info.")
 	dataloadType := flag.String("dataloadType", "none", "if doing tpch dataload, whenever to use compressed (default) or raw dataload. This is mostly for debugging/testing purposes.")
+	nPartitions := flag.String("nPartitions", "none", "number of partitions for the Materializer. This is usually better set via a config file, as it must be equal for all replicas. Do not set via command line unless debugging/experimenting.")
 
 	flag.Parse()
 	configs = &tools.ConfigLoader{}
@@ -1479,7 +2132,12 @@ func loadConfigs() (configs *tools.ConfigLoader) {
 	if isFlagValid(*dataloadType, "none") {
 		tpch.DataloadType = *dataloadType
 	}
-	fmt.Printf("[PS]DoDataload: %s; SF: %s; DataLoc: %s; Region: %s.\n", *doDataload, *sf, *dataLoc, *region)
+	if isFlagValid(*nPartitions, "none") {
+		configs.ReplaceConfig("nPartitions", *nPartitions)
+	}
+	//configs.ReplaceConfig("nPartitions", "64")
+	fmt.Printf("[PS]DoDataload: %s; SF: %s; DataLoc: %s; Region: %s; Partitions: %d..\n", *doDataload, *sf, *dataLoc, *region, configs.GetIntConfig("nPartitions", 0))
+	//fmt.Printf("[PS]nPartitions from command line: %v; from config file: %d.\n", *nPartitions, configs.GetIntConfig("nPartitions", 0))
 	//fmt.Println(*doDataload)
 	//fmt.Println(*sf)
 	//fmt.Println(*dataLoc)
@@ -1661,6 +2319,151 @@ func checkSigtermUntilStartupFinishes(cancelChan chan os.Signal, readyChan chan 
 		os.Exit(1)
 	case <-readyChan: //Nothing, just finish goroutine.
 
+	}
+}
+
+// Debug-related method. If we read states but don't convert to protobufs, then the automatic releasing of buffers to pools won't work.
+// So we need to do it manually.
+func collectBufsFromState(states []crdt.State, stateBufs *crdt.BufsToReturnToPool) {
+	//Usually it'll be a single state, but this code is written to be able to handle multiple
+	for _, state := range states {
+		switch s := state.(type) {
+		//Emb maps may have other relevant states within.
+		case crdt.EmbMapEntryState:
+			collectBufsFromMapState(s.States, stateBufs)
+		case crdt.EmbMapGetValueState:
+			collectBufsFromState([]crdt.State{s.State}, stateBufs) //May be another EmbMap inside...
+		case crdt.EmbMapGetValuesState:
+			collectBufsFromMapState(s.States, stateBufs)
+		case crdt.CounterArrayState:
+			if len(s) >= shared.MIN_SLICE_POOL_SIZE {
+				stateBufs.Bufs.Append(crdt.BufToReturn{CRDTType: s.GetCRDTType(), Buf: []int64(s)})
+			}
+		}
+		if state.GetCRDTType() == proto.CRDTType_MAP_COUNTER {
+			switch s := state.(type) {
+			case crdt.CounterMapState[int64]:
+				if len(s.Pairs) >= shared.MIN_SLICE_POOL_SIZE {
+					buf := crdt.CounterMapStateBufs{DataType: proto.DATAType_INT64, PairsBuf: s.Pairs}
+					if len(s.Data) > 0 {
+						buf.DataBuf = s.Data
+					}
+					stateBufs.Bufs.Append(crdt.BufToReturn{CRDTType: s.GetCRDTType(), Buf: buf})
+				}
+			case crdt.CounterMapState[int32]:
+				if len(s.Pairs) >= shared.MIN_SLICE_POOL_SIZE {
+					buf := crdt.CounterMapStateBufs{DataType: proto.DATAType_INT32, PairsBuf: s.Pairs}
+					if len(s.Data) > 0 {
+						buf.DataBuf = s.Data
+					}
+					stateBufs.Bufs.Append(crdt.BufToReturn{CRDTType: s.GetCRDTType(), Buf: buf})
+				}
+			case crdt.CounterMapState[int16]:
+				if len(s.Pairs) >= shared.MIN_SLICE_POOL_SIZE {
+					buf := crdt.CounterMapStateBufs{DataType: proto.DATAType_INT16, PairsBuf: s.Pairs}
+					if len(s.Data) > 0 {
+						buf.DataBuf = s.Data
+					}
+					stateBufs.Bufs.Append(crdt.BufToReturn{CRDTType: s.GetCRDTType(), Buf: buf})
+				}
+			case crdt.CounterMapState[int8]:
+				if len(s.Pairs) >= shared.MIN_SLICE_POOL_SIZE {
+					buf := crdt.CounterMapStateBufs{DataType: proto.DATAType_INT8, PairsBuf: s.Pairs}
+					if len(s.Data) > 0 {
+						buf.DataBuf = s.Data
+					}
+					stateBufs.Bufs.Append(crdt.BufToReturn{CRDTType: s.GetCRDTType(), Buf: buf})
+				}
+			case crdt.CounterMapState[float64]:
+				if len(s.Pairs) >= shared.MIN_SLICE_POOL_SIZE {
+					buf := crdt.CounterMapStateBufs{DataType: proto.DATAType_FLOAT64, PairsBuf: s.Pairs}
+					if len(s.Data) > 0 {
+						buf.DataBuf = s.Data
+					}
+					stateBufs.Bufs.Append(crdt.BufToReturn{CRDTType: s.GetCRDTType(), Buf: buf})
+				}
+			case crdt.CounterMapState[float32]:
+				if len(s.Pairs) >= shared.MIN_SLICE_POOL_SIZE {
+					buf := crdt.CounterMapStateBufs{DataType: proto.DATAType_FLOAT32, PairsBuf: s.Pairs}
+					if len(s.Data) > 0 {
+						buf.DataBuf = s.Data
+					}
+					stateBufs.Bufs.Append(crdt.BufToReturn{CRDTType: s.GetCRDTType(), Buf: buf})
+				}
+
+			}
+		}
+	}
+}
+
+// Copy from collectBufsFromState, but states is in a map (as in RWEmbMap states) instead of in a slice.
+func collectBufsFromMapState(states map[string]crdt.State, stateBufs *crdt.BufsToReturnToPool) {
+	for _, state := range states {
+		switch s := state.(type) {
+		//Emb maps may have other relevant states within.
+		case crdt.EmbMapEntryState:
+			collectBufsFromMapState(s.States, stateBufs)
+		case crdt.EmbMapGetValueState:
+			collectBufsFromState([]crdt.State{s.State}, stateBufs) //May be another EmbMap inside...
+		case crdt.EmbMapGetValuesState:
+			collectBufsFromMapState(s.States, stateBufs)
+		case crdt.CounterArrayState:
+			if len(s) >= shared.MIN_SLICE_POOL_SIZE {
+				stateBufs.Bufs.Append(crdt.BufToReturn{CRDTType: s.GetCRDTType(), Buf: []int64(s)})
+			}
+		}
+		if state.GetCRDTType() == proto.CRDTType_MAP_COUNTER {
+			switch s := state.(type) {
+			case crdt.CounterMapState[int64]:
+				if len(s.Pairs) >= shared.MIN_SLICE_POOL_SIZE {
+					buf := crdt.CounterMapStateBufs{DataType: proto.DATAType_INT64, PairsBuf: s.Pairs}
+					if len(s.Data) > 0 {
+						buf.DataBuf = s.Data
+					}
+					stateBufs.Bufs.Append(crdt.BufToReturn{CRDTType: s.GetCRDTType(), Buf: buf})
+				}
+			case crdt.CounterMapState[int32]:
+				if len(s.Pairs) >= shared.MIN_SLICE_POOL_SIZE {
+					buf := crdt.CounterMapStateBufs{DataType: proto.DATAType_INT32, PairsBuf: s.Pairs}
+					if len(s.Data) > 0 {
+						buf.DataBuf = s.Data
+					}
+					stateBufs.Bufs.Append(crdt.BufToReturn{CRDTType: s.GetCRDTType(), Buf: buf})
+				}
+			case crdt.CounterMapState[int16]:
+				if len(s.Pairs) >= shared.MIN_SLICE_POOL_SIZE {
+					buf := crdt.CounterMapStateBufs{DataType: proto.DATAType_INT16, PairsBuf: s.Pairs}
+					if len(s.Data) > 0 {
+						buf.DataBuf = s.Data
+					}
+					stateBufs.Bufs.Append(crdt.BufToReturn{CRDTType: s.GetCRDTType(), Buf: buf})
+				}
+			case crdt.CounterMapState[int8]:
+				if len(s.Pairs) >= shared.MIN_SLICE_POOL_SIZE {
+					buf := crdt.CounterMapStateBufs{DataType: proto.DATAType_INT8, PairsBuf: s.Pairs}
+					if len(s.Data) > 0 {
+						buf.DataBuf = s.Data
+					}
+					stateBufs.Bufs.Append(crdt.BufToReturn{CRDTType: s.GetCRDTType(), Buf: buf})
+				}
+			case crdt.CounterMapState[float64]:
+				if len(s.Pairs) >= shared.MIN_SLICE_POOL_SIZE {
+					buf := crdt.CounterMapStateBufs{DataType: proto.DATAType_FLOAT64, PairsBuf: s.Pairs}
+					if len(s.Data) > 0 {
+						buf.DataBuf = s.Data
+					}
+					stateBufs.Bufs.Append(crdt.BufToReturn{CRDTType: s.GetCRDTType(), Buf: buf})
+				}
+			case crdt.CounterMapState[float32]:
+				if len(s.Pairs) >= shared.MIN_SLICE_POOL_SIZE {
+					buf := crdt.CounterMapStateBufs{DataType: proto.DATAType_FLOAT32, PairsBuf: s.Pairs}
+					if len(s.Data) > 0 {
+						buf.DataBuf = s.Data
+					}
+					stateBufs.Bufs.Append(crdt.BufToReturn{CRDTType: s.GetCRDTType(), Buf: buf})
+				}
+			}
+		}
 	}
 }
 

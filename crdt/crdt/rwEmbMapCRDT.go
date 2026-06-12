@@ -714,7 +714,7 @@ func (compArgs BoolCompareArguments) SatisfiesComp(otherValue bool) bool {
 }
 
 // Note: crdt can (and most often will be) nil
-func (crdt *RWEmbMapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *RWEmbMapCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	crdt = &RWEmbMapCrdt{
 		entries: tools.NewGoMap[string, CRDT](),
 		removes: make(map[string]markedVC),
@@ -732,7 +732,7 @@ func (crdt *RWEmbMapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint1
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *RWEmbMapCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *RWEmbMapCrdt) {
+func (crdt *RWEmbMapCrdt) initializeFromSnapshot(startTs clocksi.Timestamp, replicaID uint16) (sameCRDT *RWEmbMapCrdt) {
 	crdt.CRDTVM, crdt.replicaID = (&genericInversibleCRDT{}).initialize(crdt), replicaID
 	return crdt
 }
@@ -754,27 +754,28 @@ func (crdt *RWEmbMapCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, rep
 		}
 	}
 */
-func (crdt *RWEmbMapCrdt) CRDTGC(safeClk clocksi.Timestamp) {
-	fmt.Printf("[RWEmbMap]CRDTGC called.\n")
-	if crdt.hasUpdsSinceGC {
-		startTs := time.Now().UnixNano()
+func (crdt *RWEmbMapCrdt) CRDTGC(safeClk clocksi.Timestamp, fastGC bool) {
+	//fmt.Printf("[RWEmbMap]CRDTGC called.\n")
+	//During fastGC we skip GC of massive maps, as it would be too slow and likely each entry has few updates.
+	if crdt.hasUpdsSinceGC && (!fastGC || crdt.entries.Len() < 10000) {
+		//startTs := time.Now().UnixNano()
 		if mapWithBitset, ok := crdt.entries.(tools.ShardedMapWithBitset[CRDT]); ok {
 			mapWithBitset.ApplyToAllValueBitSet(func(crdt CRDT) {
-				crdt.(CRDTVM).GC(safeClk)
+				crdt.(CRDTVM).GC(safeClk, fastGC)
 			})
 			mapWithBitset.ClearBits()
 		} else {
 			crdt.entries.ApplyToAllValue(func(crdt CRDT) {
-				crdt.(CRDTVM).GC(safeClk)
+				crdt.(CRDTVM).GC(safeClk, fastGC)
 			})
 		}
-		nCount := crdt.entries.Len()
-		fmt.Printf("[RWEmbMap]Called GC of %d embedded CRDTs, took %d ms.\n", nCount, (time.Now().UnixNano()-startTs)/1000000)
+		//nCount := crdt.entries.Len()
+		//fmt.Printf("[RWEmbMap]Called GC of %d embedded CRDTs, took %d ms.\n", nCount, (time.Now().UnixNano()-startTs)/1000000)
 		crdt.hasUpdsSinceGC = false
-	} else {
+	} /*else {
 		fmt.Printf("[RWEmbMap]Did not call GC as no updates have been applied since last GC.\n")
 		fmt.Printf("[RWEmbMap]Number of CRDTs inside: %d\n", crdt.entries.Len())
-	}
+	}*/
 }
 
 func (crdt *RWEmbMapCrdt) IsBigCRDT() bool { return crdt.entries.Len() >= 50 }
@@ -2087,6 +2088,7 @@ func (crdt *RWEmbMapCrdt) getPartialState(updsNotYetApplied []UpdateArguments, a
 			fmt.Printf("[RWEmb][EmbMapPartialArguments]WARNING! At least one read failed. List of CRDT's keys: %v. Asked keys: %v\n", crdtKeys, askedKeys)
 		}*/
 		crdt.receiveRoutineReads(states)
+		//fmt.Printf("[RWEmbMap]Reading with EmbMapPartialArguments, args %+v, states read: %+v\n", args, states)
 		return EmbMapGetValuesState{States: states}
 	}
 
@@ -2332,6 +2334,7 @@ func (crdt *RWEmbMapCrdt) Update(args UpdateArguments) (downstreamArgs Downstrea
 		return multiDowns
 	default:
 		fmt.Printf("[RWEmbMapCrdt][Update]Unknown update type: %v (%T)\n", args, args)
+		return WrongOp{RecOp: args, RecOpCrdtType: args.GetCRDTType(), CrdtType: crdt.GetCRDTType(), DataType: crdt.GetDATAType()}
 	}
 	return
 }
@@ -2345,6 +2348,12 @@ func (crdt *RWEmbMapCrdt) getUpdateAllDownstreamArgsArray(upds []EmbMapUpdate) (
 		if embUpd == nil {
 			fmt.Printf("[RWEmbMapCRDT]GetUpdateAllDownstream. Nil embUpd (downstream)! %+v. Upd: %+v (Type: %T). key: %s. CRDT: %+v (Type: %T)\n",
 				embUpd, pairUpd.Upd, pairUpd.Upd, pairUpd.Key, embCrdt, embCrdt)
+		} else if wrongType, ok := embUpd.(WrongOp); ok {
+			wrongTypeS := fmt.Sprintf("{op: %+v, crdtType: %s, dataType: %v}", wrongType.RecOp, wrongType.CrdtType.String(), wrongType.DataType.String())
+			toPrint := fmt.Sprintf("[RWEmbMap][Wrong update type for key %v! Update args: %+v. Wrong type: %s. Obj CRDT type: %+v", pairUpd.Key, pairUpd.Upd, wrongTypeS, embCrdt.GetCRDTType())
+			fmt.Println(toPrint)
+			//panic(toPrint)
+			return wrongType
 		}
 		if (embUpd != NoOp{} && embUpd.MustReplicate()) {
 			downstreams[written] = KeyDownArgsPair{Key: pairUpd.Key, Upd: embUpd}
@@ -2426,6 +2435,12 @@ func (crdt *RWEmbMapCrdt) getUpdateAllDownstreamArgs(upds map[string]UpdateArgum
 		if embUpd == nil {
 			fmt.Printf("[RWEmbMapCRDT]GetUpdateAllDownstream. Nil embUpd (downstream)! %+v. Upd: %+v (Type: %T). key: %s. CRDT: %+v (Type: %T). NUpds: %d. All upds (not downstream): %+v.\n",
 				embUpd, upd, upd, key, embCrdt, embCrdt, len(upds), upds)
+		} else if wrongType, ok := embUpd.(WrongOp); ok {
+			wrongTypeS := fmt.Sprintf("{op: %+v, crdtType: %s, dataType: %v}", wrongType.RecOp, wrongType.CrdtType.String(), wrongType.DataType.String())
+			toPrint := fmt.Sprintf("[RWEmbMap][Wrong update type for key %v! Update args: %+v. Wrong type: %s. Obj CRDT type: %+v", key, upd, wrongTypeS, embCrdt.GetCRDTType())
+			fmt.Println(toPrint)
+			//panic(toPrint)
+			return wrongType
 		}
 		if (embUpd != NoOp{} && embUpd.MustReplicate()) {
 			downstreams[key] = embUpd
@@ -2523,12 +2538,18 @@ func (crdt *RWEmbMapCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs Dow
 				otherDown = append(otherDown, newDown)
 			}
 		}
+		/*if len(multiUpd) > 1 {
+			fmt.Printf("[RWEmbMapCRDT]MultiUpd with %d updates, downstreamed. Len of map: %d. Type of map: %T\n", len(multiUpd), crdt.entries.Len(), crdt.entries)
+		}*/
+		if len(otherDown) == 0 {
+			return nil
+		}
 		return otherDown
 	}
 	effect, otherDownstreamArgs := crdt.applyDownstream(updTs, downstreamArgs, NORMAL)
 	//Necessary for inversibleCrdt
 	if effect != nil { //We don't want to add firstUpdate to history, as they are intended for initial data.
-		crdt.addToHistory(&updTs, &downstreamArgs, effect)
+		crdt.addToHistory(updTs, downstreamArgs, effect)
 		crdt.hasUpdsSinceGC = true
 	}
 	return
@@ -2536,20 +2557,20 @@ func (crdt *RWEmbMapCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs Dow
 
 // Note: When reapplying ops, we need to ensure that we don't replay downstreams in the embedded CRDTs
 // Hence the use of the boolean
-func (crdt *RWEmbMapCrdt) applyDownstream(updTs clocksi.Timestamp, downstreamArgs DownstreamArguments, isRedo bool) (effect *Effect,
+func (crdt *RWEmbMapCrdt) applyDownstream(updTs clocksi.Timestamp, downstreamArgs DownstreamArguments, isRedo bool) (effect Effect,
 	otherDownstreamArgs DownstreamArguments) {
-	var tmpEffect Effect = NoEffect{}
+	effect = NoEffect{}
 	switch opType := downstreamArgs.(type) {
 	case DownstreamRWEmbMapUpdateAll:
-		tmpEffect, otherDownstreamArgs = crdt.applyUpdateAll(updTs, opType.Upds, opType.RmvEntries, opType.ReplicaID, isRedo)
+		effect, otherDownstreamArgs = crdt.applyUpdateAll(updTs, opType.Upds, opType.RmvEntries, opType.ReplicaID, isRedo)
 	case DownstreamRWEmbMapRemoveAll:
-		tmpEffect = crdt.applyRemoveAll(opType.Rems, opType.ReplicaID, opType.Ts)
+		effect = crdt.applyRemoveAll(opType.Rems, opType.ReplicaID, opType.Ts)
 	case DownstreamRWEmbMapUpdateAllArray:
-		tmpEffect, otherDownstreamArgs = crdt.applyUpdateAllArray(updTs, opType.Upds, opType.RmvEntries, opType.ReplicaID, isRedo)
+		effect, otherDownstreamArgs = crdt.applyUpdateAllArray(updTs, opType.Upds, opType.RmvEntries, opType.ReplicaID, isRedo)
 	case DownstreamRWEmbMapUpdateSingle:
-		tmpEffect, otherDownstreamArgs = crdt.applyUpdateSingle(updTs, opType.Key, opType.Upd, opType.RmvEntries, opType.ReplicaID, isRedo)
+		effect, otherDownstreamArgs = crdt.applyUpdateSingle(updTs, opType.Key, opType.Upd, opType.RmvEntries, opType.ReplicaID, isRedo)
 	case DownstreamRWEmbMapRemoveSingle:
-		tmpEffect = crdt.applyRemoveSingle(opType.Rem, opType.ReplicaID, opType.Ts)
+		effect = crdt.applyRemoveSingle(opType.Rem, opType.ReplicaID, opType.Ts)
 	case LocalDownstreamRWEmbMapFirstUpdate:
 		//Note: redo is not possible for this update type. Effects are also not supported, as redo is not allowed. Please use DownstreamRWEmbMapUpdateAllArray if redoing is necessary.
 		crdt.applyLocalFirstUpdate(updTs, opType.Upds)
@@ -2565,12 +2586,12 @@ func (crdt *RWEmbMapCrdt) applyDownstream(updTs clocksi.Timestamp, downstreamArg
 	default:
 		fmt.Printf("[RWEmbMapCRDT][Downstream]Unsupported downstream type %v (%T)\n", downstreamArgs, downstreamArgs)
 	}
-	return &tmpEffect, otherDownstreamArgs
+	return &effect, otherDownstreamArgs
 }
 
 func (crdt *RWEmbMapCrdt) applyUpdateAllArray(updTs clocksi.Timestamp, upds []KeyDownArgsPair,
-	remClks []int64, remoteID uint16, isRedo bool) (effect *RWEmbMapUpdateAllEffect, otherDownstreamArgs DownstreamArguments) {
-	effect = &RWEmbMapUpdateAllEffect{
+	remClks []int64, remoteID uint16, isRedo bool) (effect RWEmbMapUpdateAllEffect, otherDownstreamArgs DownstreamArguments) {
+	effect = RWEmbMapUpdateAllEffect{
 		Updated:   make([]string, len(upds)),
 		ReplicaID: remoteID,
 	}
@@ -2699,6 +2720,8 @@ func (crdt *RWEmbMapCrdt) resizeMapIfNeeded(updSize int) {
 		newEntries := crdt.createMap(newSize)
 		newEntries.CopyFrom(crdt.entries)
 		//fmt.Printf("[RWEmb]Optimized resize (number of upds: %d)\n", updSize)
+		fmt.Printf("[RWEmbMap]Optimized resize. Upds: %d. Old type of map: %T. New type of map: %T. Had initial size: %v.\n",
+			updSize, crdt.entries, newEntries, crdt.hasInitSize)
 		crdt.entries = newEntries
 	}
 }
@@ -2717,7 +2740,9 @@ func (crdt *RWEmbMapCrdt) applyLocalFirstUpdate(updTs clocksi.Timestamp, upds []
 	var sizeType string //Temporary, only for printing.
 
 	if len(upds) < 20000 {
-		//fmt.Printf("[RWEmbMapCRDT]applyLocalFirstUpdate: Applying small first update of size %d\n", len(upds))
+		/*if len(upds) > 1000 && len(upds) < 3000 {
+			fmt.Printf("[RWEmbMapCRDT]applyLocalFirstUpdate: Applying small first update of size %d\n", len(upds))
+		}*/
 		sizeType = "small"
 		crdt.applyFirstUpdateSmallLocal(updTs, upds)
 	} else if len(upds) < RWEMBMAP_MIN_SIZE_FOR_SHARDING { //300k. If map is not sharded, we process the updates/CRDTs in parallel but apply sequentially.
@@ -2781,20 +2806,20 @@ func (crdt *RWEmbMapCrdt) applyRemoteFirstUpdate(updTs clocksi.Timestamp, upds [
 	}
 }
 
-func (crdt *RWEmbMapCrdt) redoFirstUpdateLocal(upds []EmbMapUpdate, remoteID uint16) (effect *RWEmbMapUpdateAllEffect, otherDownstreamArgs DownstreamArguments) {
+func (crdt *RWEmbMapCrdt) redoFirstUpdateLocal(upds []EmbMapUpdate, remoteID uint16) (effect RWEmbMapUpdateAllEffect, otherDownstreamArgs DownstreamArguments) {
 	keys := make([]string, len(upds))
 	for i, pair := range upds {
 		keys[i] = pair.Key
 	}
-	return &RWEmbMapUpdateAllEffect{Updated: keys, ReplicaID: remoteID}, nil
+	return RWEmbMapUpdateAllEffect{Updated: keys, ReplicaID: remoteID}, nil
 }
 
-func (crdt *RWEmbMapCrdt) redoFirstUpdateRemote(upds []KeyDownArgsPair, remoteID uint16) (effect *RWEmbMapUpdateAllEffect, otherDownstreamArgs DownstreamArguments) {
+func (crdt *RWEmbMapCrdt) redoFirstUpdateRemote(upds []KeyDownArgsPair, remoteID uint16) (effect RWEmbMapUpdateAllEffect, otherDownstreamArgs DownstreamArguments) {
 	keys := make([]string, len(upds))
 	for i, pair := range upds {
 		keys[i] = pair.Key
 	}
-	return &RWEmbMapUpdateAllEffect{Updated: keys, ReplicaID: remoteID}, nil
+	return RWEmbMapUpdateAllEffect{Updated: keys, ReplicaID: remoteID}, nil
 }
 
 func (crdt *RWEmbMapCrdt) applyFirstUpdateSmallLocal(updTs clocksi.Timestamp, upds []EmbMapUpdate) {
@@ -3097,7 +3122,13 @@ func (crdt *RWEmbMapCrdt) applyFirstUpdateMediumRemote(updTs clocksi.Timestamp, 
 }
 
 func (crdt *RWEmbMapCrdt) applyFirstUpdateLargeRemote(updTs clocksi.Timestamp, upds []KeyDownArgsPair) {
-	shardedMap := crdt.entries.(tools.ShardedMapWithBitset[CRDT])
+	shardedMap, ok := crdt.entries.(tools.ShardedMapWithBitset[CRDT])
+	if !ok {
+		fmt.Printf("[RWEmbMapCRDT][WARNING]ApplyFirstUpdateLargeRemote was expecting an empty, ShardedMapWithBitset, but somehow it found something else. Falling back to applyFirstUpdateMediumRemote. This is likely a bug. NElems current: %d. Adding: %d.\n",
+			crdt.entries.Len(), len(upds))
+		crdt.applyFirstUpdateMediumRemote(updTs, upds)
+		return
+	}
 	nShards := shardedMap.GetNShards()
 
 	//Two phases (different from local version!):
@@ -3106,7 +3137,7 @@ func (crdt *RWEmbMapCrdt) applyFirstUpdateLargeRemote(updTs clocksi.Timestamp, u
 	//Goroutines of phase 1 will send the sharded updates directly to the goroutines of phase 2, as they finish sharding.
 
 	//Preparing variables for phase 1
-	nRoutines := min(len(upds)/400000, tools.Max(runtime.NumCPU()/4, 1)) //Light phase, so we do not want to use too many routines (less routines here = less update slices each shard needs to apply)
+	nRoutines := min(len(upds)/RWEMBMAP_MIN_SIZE_FOR_SHARDING, tools.Max(runtime.NumCPU()/4, 1)) //Light phase, so we do not want to use too many routines (less routines here = less update slices each shard needs to apply)
 	updsPerRoutine, currStart := len(upds)/nRoutines, 0
 
 	routineShards := min(nShards, nRoutines) //Heavy phase, so we want to use as many routines as possible.
@@ -3139,7 +3170,7 @@ func (crdt *RWEmbMapCrdt) applyFirstUpdateLargeRemote(updTs clocksi.Timestamp, u
 }
 
 /*func (crdt *RWEmbMapCrdt) applyUpdateAllArray(updTs clocksi.Timestamp, upds []KeyDownArgsPair,
-	remClks map[int16]int64, remoteID uint16, isRedo bool) (effect *RWEmbMapUpdateAllEffect, otherDownstreamArgs DownstreamArguments) {
+	remClks map[int16]int64, remoteID uint16, isRedo bool) (effect RWEmbMapUpdateAllEffect, otherDownstreamArgs DownstreamArguments) {
 	effect = &RWEmbMapUpdateAllEffect{
 		Updated:   make([]string, len(upds)),
 		ReplicaID: remoteID,
@@ -3329,8 +3360,8 @@ func (crdt *RWEmbMapCrdt) applyUpdateSingle(updTs clocksi.Timestamp, key string,
 
 // Note: Assumes that all updates are for the correct embedded CRDT type
 func (crdt *RWEmbMapCrdt) applyUpdateAll(updTs clocksi.Timestamp, upds map[string]DownstreamArguments,
-	remClks []int64, remoteID uint16, isRedo bool) (effect *RWEmbMapUpdateAllEffect, otherDownstreamArgs DownstreamArguments) {
-	effect = &RWEmbMapUpdateAllEffect{
+	remClks []int64, remoteID uint16, isRedo bool) (effect RWEmbMapUpdateAllEffect, otherDownstreamArgs DownstreamArguments) {
+	effect = RWEmbMapUpdateAllEffect{
 		Updated:   make([]string, len(upds)),
 		ReplicaID: remoteID,
 	}
@@ -3429,7 +3460,7 @@ func (crdt *RWEmbMapCrdt) applyUpdateAll(updTs clocksi.Timestamp, upds map[strin
 
 // Note: Assumes that all updates are for the correct embedded CRDT type
 /*func (crdt *RWEmbMapCrdt) applyUpdateAll(updTs clocksi.Timestamp, upds map[string]DownstreamArguments,
-	remClks map[int16]int64, remoteID uint16, isRedo bool) (effect *RWEmbMapUpdateAllEffect, otherDownstreamArgs DownstreamArguments) {
+	remClks map[int16]int64, remoteID uint16, isRedo bool) (effect RWEmbMapUpdateAllEffect, otherDownstreamArgs DownstreamArguments) {
 	effect = &RWEmbMapUpdateAllEffect{
 		Updated:   make([]string, len(upds)),
 		ReplicaID: remoteID,
@@ -3558,7 +3589,7 @@ func (crdt *RWEmbMapCrdt) applyUpdateAll(updTs clocksi.Timestamp, upds map[strin
 	return effect, DownstreamRWEmbMapUpdateAll{Upds: newDown, RmvEntries: make(map[int16]int64)}
 }*/
 
-func (crdt *RWEmbMapCrdt) applyRemoveSingle(toRem string, remoteReplicaID uint16, remoteClk int64) (effect *RWEmbMapRemoveSingleEffect) {
+func (crdt *RWEmbMapCrdt) applyRemoveSingle(toRem string, remoteReplicaID uint16, remoteClk int64) (effect RWEmbMapRemoveSingleEffect) {
 	crdt.rmvClock.UpdatePos(remoteReplicaID, remoteClk)
 
 	remEntry, has := crdt.removes[toRem]
@@ -3568,7 +3599,7 @@ func (crdt *RWEmbMapCrdt) applyRemoveSingle(toRem string, remoteReplicaID uint16
 	} else { //Clear marks
 		remEntry.clearMarks()
 	}
-	effect = &RWEmbMapRemoveSingleEffect{PreviousRmvClk: crdt.rmvClock.GetPos(remoteReplicaID), RemovedKey: toRem, ReplicaID: remoteReplicaID}
+	effect = RWEmbMapRemoveSingleEffect{PreviousRmvClk: crdt.rmvClock.GetPos(remoteReplicaID), RemovedKey: toRem, ReplicaID: remoteReplicaID}
 	crdt.removes[toRem] = remEntry
 	existingCRDT, has := crdt.entries.Get(toRem)
 	if has {
@@ -3578,11 +3609,11 @@ func (crdt *RWEmbMapCrdt) applyRemoveSingle(toRem string, remoteReplicaID uint16
 	return
 }
 
-func (crdt *RWEmbMapCrdt) applyRemoveAll(toRem []string, remoteReplicaID uint16, remoteClk int64) (effect *RWEmbMapRemoveAllEffect) {
-	effect = &RWEmbMapRemoveAllEffect{
+func (crdt *RWEmbMapCrdt) applyRemoveAll(toRem []string, remoteReplicaID uint16, remoteClk int64) (effect RWEmbMapRemoveAllEffect) {
+	effect = RWEmbMapRemoveAllEffect{
 		PreviousClk:  crdt.rmvClock.GetPos(remoteReplicaID),
 		ReplicaID:    remoteReplicaID,
-		RemovedCRDTs: make(map[string]CRDT),
+		RemovedCRDTs: make(map[string]CRDT, len(toRem)),
 	}
 	//fmt.Println("[REMOVE]Applying Remove from", remoteReplicaID, "with clk", remoteClk)
 	crdt.rmvClock.UpdatePos(remoteReplicaID, remoteClk)
@@ -3610,7 +3641,7 @@ func (crdt *RWEmbMapCrdt) applyRemoveAll(toRem []string, remoteReplicaID uint16,
 	return
 }
 
-/*func (crdt *RWEmbMapCrdt) applyRemoveAll(toRem []string, remoteReplicaID int16, remoteClk int64) (effect *RWEmbMapRemoveAllEffect) {
+/*func (crdt *RWEmbMapCrdt) applyRemoveAll(toRem []string, remoteReplicaID int16, remoteClk int64) (effect RWEmbMapRemoveAllEffect) {
 	effect = &RWEmbMapRemoveAllEffect{
 		PreviousClk:  crdt.rmvClock.GetPos(remoteReplicaID),
 		ReplicaID:    remoteReplicaID,
@@ -3647,11 +3678,11 @@ func (crdt *RWEmbMapCrdt) applyRemoveAll(toRem []string, remoteReplicaID uint16,
 	return
 }*/
 
-// func (crdt *RWEmbMapCrdt) applyInit(size int) (effect *NoEffect) {
-func (crdt *RWEmbMapCrdt) applyInit(init EmbMapInit) (effect *NoEffect) {
+// func (crdt *RWEmbMapCrdt) applyInit(size int) (effect NoEffect) {
+func (crdt *RWEmbMapCrdt) applyInit(init EmbMapInit) (effect NoEffect) {
 	//fmt.Printf("[RWEmbMap]Initializing with size %d\n", size)
 	size := init.Size
-	effect = &NoEffect{}
+	effect = NoEffect{}
 	if size < crdt.entries.Len() {
 		return
 	}
@@ -3667,7 +3698,7 @@ func (crdt *RWEmbMapCrdt) applyInit(init EmbMapInit) (effect *NoEffect) {
 		if factor == 0 {
 			factor = tools.MAP_READ_SLICE_MEDIUM_FACTOR //We'll assume it's mostly basic CRDTs.
 		}
-		fmt.Printf("[RWEmbMap]Creating MapWithReadSlice with size %d and parallel read factor %d\n", size, factor)
+		//fmt.Printf("[RWEmbMap]Creating MapWithReadSlice with size %d and parallel read factor %d\n", size, factor)
 		newMap = tools.NewMapWithReadSliceWithSizeAndFactor[string, CRDT](size, factor)
 	} else {
 		fmt.Printf("[RWEmbMap]Creating GoMap (non-sharded) with size %d\n", size)
@@ -3729,14 +3760,14 @@ func (crdt *RWEmbMapCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
-func (crdt *RWEmbMapCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *RWEmbMapCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	//The timestamp (nil) is only used by embedded CRDTs, which won't be changed now due to the REDO flag.
 	effect, _ = crdt.applyDownstream(nil, updArgs, REDO)
 	return effect
 }
 
-func (crdt *RWEmbMapCrdt) undoEffect(effect *Effect) {
-	switch typedEffect := (*effect).(type) {
+func (crdt *RWEmbMapCrdt) undoEffect(effect Effect) {
+	switch typedEffect := (effect).(type) {
 	case RWEmbMapUpdateAllEffect:
 		crdt.undoUpdateAllEffect(typedEffect.Updated, typedEffect.PreviousRmvClk, typedEffect.AddedMark, typedEffect.ReplicaID)
 	case RWEmbMapRemoveAllEffect:
@@ -3808,10 +3839,10 @@ func (crdt *RWEmbMapCrdt) undoRemoveSingleEffect(removedKey string, removedCRDT 
 	crdt.rmvClock.UpdateForcedPos(replicaID, previousRmvClk)
 }
 
-func (crdt *RWEmbMapCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {
+func (crdt *RWEmbMapCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {
 	//Only redo CRDTs that were altered
 	for key := range crdt.keysToRebuild {
-		crdt.entries.GetDirect(key).(InversibleCRDT).RebuildCRDTToVersion(*currTs)
+		crdt.entries.GetDirect(key).(InversibleCRDT).RebuildCRDTToVersion(currTs)
 	}
 	crdt.keysToRebuild = nil
 }
@@ -3960,8 +3991,8 @@ func (crdtState EmbMapEntryState) FromReadResp(protobuf *proto.ApbReadObjectResp
 	return crdtState
 }
 
-func (crdtState EmbMapEntryState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
-	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Map{Map: &proto.ApbGetMapResp{Entries: crdtsToApbMapEntries(crdtState.States)}}}
+func (crdtState EmbMapEntryState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
+	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Map{Map: &proto.ApbGetMapResp{Entries: crdtsToApbMapEntries(crdtState.States, buf)}}}
 }
 
 func (crdtState EmbMapHasKeyState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
@@ -3969,7 +4000,7 @@ func (crdtState EmbMapHasKeyState) FromReadResp(protobuf *proto.ApbReadObjectRes
 	return crdtState
 }
 
-func (crdtState EmbMapHasKeyState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState EmbMapHasKeyState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Map{
 		Map: &proto.ApbMapPartialReadResp{Haskey: &proto.ApbMapHasKeyReadResp{Has: pb.Bool(crdtState.HasKey)}}}}}}
 }
@@ -3979,7 +4010,7 @@ func (crdtState EmbMapKeysState) FromReadResp(protobuf *proto.ApbReadObjectResp)
 	return crdtState
 }
 
-func (crdtState EmbMapKeysState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState EmbMapKeysState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Map{
 		Map: &proto.ApbMapPartialReadResp{Getkeys: &proto.ApbMapGetKeysReadResp{Keys: crdtState.Keys}}}}}}
 }
@@ -3991,10 +4022,10 @@ func (crdtState EmbMapGetValueState) FromReadResp(protobuf *proto.ApbReadObjectR
 	return crdtState
 }
 
-func (crdtState EmbMapGetValueState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState EmbMapGetValueState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	innerCrdtType, innerReadType := crdtState.State.GetCRDTType(), crdtState.State.GetREADType()
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Map{Map: &proto.ApbMapPartialReadResp{
-		Getvalue: &proto.ApbMapGetValueResp{Value: crdtState.State.(ProtoState).ToReadResp(), Crdttype: &innerCrdtType, Parttype: &innerReadType}}}}}}
+		Getvalue: &proto.ApbMapGetValueResp{Value: crdtState.State.(ProtoState).ToReadResp(buf), Crdttype: &innerCrdtType, Parttype: &innerReadType}}}}}}
 }
 
 func (crdtState EmbMapGetValuesState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
@@ -4009,16 +4040,16 @@ func (crdtState EmbMapGetValuesState) FromReadResp(protobuf *proto.ApbReadObject
 	return crdtState
 }
 
-func (crdtState EmbMapGetValuesState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
-	//fmt.Printf("[RWEmb][EmbMapGetValuesState]ToReadResp(). States: %+v\n", crdtState.States)
+func (crdtState EmbMapGetValuesState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
+	//fmt.Printf("[RWEmb][EmbMapGetValuesState]ToReadResp(buf *BufsToReturnToPool). States: %+v\n", crdtState.States)
 	keys, values := make([][]byte, len(crdtState.States)), make([]*proto.ApbMapGetValueResp, len(crdtState.States))
 	i := 0
 	for key, state := range crdtState.States {
 		crdtType, readType := state.GetCRDTType(), state.GetREADType()
-		keys[i], values[i] = tools.UnsafeStringToBytes(key), &proto.ApbMapGetValueResp{Crdttype: &crdtType, Parttype: &readType, Value: state.(ProtoState).ToReadResp()}
+		keys[i], values[i] = tools.UnsafeStringToBytes(key), &proto.ApbMapGetValueResp{Crdttype: &crdtType, Parttype: &readType, Value: state.(ProtoState).ToReadResp(buf)}
 		i++
 	}
-	//sfmt.Printf("[RWEmb][EmbMapGetValuesState]ToReadResp end. Keys: %+v, Values: %+v\n", keys, values)
+	//fmt.Printf("[RWEmb][EmbMapGetValuesState]ToReadResp end. N States/keys/values: %d, %d, %d. Keys: %+v, Values: %+v\n", len(crdtState.States), len(keys), len(values), keys, values)
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Map{
 		Map: &proto.ApbMapPartialReadResp{Getvalues: &proto.ApbMapGetValuesResp{Keys: keys, Values: values}}}}}}
 }
@@ -4671,7 +4702,7 @@ func (crdt *RWEmbMapCrdt) ToProtoState() (protobuf *proto.ProtoState) {
 	return &proto.ProtoState{State: &proto.ProtoState_Embmap{Embmap: &proto.ProtoEmbMapState{Crdts: protoCRDTs, Removes: protoRems, RmvClock: protoClk}}}
 }
 
-func (crdt *RWEmbMapCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
+func (crdt *RWEmbMapCrdt) FromProtoState(proto *proto.ProtoState, ts clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	protoMap := proto.GetEmbmap()
 	protoCRDTs, protoRmvs, protoClk := protoMap.GetCrdts(), protoMap.GetRemoves(), protoMap.GetRmvClock()
 	entries, removes := crdt.createMap(len(protoCRDTs)), make(map[string]markedVC, len(protoRmvs)) //Note: Does not consider slice maps possibility.
@@ -4701,6 +4732,9 @@ func (crdt *RWEmbMapCrdt) GetCRDT() CRDT { return crdt }
 
 func (crdt *RWEmbMapCrdt) createMap(size int) (newEntries tools.MyMap[string, CRDT]) {
 	if size < RWEMBMAP_MIN_SIZE_FOR_SHARDING {
+		if mapSlice, ok := crdt.entries.(tools.MapWithReadSlice[string, CRDT]); ok { //Ensure new map is also with a read slice.
+			return tools.NewMapWithReadSliceWithSizeAndFactor[string, CRDT](size, mapSlice.ParallelReadingFactor)
+		}
 		newEntries = tools.NewGoMapWithSize[string, CRDT](size)
 	} else {
 		newEntries = tools.NewShardedMapBitsetWithSize[CRDT](crdt.getNShardsForNewMap(size), size)

@@ -57,9 +57,10 @@ type TopSumCrdt struct {
 	notInTop map[int32]*TopKScore
 	//Sum of adds not yet propagated.
 	notPropagated map[int32]*TopKScore
-	//Buffer for getTopN and getTopAbove.
+	//Buffer for queries.
 	//Each time the top is modified it gets nilled, and is rebuilt on the first execution of one of those queries.
 	//Note that changes to notInTop DOES NOT nil this buffer.
+	//Since this buffer is nilled on update (of the top), it is safe to return this slice directly on reads.
 	sortedElems      []TopKScore
 	nMaxNotTop, nMin int //Counters for debugging purposes
 }
@@ -402,8 +403,8 @@ func (mb *maxBuffer[T]) updateLower(elem T, origElem T, crdt *TopSumCrdt) {
 	crdt.findAndUpdateNotTopMax()
 
 	panic("[MaxBuffer][updateLower]Reached end of function, which is supposed to be impossible." +
-		fmt.Sprintf("Old Elem %v was expected to be inside the buffer, but it isn't. OrigElem: %v. NewElem: %v. Buffer: %v. Recalc buffer: %v.\n",
-			origElem, origElem, elem, origBuf.maxs[:origBuf.size], mb.maxs[:mb.size]))
+		fmt.Sprintf("Old Elem %v was expected to be inside the buffer, but it isn't. OrigElem: %v. NewElem: %v. Buffer: %v. Recalc buffer: %v. len(crdt.notInTop): %d.\n",
+			origElem, origElem, elem, origBuf.maxs[:origBuf.size], mb.maxs[:mb.size], len(crdt.notInTop)))
 }
 
 func (mb *minBuffer[T]) sanityCheck() {
@@ -599,11 +600,11 @@ var (
 	SPECIAL_SCORE   = TopKScore{Id: math.MinInt32, Score: math.MinInt32, Data: tools.NewByteSlicePtr([]byte{SPECIAL_SCORE_DATA})}
 )
 
-func (crdt *TopSumCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *TopSumCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	return crdt.InitializeWithSize(startTs, replicaID, defaultTopSSize)
 }
 
-func (crdt *TopSumCrdt) InitializeWithSize(startTs *clocksi.Timestamp, replicaID uint16, size int) (newCrdt CRDT) {
+func (crdt *TopSumCrdt) InitializeWithSize(startTs clocksi.Timestamp, replicaID uint16, size int) (newCrdt CRDT) {
 	crdt = &TopSumCrdt{
 		CRDTVM:        (&genericInversibleCRDT{}).initialize(crdt),
 		maxElems:      size,
@@ -624,7 +625,7 @@ func (crdt *TopSumCrdt) initializeBuffers() {
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *TopSumCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *TopSumCrdt) {
+func (crdt *TopSumCrdt) initializeFromSnapshot(startTs clocksi.Timestamp, replicaID uint16) (sameCRDT *TopSumCrdt) {
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
@@ -668,10 +669,13 @@ func (crdt *TopSumCrdt) makeSortedElems() {
 }
 
 func (crdt *TopSumCrdt) getState(updsNotYetApplied []UpdateArguments) (state State) {
-	values := make([]TopKScore, len(crdt.elems))
+	//values := make([]TopKScore, len(crdt.elems))
+	var values []TopKScore
 	if crdt.sortedElems != nil {
-		copy(values, crdt.sortedElems)
+		values = crdt.sortedElems
+		//copy(values, crdt.sortedElems)
 	} else {
+		values = make([]TopKScore, len(crdt.elems))
 		i := 0
 		for _, elem := range crdt.elems {
 			values[i] = TopKScore{Id: elem.Id, Score: elem.Score, Data: elem.Data}
@@ -684,13 +688,11 @@ func (crdt *TopSumCrdt) getState(updsNotYetApplied []UpdateArguments) (state Sta
 // Note: in the current implementation, at most N entries are returned, even if N+1 has the same value as N.
 func (crdt *TopSumCrdt) getTopN(numberEntries int32, updsNotYetApplied []UpdateArguments) (state State) {
 	if crdt.sortedElems == nil {
-		//TODO: May be an issue when updsNotYetApplied get considered.
 		//crdt.sortedElems = crdt.getState(updsNotYetApplied).(TopSValueState).Scores
 		//sort.Slice(crdt.sortedElems, func(i, j int) bool { return crdt.sortedElems[i].Score > crdt.sortedElems[j].Score })
 		crdt.makeSortedElems()
 	}
 	if numberEntries >= int32(len(crdt.sortedElems)) {
-		//TODO: Should I include notInTop?
 		return TopSValueState{Scores: crdt.sortedElems}
 	}
 	return TopSValueState{Scores: crdt.sortedElems[:numberEntries]}
@@ -698,7 +700,7 @@ func (crdt *TopSumCrdt) getTopN(numberEntries int32, updsNotYetApplied []UpdateA
 
 func (crdt *TopSumCrdt) getTopSAboveValue(minValue int32, updsNotYetApplied []UpdateArguments) (state State) {
 	var values []TopKScore
-	actuallyAdded := 0
+	actuallyAdded := -1
 	//Faster to do with sortedElems if it's available.
 	if crdt.sortedElems != nil {
 		/*for _, elem := range crdt.sortedElems {
@@ -710,10 +712,11 @@ func (crdt *TopSumCrdt) getTopSAboveValue(minValue int32, updsNotYetApplied []Up
 			}
 		}*/
 		if !crdt.smallestScores.hasMin() || minValue <= crdt.smallestScores.getMin().Score { //If it doesn't have min, the top is empty. So we can use this codepath.
-			values = make([]TopKScore, len(crdt.elems))
-			copy(values, crdt.sortedElems)
-		} else if len(crdt.sortedElems) > 200 { //Attempt to find the end position and use a direct copy (faster)
-			//Binary search + copy.
+			//values = make([]TopKScore, len(crdt.elems))
+			//copy(values, crdt.sortedElems)
+			values = crdt.sortedElems
+		} else if len(crdt.sortedElems) > 200 { //Attempt to find the end position with binary search.
+			//Binary search.
 			left := 0
 			right := len(crdt.sortedElems) - 1
 			for left <= right {
@@ -724,23 +727,26 @@ func (crdt *TopSumCrdt) getTopSAboveValue(minValue int32, updsNotYetApplied []Up
 					right = mid - 1
 				}
 			}
-			values = make([]TopKScore, left)
-			copy(values, crdt.sortedElems[:left])
-		} else { //Just iterate and copy manually.
-			values = make([]TopKScore, len(crdt.elems))
+			//values = make([]TopKScore, left)
+			//copy(values, crdt.sortedElems[:left])
+			values = crdt.sortedElems[:left]
+		} else { //Just iterate and find the end position manually.
+			//values = make([]TopKScore, len(crdt.elems))
 			for i, elem := range crdt.sortedElems {
 				if elem.Score >= minValue {
 					//values[actuallyAdded] = TopKScore{Id: elem.Id, Score: elem.Score, Data: elem.Data}
-					values[i] = elem //This will copy as its a value type.
+					//values[i] = elem //This will copy as its a value type.
 				} else {
 					actuallyAdded = i
 					break
 				}
 			}
-			if actuallyAdded == 0 {
+			if actuallyAdded == -1 {
 				actuallyAdded = len(crdt.elems)
 			}
+			values = crdt.sortedElems[:actuallyAdded]
 		}
+		return TopSValueState{Scores: values}
 	} else {
 		values = make([]TopKScore, len(crdt.elems))
 		//Must go through all elems
@@ -869,16 +875,19 @@ func (crdt *TopSumCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs Downs
 				otherDown = append(otherDown, newDown)
 			}
 		}
+		if len(otherDown) == 0 {
+			return nil
+		}
 		return otherDown
 	}
 	effect, otherDownstreamArgs := crdt.applyDownstream(downstreamArgs)
 	//effect, _ := crdt.applyDownstream(downstreamArgs)
 	//Necessary for inversibleCrdt
-	crdt.addToHistory(&updTs, &downstreamArgs, effect)
+	crdt.addToHistory(updTs, downstreamArgs, effect)
 	return otherDownstreamArgs
 }
 
-func (crdt *TopSumCrdt) applyDownstream(downstreamArgs UpdateArguments) (effect *Effect, otherDownstreamArgs DownstreamArguments) {
+func (crdt *TopSumCrdt) applyDownstream(downstreamArgs UpdateArguments) (effect Effect, otherDownstreamArgs DownstreamArguments) {
 	switch typedArgs := downstreamArgs.(type) {
 	case DownstreamTopSAdd:
 		return crdt.applyTopSAddDownstreamArgs(typedArgs)
@@ -897,8 +906,7 @@ func (crdt *TopSumCrdt) applyDownstream(downstreamArgs UpdateArguments) (effect 
 		addEffect, addOtherDowns := crdt.applyTopSAddAllDownstreamArgs(addOp)
 		remEffect := crdt.applyTopSSubAllDownstreamArgs(subOp)
 		*typedArgs.AddScores, *typedArgs.SubScores = *addOp.Scores, *subOp.Scores //Updating scores to be downstreamed.
-		var effectValue Effect = TopSumMultiEffect{addEffect, remEffect}
-		return &effectValue, addOtherDowns
+		return TopSumMultiEffect{addEffect, remEffect}, addOtherDowns
 	case TopSInit:
 		return crdt.applyInit(uint32(typedArgs))
 	default:
@@ -907,13 +915,11 @@ func (crdt *TopSumCrdt) applyDownstream(downstreamArgs UpdateArguments) (effect 
 	return nil, nil
 }
 
-func (crdt *TopSumCrdt) applyInit(size uint32) (effect *Effect, otherDownstreamArgs DownstreamArguments) {
+func (crdt *TopSumCrdt) applyInit(size uint32) (effect Effect, otherDownstreamArgs DownstreamArguments) {
 	if int(size) > crdt.maxElems*10 && len(crdt.elems) == 0 {
 		crdt.elems = make(map[int32]*TopKScore, int(size)) //Resize.
 	}
-	crdt.maxElems = int(size)
-	var effectValue Effect = NoEffect{}
-	effect = &effectValue
+	crdt.maxElems, effect = int(size), NoEffect{}
 	crdt.initializeBuffers()
 	if len(crdt.elems) > 0 { //This is outside Init's intended usage.
 		crdt.findAndUpdateMin()
@@ -925,21 +931,19 @@ func (crdt *TopSumCrdt) applyInit(size uint32) (effect *Effect, otherDownstreamA
 	return
 }
 
-// TODO: I need to check pointers, as they may be shared between multiple maps (mainly, non-propagated + other two.)
-func (crdt *TopSumCrdt) applyTopSAddDownstreamArgs(op DownstreamTopSAdd) (effect *Effect, otherDownstreamArgs DownstreamArguments) {
+func (crdt *TopSumCrdt) applyTopSAddDownstreamArgs(op DownstreamTopSAdd) (effect Effect, otherDownstreamArgs DownstreamArguments) {
 	/*if op.Score <= 0 {
 		fmt.Printf("[TopSum][applyTopSAddDownstreamArgs]Error: score received is negative or 0. Op: %+v.\n", op)
 		panic(0)
 	}*/
 	ourReplicaID := shared.ReplicaID
-	var effectValue Effect = NoEffect{}
+	effect = NoEffect{}
 	//Case 1: no elements yet
 	if len(crdt.elems) == 0 {
 		crdt.smallestScores.add(op.TopKScore)
 		crdt.elems[op.Id] = op.TopKScore.copy()
 		*op.replicate, crdt.nUpds, crdt.sortedElems = true, crdt.nUpds+1, nil
-		effectValue = TopSumAddEffect{newScore: op.TopKScore, oldScore: math.MinInt32}
-		return &effectValue, nil
+		return TopSumAddEffect{newScore: op.TopKScore, oldScore: math.MinInt32}, nil
 	}
 
 	//Case 2: increase to element on top, thus gets propagated.
@@ -948,7 +952,7 @@ func (crdt *TopSumCrdt) applyTopSAddDownstreamArgs(op DownstreamTopSAdd) (effect
 		oldEntry := *entry
 		//Increase
 		entry.Score += op.Score
-		effectValue = TopSumAddEffect{newScore: *entry, oldScore: oldEntry.Score}
+		effect = TopSumAddEffect{newScore: *entry, oldScore: oldEntry.Score}
 		*op.replicate, crdt.nUpds, crdt.sortedElems = true, crdt.nUpds+1, nil
 		crdt.smallestScores.updateHigher(*entry, oldEntry)
 		if !crdt.smallestScores.hasMin() {
@@ -962,7 +966,7 @@ func (crdt *TopSumCrdt) applyTopSAddDownstreamArgs(op DownstreamTopSAdd) (effect
 			//This was the min, which is now updated
 			crdt.findAndUpdateMin()
 		}*/
-		return &effectValue, nil
+		return effect, nil
 	} else if len(crdt.elems) < crdt.maxElems {
 		//Case 3: not enough elements yet, and this element doesn't exist yet.
 		copy := op.TopKScore.copy()
@@ -973,7 +977,7 @@ func (crdt *TopSumCrdt) applyTopSAddDownstreamArgs(op DownstreamTopSAdd) (effect
 		if !ok {
 			panic(fmt.Sprintf("New score: %v. Error: %s.\n", *copy, err))
 		}*/
-		effectValue = TopSumAddEffect{newScore: op.TopKScore, oldScore: math.MinInt32}
+		effect = TopSumAddEffect{newScore: op.TopKScore, oldScore: math.MinInt32}
 		/*if crdt.smallestScore.isHigher(copy) {
 			effectValue = TopSumAddEffect{newScore: op.TopKScore,
 				oldMin: *crdt.smallestScore, oldScore: math.MinInt32}
@@ -982,7 +986,7 @@ func (crdt *TopSumCrdt) applyTopSAddDownstreamArgs(op DownstreamTopSAdd) (effect
 			effectValue = TopSumAddEffect{newScore: op.TopKScore, oldScore: math.MinInt32}
 		}*/
 		*op.replicate, crdt.nUpds, crdt.sortedElems = true, crdt.nUpds+1, nil
-		return &effectValue, nil
+		return effect, nil
 	}
 
 	//From now on, it definitely isn't on top and top is full.
@@ -997,7 +1001,7 @@ func (crdt *TopSumCrdt) applyTopSAddDownstreamArgs(op DownstreamTopSAdd) (effect
 		//Case 4: wasn't on top, but now it will be.
 		if entry.isHigher(&min) {
 			crdt.nUpds++
-			effectValue = TopSumAddReplaceEffect{newElem: *entry, newElemOldScore: oldScore.Score, oldElem: min}
+			effect = TopSumAddReplaceEffect{newElem: *entry, newElemOldScore: oldScore.Score, oldElem: min}
 			crdt.notInTop[min.Id] = &min
 			delete(crdt.elems, min.Id)
 			delete(crdt.notInTop, entry.Id)
@@ -1021,20 +1025,20 @@ func (crdt *TopSumCrdt) applyTopSAddDownstreamArgs(op DownstreamTopSAdd) (effect
 				if len(*op.Data) == 0 {
 					op.Data = nonPropEntry.Data
 				}
-				delete(crdt.notPropagated, entry.Id)
+				delete(crdt.notPropagated, op.Id)
 				if op.srcReplicaID != ourReplicaID && nonPropEntry.Score != 0 { //It's possible that multiple non-propagated adds and subs lead to a total of 0. In that case, nothing to propagate.
 					//Remote operation, so we must force the propagation of nonPropEntry.Score
 					if nonPropEntry.Score < 0 { //It may be negative, as we sometimes don't propagate decrements.
-						return &effectValue, DownstreamTopSSub{TopKScore: TopKScore{Id: op.Id, Score: -nonPropEntry.Score, Data: nonPropEntry.Data},
+						return effect, DownstreamTopSSub{TopKScore: TopKScore{Id: op.Id, Score: -nonPropEntry.Score, Data: nonPropEntry.Data},
 							replicate: new(bool)}
 					} //else, if the score is positive:
-					return &effectValue, DownstreamTopSAdd{TopKScore: TopKScore{Id: op.Id, Score: nonPropEntry.Score, Data: nonPropEntry.Data},
+					return effect, DownstreamTopSAdd{TopKScore: TopKScore{Id: op.Id, Score: nonPropEntry.Score, Data: nonPropEntry.Data},
 						replicate: new(bool), srcReplicaID: ourReplicaID}
 				}
 			}
 			//If nonPropHas = false, then this op by itself is enough to put on top (and thus, must be replicated)
 			*op.replicate, crdt.nUpds, crdt.sortedElems = true, crdt.nUpds+1, nil
-			return &effectValue, nil
+			return effect, nil
 		}
 		//From here on, we know it is in notTop, and it won't go to the top. So we must update highestNotTop.
 		crdt.highestNotTop.updateHigher(*entry, oldScore) //Note: this will never make highestNotTop smaller.
@@ -1044,18 +1048,18 @@ func (crdt *TopSumCrdt) applyTopSAddDownstreamArgs(op DownstreamTopSAdd) (effect
 		}*/
 		//Case 5: won't go to top, but the element exists in notInTop. Processing differs depending if this is a local or a remote operation
 		if op.srcReplicaID != ourReplicaID && nonPropHas {
-			effectValue = TopSumAddNotTopEffect{newScore: *entry, oldScore: oldScore.Score}
+			effect = TopSumAddNotTopEffect{newScore: *entry, oldScore: oldScore.Score}
 			//Apply rule for existing nonProp. Return right away.
 			if crdt.shouldReplicate(entry.Score, nonPropEntry.Score, min.Score) {
 				delete(crdt.notPropagated, entry.Id)
 				if nonPropEntry.Score < 0 { //It may be negative, as we sometimes don't propagate decrements.
-					return &effectValue, DownstreamTopSSub{TopKScore: TopKScore{Id: op.Id, Score: -nonPropEntry.Score, Data: nonPropEntry.Data},
+					return effect, DownstreamTopSSub{TopKScore: TopKScore{Id: op.Id, Score: -nonPropEntry.Score, Data: nonPropEntry.Data},
 						replicate: new(bool)}
 				}
-				return &effectValue, DownstreamTopSAdd{TopKScore: TopKScore{Id: op.Id, Score: nonPropEntry.Score, Data: nonPropEntry.Data},
+				return effect, DownstreamTopSAdd{TopKScore: TopKScore{Id: op.Id, Score: nonPropEntry.Score, Data: nonPropEntry.Data},
 					replicate: new(bool), srcReplicaID: ourReplicaID}
 			}
-			return &effectValue, nil
+			return effect, nil
 		}
 		//Apply rule to check if it should be replicated.
 		if nonPropEntry == nil {
@@ -1065,7 +1069,7 @@ func (crdt *TopSumCrdt) applyTopSAddDownstreamArgs(op DownstreamTopSAdd) (effect
 			nonPropEntry.Score += op.Score
 		}
 		if crdt.shouldReplicate(entry.Score, nonPropEntry.Score, min.Score) {
-			op.Score += nonPropEntry.Score
+			op.Score = nonPropEntry.Score //nonPropEntry already includes op.Score
 			if len(*op.Data) == 0 {
 				op.Data = nonPropEntry.Data
 			}
@@ -1075,15 +1079,14 @@ func (crdt *TopSumCrdt) applyTopSAddDownstreamArgs(op DownstreamTopSAdd) (effect
 				panic(fmt.Sprintf("[TopSum][add]Unexpected negative score, after adding notProp. Entry: %+v.\n", op))
 			}*/
 		}
-		effectValue = TopSumAddNotTopEffect{newScore: *entry, oldScore: oldScore.Score}
-		return &effectValue, nil
+		return TopSumAddNotTopEffect{newScore: *entry, oldScore: oldScore.Score}, nil
 	}
 
 	newEntry := op.TopKScore.copy()
 	//Case 6: new elem that will be on top
 	//In this case, it's not in elems or notOnTop. So, new entry.
 	if op.TopKScore.isHigher(&min) {
-		effectValue = TopSumAddReplaceEffect{newElem: op.TopKScore, newElemOldScore: math.MinInt32}
+		effect = TopSumAddReplaceEffect{newElem: op.TopKScore, newElemOldScore: math.MinInt32}
 		crdt.notInTop[min.Id] = &min
 		delete(crdt.elems, min.Id)
 		crdt.elems[newEntry.Id] = newEntry
@@ -1099,7 +1102,7 @@ func (crdt *TopSumCrdt) applyTopSAddDownstreamArgs(op DownstreamTopSAdd) (effect
 		}*/
 		//crdt.findAndUpdateMin()
 		*op.replicate, crdt.nUpds, crdt.sortedElems = true, crdt.nUpds+1, nil
-		return &effectValue, nil
+		return effect, nil
 	}
 
 	crdt.notInTop[newEntry.Id] = newEntry
@@ -1111,14 +1114,11 @@ func (crdt *TopSumCrdt) applyTopSAddDownstreamArgs(op DownstreamTopSAdd) (effect
 	//Case 7: new elem that isn't on top. It may still, however, need to be replicated.
 	if crdt.shouldReplicate(0, op.Score, min.Score) {
 		*op.replicate = true
-		effectValue = TopSumAddNotTopEffect{newScore: op.TopKScore, oldScore: math.MinInt32}
-		return &effectValue, nil
+		return TopSumAddNotTopEffect{newScore: op.TopKScore, oldScore: math.MinInt32}, nil
 	}
 	//Case 8: new elem, and add is too small to be worth replicating.
 	crdt.notPropagated[newEntry.Id] = newEntry.copy()
-	effectValue = TopSumAddNotTopEffect{newScore: op.TopKScore, oldScore: math.MinInt32}
-
-	return &effectValue, nil
+	return TopSumAddNotTopEffect{newScore: op.TopKScore, oldScore: math.MinInt32}, nil
 }
 
 func (crdt *TopSumCrdt) resizeTopSumIfBigUpdate(nPossibleUpds int) {
@@ -1132,7 +1132,7 @@ func (crdt *TopSumCrdt) resizeTopSumIfBigUpdate(nPossibleUpds int) {
 	}
 }
 
-func (crdt *TopSumCrdt) applyTopSAddAllDownstreamArgs(op DownstreamTopSAddAll) (effect *Effect, otherDownstreamArgs DownstreamArguments) {
+func (crdt *TopSumCrdt) applyTopSAddAllDownstreamArgs(op DownstreamTopSAddAll) (effect Effect, otherDownstreamArgs DownstreamArguments) {
 	scores := *op.Scores
 	if len(scores) == 0 {
 		var effectValue Effect = NoEffect{}
@@ -1188,7 +1188,7 @@ func (crdt *TopSumCrdt) applyTopSAddAllDownstreamArgs(op DownstreamTopSAddAll) (
 		} else if len(crdt.elems) < crdt.maxElems {
 			//Case 3: not enough elements yet, and this element doesn't exist yet.
 			copy = currScore.copy()
-			crdt.elems[currScore.Id] = copy
+			crdt.elems[copy.Id] = copy
 			//check if it should now be min
 			crdt.smallestScores.addIfInBetween(currScore, len(crdt.elems))
 			effects[i] = TopSumAddEffect{newScore: currScore, oldScore: math.MinInt32}
@@ -1229,7 +1229,7 @@ func (crdt *TopSumCrdt) applyTopSAddAllDownstreamArgs(op DownstreamTopSAddAll) (
 						if len(*currScore.Data) == 0 {
 							currScore.Data = nonPropEntry.Data
 						}
-						delete(crdt.notPropagated, entry.Id)
+						delete(crdt.notPropagated, currScore.Id)
 						if op.srcReplicaID != ourReplicaID {
 							//Remote operation, so we must force the propagation of nonPropEntry.Score
 							otherDownScores = append(otherDownScores, TopKScore{Id: currScore.Id, Score: nonPropEntry.Score, Data: nonPropEntry.Data})
@@ -1250,13 +1250,13 @@ func (crdt *TopSumCrdt) applyTopSAddAllDownstreamArgs(op DownstreamTopSAddAll) (
 					crdt.highestNotTop.updateHigher(*entry, oldEntry) //Note: this will never make highestNotTop smaller.
 					//Apply rule to check if it should be replicated
 					if nonPropEntry == nil {
-						nonPropEntry = &currScore
+						nonPropEntry = currScore.copy()
 						crdt.notPropagated[entry.Id] = nonPropEntry
 					} else {
 						nonPropEntry.Score += currScore.Score
 					}
 					if crdt.shouldReplicate(entry.Score, nonPropEntry.Score, min.Score) {
-						currScore.Score += nonPropEntry.Score
+						currScore.Score = nonPropEntry.Score //nonPropEntry already includes currScore.Score
 						if len(*currScore.Data) == 0 {
 							currScore.Data = nonPropEntry.Data
 						}
@@ -1326,7 +1326,7 @@ func (crdt *TopSumCrdt) applyTopSAddAllDownstreamArgs(op DownstreamTopSAddAll) (
 	}
 	nOpElems := len(*op.Scores)
 	*op.Scores = downScores
-	var effectValue Effect = effects
+	effect = effects
 	if len(otherDownScores) > 0 {
 		//fmt.Println("[TOPSUM]AddAll is returning extra downstream.")
 		//We may have both negatives and positives here, but DownstreamTopSAddAll only supports positives.
@@ -1334,12 +1334,12 @@ func (crdt *TopSumCrdt) applyTopSAddAllDownstreamArgs(op DownstreamTopSAddAll) (
 		nPositive := sortTopScoreEntriesPosNeg(otherDownScores)
 		//fmt.Printf("[TOPSUM]Add is returning extra downstream. NPositive, len: %d, %d. Last entry score: %v.\n", nPositive, len(otherDownScores), otherDownScores[len(otherDownScores)-1])
 		if nPositive == len(otherDownScores) {
-			return &effectValue, DownstreamTopSAddAll{Scores: &otherDownScores, srcReplicaID: ourReplicaID}
+			return effect, DownstreamTopSAddAll{Scores: &otherDownScores, srcReplicaID: ourReplicaID}
 		} else if nPositive == 0 {
-			return &effectValue, DownstreamTopSSubAll{Scores: &otherDownScores}
+			return effect, DownstreamTopSSubAll{Scores: &otherDownScores}
 		} else {
 			addSlice, subSlice := otherDownScores[:nPositive], otherDownScores[nPositive:]
-			return &effectValue, DownstreamTopSAddAndSubAll{AddScores: &addSlice, SubScores: &subSlice, srcReplicaID: ourReplicaID}
+			return effect, DownstreamTopSAddAndSubAll{AddScores: &addSlice, SubScores: &subSlice, srcReplicaID: ourReplicaID}
 		}
 	}
 
@@ -1366,12 +1366,12 @@ func (crdt *TopSumCrdt) applyTopSAddAllDownstreamArgs(op DownstreamTopSAddAll) (
 	}*/
 	//fmt.Printf("[TOPSUM][Inc]Top, notTop sizes: %d, %d. nMin, notTopMax calcs: %d, %d. nMin, notTopMax buffer sizes: %d, %d. nSmallestScores, nHighestScores: %d, %d.\n",
 	//	len(crdt.elems), len(crdt.notInTop), crdt.nMin, crdt.nMaxNotTop, crdt.smallestScores.Cap(), crdt.highestNotTop.Cap(), crdt.smallestScores.size, crdt.highestNotTop.size)
-	return &effectValue, nil
+	return effect, nil
 }
 
-func (crdt *TopSumCrdt) applyTopSSubDownstreamArgs(op DownstreamTopSSub) (effect *Effect) {
+func (crdt *TopSumCrdt) applyTopSSubDownstreamArgs(op DownstreamTopSSub) (effect Effect) {
 	//Note: the score in the operation is always negative (hence why += is used)
-	var effectValue Effect = NoEffect{}
+	effect = NoEffect{}
 	/*if op.Score <= 0 {
 		fmt.Printf("[TopSum][applyTopSSubDownstreamArgs]Error: score received is negative or 0. Op: %+v.\n", op)
 		panic(0)
@@ -1389,8 +1389,7 @@ func (crdt *TopSumCrdt) applyTopSSubDownstreamArgs(op DownstreamTopSSub) (effect
 		crdt.elems[op.Id] = &negScore
 		*op.replicate, crdt.nUpds, crdt.sortedElems = true, crdt.nUpds+1, nil
 		//new top element
-		effectValue = TopSumAddEffect{newScore: negScore, oldScore: math.MinInt32}
-		return &effectValue
+		return TopSumAddEffect{newScore: negScore, oldScore: math.MinInt32}
 	}
 
 	//Case 2: decrease to element in top, thus it must be propagated
@@ -1400,7 +1399,7 @@ func (crdt *TopSumCrdt) applyTopSSubDownstreamArgs(op DownstreamTopSSub) (effect
 		entry.Score -= op.Score
 		if minScore.isHigher(entry) {
 			if len(crdt.notInTop) == 0 || crdt.highestNotTop.getMax().isLowerScore(*entry) {
-				effectValue = TopSumAddEffect{newScore: *entry, oldScore: oldScore.Score}
+				effect = TopSumAddEffect{newScore: *entry, oldScore: oldScore.Score}
 				//Special case, no move but it becomes the smallest score
 				crdt.smallestScores.updateLower(*entry, oldScore)
 				/*err, ok := crdt.smallestScores.sanityCheckNotPanic()
@@ -1444,10 +1443,10 @@ func (crdt *TopSumCrdt) applyTopSSubDownstreamArgs(op DownstreamTopSSub) (effect
 				//oldMin := crdt.smallestScore
 				//crdt.smallestScore = newMin
 				//replace
-				effectValue = TopSumSubReplaceEffect{newElem: *entry, oldElem: newMin, newElemOldScore: oldScore.Score}
+				effect = TopSumSubReplaceEffect{newElem: *entry, oldElem: newMin, newElemOldScore: oldScore.Score}
 			}
 		} else { //Stays on top.
-			effectValue = TopSumAddEffect{newScore: *entry, oldScore: oldScore.Score}
+			effect = TopSumAddEffect{newScore: *entry, oldScore: oldScore.Score}
 			crdt.smallestScores.updateLower(*entry, oldScore) //Now it may belong to the min, or just need its position updated.
 			/*err, ok := sanityCheckBuffers(crdt.smallestScores, crdt.highestNotTop)
 			if !ok {
@@ -1456,7 +1455,7 @@ func (crdt *TopSumCrdt) applyTopSSubDownstreamArgs(op DownstreamTopSSub) (effect
 		}
 		//Nothing do on else (element stays in top)
 		*op.replicate, crdt.nUpds, crdt.sortedElems = true, crdt.nUpds+1, nil
-		return &effectValue
+		return effect
 	} else if len(crdt.elems) < crdt.maxElems {
 		//Case 3: has space on top, and element doesn't yet exist
 		copy := TopKScore{Id: op.Id, Score: -op.Score, Data: op.Data}
@@ -1466,7 +1465,7 @@ func (crdt *TopSumCrdt) applyTopSSubDownstreamArgs(op DownstreamTopSSub) (effect
 		if !ok {
 			panic(fmt.Sprintf("New score: %v. Error: %s.\n", copy, err))
 		}*/
-		effectValue = TopSumAddEffect{newScore: copy, oldScore: math.MinInt32}
+		effect = TopSumAddEffect{newScore: copy, oldScore: math.MinInt32}
 		/*if crdt.smallestScore.isHigher(copy) {
 			effectValue = TopSumAddEffect{newScore: op.TopKScore, oldScore: math.MinInt32, oldMin: *crdt.smallestScore}
 			crdt.smallestScore = copy
@@ -1475,7 +1474,7 @@ func (crdt *TopSumCrdt) applyTopSSubDownstreamArgs(op DownstreamTopSSub) (effect
 		}*/
 		*op.replicate, crdt.nUpds, crdt.sortedElems = true, crdt.nUpds+1, nil
 		//new top, may update min
-		return &effectValue
+		return effect
 	}
 
 	//Top is full and the element isn't there
@@ -1488,7 +1487,7 @@ func (crdt *TopSumCrdt) applyTopSSubDownstreamArgs(op DownstreamTopSSub) (effect
 		oldEntry := *entry
 		entry.Score -= op.Score
 		crdt.highestNotTop.updateLower(*entry, oldEntry, crdt)
-		effectValue = TopSumAddNotTopEffect{newScore: *entry, oldScore: oldEntry.Score}
+		effect = TopSumAddNotTopEffect{newScore: *entry, oldScore: oldEntry.Score}
 		if nonPropHas {
 			nonPropEntry.Score -= op.Score
 		} else {
@@ -1502,7 +1501,7 @@ func (crdt *TopSumCrdt) applyTopSSubDownstreamArgs(op DownstreamTopSSub) (effect
 			panic(fmt.Sprintf("Old score: %v. New score: %v. Error: %s.\n", oldEntry, *entry, err))
 		}*/
 		//Decrement to non-top
-		return &effectValue
+		return effect
 	}
 
 	min := crdt.smallestScores.getMin()
@@ -1512,7 +1511,7 @@ func (crdt *TopSumCrdt) applyTopSSubDownstreamArgs(op DownstreamTopSSub) (effect
 		crdt.elems[op.Id] = &negScore
 		delete(crdt.elems, min.Id)
 		//TopSumAddReplace because this element is being added to top;
-		effectValue = TopSumAddReplaceEffect{newElem: negScore, newElemOldScore: math.MinInt32, oldElem: min}
+		effect = TopSumAddReplaceEffect{newElem: negScore, newElemOldScore: math.MinInt32, oldElem: min}
 		crdt.notInTop[min.Id] = &min
 		crdt.highestNotTop.addMax(min)
 		crdt.smallestScores.removeMin()
@@ -1526,7 +1525,7 @@ func (crdt *TopSumCrdt) applyTopSSubDownstreamArgs(op DownstreamTopSSub) (effect
 		}*/
 		//crdt.findAndUpdateMin()
 		*op.replicate, crdt.nUpds, crdt.sortedElems = true, crdt.nUpds+1, nil
-		return &effectValue
+		return effect
 	}
 
 	//not top. Don't propagate.
@@ -1538,15 +1537,14 @@ func (crdt *TopSumCrdt) applyTopSSubDownstreamArgs(op DownstreamTopSSub) (effect
 		panic(fmt.Sprintf("New score: %v. Error: %s.\n", negScore, err))
 	}*/
 	//New element to non-top
-	effectValue = TopSumAddNotTopEffect{newScore: negScore, oldScore: math.MinInt32}
-	return &effectValue
+	effect = TopSumAddNotTopEffect{newScore: negScore, oldScore: math.MinInt32}
+	return effect
 }
 
-func (crdt *TopSumCrdt) applyTopSSubAllDownstreamArgs(op DownstreamTopSSubAll) (effect *Effect) {
+func (crdt *TopSumCrdt) applyTopSSubAllDownstreamArgs(op DownstreamTopSSubAll) (effect Effect) {
 	scores := *op.Scores
 	if len(scores) == 0 {
-		var effectValue Effect = NoEffect{}
-		return &effectValue
+		return NoEffect{}
 	}
 	downScores, effects := make([]TopKScore, len(scores)), make(TopSumMultiEffect, len(scores))
 	downI := 0
@@ -1567,7 +1565,7 @@ func (crdt *TopSumCrdt) applyTopSSubAllDownstreamArgs(op DownstreamTopSSubAll) (
 	}
 	var entry, nonPropEntry *TopKScore
 	var has, nonPropHas bool
-	var min, copy TopKScore
+	var min TopKScore
 	for ; i < len(scores); i++ {
 		currScore, min = scores[i], crdt.smallestScores.getMin()
 		entry, has = crdt.elems[currScore.Id]
@@ -1613,13 +1611,13 @@ func (crdt *TopSumCrdt) applyTopSSubAllDownstreamArgs(op DownstreamTopSSubAll) (
 			downScores[downI], downI, changedTop = currScore, downI+1, true
 		} else if len(crdt.elems) < crdt.maxElems {
 			//Case 3: has space on top, and element doesn't yet exist
-			copy = TopKScore{Id: currScore.Id, Score: -currScore.Score, Data: currScore.Data}
-			crdt.elems[currScore.Id] = &copy
-			crdt.smallestScores.addIfInBetween(copy, len(crdt.elems))
-			/*if crdt.smallestScore.isHigher(copy) {
-				crdt.smallestScores.updateMin(copy)
+			newScore := TopKScore{Id: currScore.Id, Score: -currScore.Score, Data: currScore.Data}
+			crdt.elems[currScore.Id] = &newScore
+			crdt.smallestScores.addIfInBetween(newScore, len(crdt.elems))
+			/*if crdt.smallestScore.isHigher(newScore) {
+				crdt.smallestScores.updateMin(newScore)
 			}*/
-			effects[i] = TopSumAddEffect{newScore: copy, oldScore: math.MinInt32}
+			effects[i] = TopSumAddEffect{newScore: newScore, oldScore: math.MinInt32}
 			downScores[downI], downI, changedTop = currScore, downI+1, true
 		} else {
 			//Top is full and element isn't there (thus, entry is nil)
@@ -1648,7 +1646,7 @@ func (crdt *TopSumCrdt) applyTopSSubAllDownstreamArgs(op DownstreamTopSSubAll) (
 				delete(crdt.elems, min.Id)
 				//TopSumAddReplace because this element is being added to top;
 				effects[i] = TopSumAddReplaceEffect{newElem: negScore, newElemOldScore: math.MinInt32, oldElem: min}
-				crdt.notInTop[min.Id] = &min
+				crdt.notInTop[min.Id] = min.copy()
 				crdt.highestNotTop.addMax(min)
 				crdt.smallestScores.removeMin()
 				crdt.smallestScores.addIfInBetween(negScore, len(crdt.elems))
@@ -1674,10 +1672,9 @@ func (crdt *TopSumCrdt) applyTopSSubAllDownstreamArgs(op DownstreamTopSSubAll) (
 		crdt.sortedElems = nil
 	}
 	*op.Scores = downScores
-	var effectValue Effect = effects
 	//fmt.Printf("[TopSum][Dec]Top, notTop sizes: %d, %d. nMin, notTopMax calcs: %d, %d. nMin, notTopMax buffer sizes: %d, %d.\n",
 	//	len(crdt.elems), len(crdt.notInTop), crdt.nMin, crdt.nMaxNotTop, crdt.smallestScores.Cap(), crdt.highestNotTop.Cap())
-	return &effectValue
+	return effects
 }
 
 /*func (crdt *TopSumCrdt) shouldReplicate(existing int32, notReplicated int32) bool {
@@ -1772,6 +1769,16 @@ func (crdt *TopSumCrdt) findAndUpdateNotTopMax() {
 		crdt.highestNotTop.size = bufSize
 	}
 	crdt.nMaxNotTop++
+	for id, entry := range crdt.elems {
+		if id != entry.Id {
+			panic(fmt.Sprintf("[TOPSUM][findAndUpdateNotTopMax]Found inconsistency in crdt.elems: id (key) doesn't match entry.id. len elems: %d. id (key): %d. entry: %v.\n", len(crdt.elems), id, entry))
+		}
+	}
+	for id, entry := range crdt.notInTop {
+		if id != entry.Id {
+			panic(fmt.Sprintf("[TOPSUM][findAndUpdateNotTopMax]Found inconsistency in crdt.notInTop: id (key) doesn't match entry.id. len notInTop: %d. id (key): %d. entry: %v.\n", len(crdt.notInTop), id, entry))
+		}
+	}
 }
 
 func (crdt *TopSumCrdt) resizeNotTopMaxIfNeeded() (resized bool) {
@@ -1838,13 +1845,13 @@ func (crdt *TopSumCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
-func (crdt *TopSumCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *TopSumCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	effect, _ = crdt.applyDownstream(updArgs)
 	return
 }
 
-func (crdt *TopSumCrdt) undoEffect(effect *Effect) {
-	switch typedEffect := (*effect).(type) {
+func (crdt *TopSumCrdt) undoEffect(effect Effect) {
+	switch typedEffect := (effect).(type) {
 	case TopSumAddEffect:
 		crdt.undoAddEffect(&typedEffect)
 	case TopSumAddNotTopEffect:
@@ -1968,59 +1975,91 @@ func (crdt *TopSumCrdt) undoSubReplaceEffect(effect *TopSumSubReplaceEffect) {
 	crdt.smallestScores.addIfInBetween(copyWithOldScore, len(crdt.elems)) //remove(oldScore) -> addIfInBetween(copyWithOldScore)
 }
 
-func (crdt *TopSumCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+func (crdt *TopSumCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {}
 
 // Protobuf function
 func (crdtOp TopSAdd) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
-	add := protobuf.GetTopkrmvop().GetAdds()[0]
+	/*add := protobuf.GetTopkrmvop().GetAdds()[0]
 	crdtOp.TopKScore = TopKScore{Id: add.GetPlayerId(), Score: add.GetScore(), Data: emptyData}
 	if add.Data != nil {
 		crdtOp.Data = tools.NewByteSlicePtr(add.Data)
+	}*/
+	add := protobuf.GetTopkrmvop().GetAdds()
+	crdtOp.TopKScore = TopKScore{Id: add.PlayerIds[0], Score: add.Scores[0], Data: emptyData}
+	if len(add.Data) > 0 {
+		crdtOp.TopKScore.Data = tools.NewByteSlicePtr(add.Data[0])
 	}
 	return crdtOp
 }
 
 func (crdtOp TopSAdd) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	add := proto.ApbIntPair{PlayerId: pb.Int32(crdtOp.Id), Score: pb.Int32(crdtOp.Score)}
+	/*add := proto.ApbIntPair{PlayerId: pb.Int32(crdtOp.Id), Score: pb.Int32(crdtOp.Score)}
 	if crdtOp.Data != nil && len(*crdtOp.Data) > 0 {
 		add.Data = *crdtOp.Data
 	}
-	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Topkrmvop{Topkrmvop: &proto.ApbTopkRmvUpdate{Adds: []*proto.ApbIntPair{&add}, PositiveLen: POINTER_ONE_UINT32}}}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Topkrmvop{Topkrmvop: &proto.ApbTopkRmvUpdate{Adds: []*proto.ApbIntPair{&add}, PositiveLen: POINTER_ONE_UINT32}}}*/
+	add := proto.ApbTopKRmvAdd{PlayerIds: []int32{crdtOp.Id}, Scores: []int32{crdtOp.Score}}
+	if crdtOp.Data != nil && len(*crdtOp.Data) > 0 {
+		add.Data = [][]byte{*crdtOp.Data}
+	}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Topkrmvop{Topkrmvop: &proto.ApbTopkRmvUpdate{Adds: &add, PositiveLen: POINTER_ONE_UINT32}}}
 }
 
 func (crdtOp TopSSub) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
-	sub := protobuf.GetTopkrmvop().GetAdds()[0]
+	/*sub := protobuf.GetTopkrmvop().GetAdds()[0]
 	crdtOp.TopKScore = TopKScore{Id: sub.GetPlayerId(), Score: -sub.GetScore(), Data: emptyData}
 	if sub.Data != nil {
 		crdtOp.Data = tools.NewByteSlicePtr(sub.Data)
+	}*/
+	sub := protobuf.GetTopkrmvop().GetAdds()
+	crdtOp.TopKScore = TopKScore{Id: sub.PlayerIds[0], Score: -sub.Scores[0], Data: emptyData}
+	if len(sub.Data) > 0 {
+		crdtOp.TopKScore.Data = tools.NewByteSlicePtr(sub.Data[0])
 	}
 	return crdtOp
 }
 
 func (crdtOp TopSSub) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	sub := proto.ApbIntPair{PlayerId: pb.Int32(crdtOp.Id), Score: pb.Int32(-crdtOp.Score)} //We write negative into the protobuf, so that it can be recognized as a sub.
+	/*sub := proto.ApbIntPair{PlayerId: pb.Int32(crdtOp.Id), Score: pb.Int32(-crdtOp.Score)} //We write negative into the protobuf, so that it can be recognized as a sub.
 	if crdtOp.Data != nil && len(*crdtOp.Data) > 0 {
 		sub.Data = *crdtOp.Data
 	}
-	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Topkrmvop{Topkrmvop: &proto.ApbTopkRmvUpdate{Adds: []*proto.ApbIntPair{&sub}, PositiveLen: POINTER_ZERO_UINT32}}}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Topkrmvop{Topkrmvop: &proto.ApbTopkRmvUpdate{Adds: []*proto.ApbIntPair{&sub}, PositiveLen: POINTER_ZERO_UINT32}}}*/
+	sub := proto.ApbTopKRmvAdd{PlayerIds: []int32{crdtOp.Id}, Scores: []int32{-crdtOp.Score}} //We write negative into the protobuf, so that it can be recognized as a sub.
+	if crdtOp.Data != nil && len(*crdtOp.Data) > 0 {
+		sub.Data = [][]byte{*crdtOp.Data}
+	}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Topkrmvop{Topkrmvop: &proto.ApbTopkRmvUpdate{Adds: &sub, PositiveLen: POINTER_ZERO_UINT32}}}
 }
 
 func (crdtOp TopSAddAll) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
 	adds := protobuf.GetTopkrmvop().GetAdds()
+	ids, scores, data := adds.GetPlayerIds(), adds.GetScores(), adds.GetData()
+	crdtOp.Scores = make([]TopKScore, len(ids))
+	if len(data) == 0 {
+		for i, id := range ids {
+			crdtOp.Scores[i] = TopKScore{Id: id, Score: scores[i], Data: emptyData}
+		}
+	} else {
+		for i, id := range ids {
+			crdtOp.Scores[i] = TopKScore{Id: id, Score: scores[i], Data: tools.NewByteSlicePtr(data[i])}
+		}
+	}
+	/*var currScore TopKScore
 	crdtOp.Scores = make([]TopKScore, len(adds))
-	var currScore TopKScore
 	for i, add := range adds {
 		currScore = TopKScore{Id: add.GetPlayerId(), Score: add.GetScore(), Data: emptyData}
 		if add.Data != nil {
 			currScore.Data = tools.NewByteSlicePtr(add.Data)
 		}
 		crdtOp.Scores[i] = currScore
-	}
+	}*/
 	return crdtOp
+
 }
 
 func (crdtOp TopSAddAll) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	protoAdds := make([]*proto.ApbIntPair, len(crdtOp.Scores))
+	/*protoAdds := make([]*proto.ApbIntPair, len(crdtOp.Scores))
 	for i, score := range crdtOp.Scores {
 		add := proto.ApbIntPair{PlayerId: pb.Int32(score.Id), Score: pb.Int32(score.Score)}
 		if score.Data != nil && len(*score.Data) > 0 {
@@ -2028,12 +2067,36 @@ func (crdtOp TopSAddAll) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
 		}
 		protoAdds[i] = &add
 	}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Topkrmvop{Topkrmvop: &proto.ApbTopkRmvUpdate{Adds: protoAdds, PositiveLen: pb.Uint32(uint32(len(crdtOp.Scores)))}}}*/
+	ids, scores := make([]int32, len(crdtOp.Scores)), make([]int32, len(crdtOp.Scores))
+	var data [][]byte //We'll only allocate this if at least one entry has data set.
+	for i, score := range crdtOp.Scores {
+		ids[i], scores[i] = score.Id, score.Score
+		if score.Data != nil && len(*score.Data) > 0 {
+			if data == nil {
+				data = make([][]byte, len(crdtOp.Scores))
+			}
+			data[i] = *score.Data
+		}
+	}
+	protoAdds := &proto.ApbTopKRmvAdd{PlayerIds: ids, Scores: scores, Data: data}
 	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Topkrmvop{Topkrmvop: &proto.ApbTopkRmvUpdate{Adds: protoAdds, PositiveLen: pb.Uint32(uint32(len(crdtOp.Scores)))}}}
 }
 
 func (crdtOp TopSSubAll) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
 	subs := protobuf.GetTopkrmvop().GetAdds()
-	crdtOp.Scores = make([]TopKScore, len(subs))
+	ids, scores, data := subs.GetPlayerIds(), subs.GetScores(), subs.GetData()
+	crdtOp.Scores = make([]TopKScore, len(ids))
+	if len(data) == 0 {
+		for i, id := range ids {
+			crdtOp.Scores[i] = TopKScore{Id: id, Score: -scores[i], Data: emptyData}
+		}
+	} else {
+		for i, id := range ids {
+			crdtOp.Scores[i] = TopKScore{Id: id, Score: -scores[i], Data: tools.NewByteSlicePtr(data[i])}
+		}
+	}
+	/*crdtOp.Scores = make([]TopKScore, len(subs))
 	var currScore TopKScore
 	for i, sub := range subs {
 		currScore = TopKScore{Id: sub.GetPlayerId(), Score: -sub.GetScore(), Data: emptyData}
@@ -2041,12 +2104,12 @@ func (crdtOp TopSSubAll) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (o
 			currScore.Data = tools.NewByteSlicePtr(sub.Data)
 		}
 		crdtOp.Scores[i] = currScore
-	}
+	}*/
 	return crdtOp
 }
 
 func (crdtOp TopSSubAll) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	protoSubs := make([]*proto.ApbIntPair, len(crdtOp.Scores))
+	/*protoSubs := make([]*proto.ApbIntPair, len(crdtOp.Scores))
 	for i, score := range crdtOp.Scores {
 		sub := proto.ApbIntPair{PlayerId: pb.Int32(score.Id), Score: pb.Int32(-score.Score)}
 		if score.Data != nil && len(*score.Data) > 0 {
@@ -2055,53 +2118,108 @@ func (crdtOp TopSSubAll) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
 		protoSubs[i] = &sub
 	}
 	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Topkrmvop{Topkrmvop: &proto.ApbTopkRmvUpdate{Adds: protoSubs, PositiveLen: POINTER_ZERO_UINT32}}}
+	*/
+	ids, scores := make([]int32, len(crdtOp.Scores)), make([]int32, len(crdtOp.Scores))
+	var data [][]byte //We'll only allocate this if at least one entry has data set.
+	for i, score := range crdtOp.Scores {
+		ids[i], scores[i] = score.Id, -score.Score
+		if score.Data != nil && len(*score.Data) > 0 {
+			if data == nil {
+				data = make([][]byte, len(crdtOp.Scores))
+			}
+			data[i] = *score.Data
+		}
+	}
+	protoSubs := &proto.ApbTopKRmvAdd{PlayerIds: ids, Scores: scores, Data: data}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Topkrmvop{Topkrmvop: &proto.ApbTopkRmvUpdate{Adds: protoSubs, PositiveLen: POINTER_ZERO_UINT32}}}
 }
 
 func (crdtOp TopSAddAndSubAll) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
 	topProto := protobuf.GetTopkrmvop()
 	protoElems, nPositive := topProto.GetAdds(), int(topProto.GetPositiveLen())
-	crdtOp.AddScores, crdtOp.SubScores = make([]TopKScore, nPositive), make([]TopKScore, len(protoElems)-nPositive)
-	var currScore TopKScore
-	var currElem *proto.ApbIntPair
-	for i := 0; i < nPositive; i++ {
-		currElem = protoElems[i]
-		currScore = TopKScore{Id: currElem.GetPlayerId(), Score: currElem.GetScore(), Data: emptyData}
-		if currElem.Data != nil {
-			currScore.Data = tools.NewByteSlicePtr(currElem.Data)
+	ids, scores, data := protoElems.GetPlayerIds(), protoElems.GetScores(), protoElems.GetData()
+	crdtOp.AddScores, crdtOp.SubScores = make([]TopKScore, nPositive), make([]TopKScore, len(ids)-nPositive)
+	if len(data) == 0 {
+		for i := 0; i < nPositive; i++ {
+			crdtOp.AddScores[i] = TopKScore{Id: ids[i], Score: scores[i], Data: emptyData}
 		}
-		crdtOp.AddScores[i] = currScore
-		/*if currScore.Score < 0 {
-			fmt.Printf("[TopSAddAndSubAll][FromUpdateObject]Warning: element %+v, index %d, of adds is negative! NElems (add/sub/total): %d/%d/%d.\n",
-				currScore, i, nPositive, len(protoElems)-nPositive, len(protoElems))
-		}*/
-	}
-	for i := nPositive; i < len(protoElems); i++ {
-		currElem = protoElems[i]
-		currScore = TopKScore{Id: currElem.GetPlayerId(), Score: -currElem.GetScore(), Data: emptyData}
-		if currElem.Data != nil {
-			currScore.Data = tools.NewByteSlicePtr(currElem.Data)
+		for i := nPositive; i < len(ids); i++ {
+			crdtOp.SubScores[i-nPositive] = TopKScore{Id: ids[i], Score: -scores[i], Data: emptyData}
 		}
-		crdtOp.SubScores[i-nPositive] = currScore
-		/*if currScore.Score < 0 {
-			fmt.Printf("[TopSAddAndSubAll][FromUpdateObject]Warning: element %+v, index %d, of subs is negative! NElems (add/sub/total): %d/%d/%d.\n",
-				currScore, i, nPositive, len(protoElems)-nPositive, len(protoElems))
-		}*/
+	} else {
+		for i := 0; i < nPositive; i++ {
+			crdtOp.AddScores[i] = TopKScore{Id: ids[i], Score: scores[i], Data: tools.NewByteSlicePtr(data[i])}
+		}
+		for i := nPositive; i < len(ids); i++ {
+			crdtOp.SubScores[i-nPositive] = TopKScore{Id: ids[i], Score: -scores[i], Data: tools.NewByteSlicePtr(data[i])}
+		}
 	}
+	/*
+		var currElem *proto.ApbIntPair
+		for i := 0; i < nPositive; i++ {
+			currElem = protoElems[i]
+			currScore = TopKScore{Id: currElem.GetPlayerId(), Score: currElem.GetScore(), Data: emptyData}
+			if currElem.Data != nil {
+				currScore.Data = tools.NewByteSlicePtr(currElem.Data)
+			}
+			crdtOp.AddScores[i] = currScore
+			//if currScore.Score < 0 {
+			//	fmt.Printf("[TopSAddAndSubAll][FromUpdateObject]Warning: element %+v, index %d, of adds is negative! NElems (add/sub/total): %d/%d/%d.\n",
+			//		currScore, i, nPositive, len(protoElems)-nPositive, len(protoElems))
+			//}
+		}
+		for i := nPositive; i < len(protoElems); i++ {
+			currElem = protoElems[i]
+			currScore = TopKScore{Id: currElem.GetPlayerId(), Score: -currElem.GetScore(), Data: emptyData}
+			if currElem.Data != nil {
+				currScore.Data = tools.NewByteSlicePtr(currElem.Data)
+			}
+			crdtOp.SubScores[i-nPositive] = currScore
+			//if currScore.Score < 0 {
+			//	fmt.Printf("[TopSAddAndSubAll][FromUpdateObject]Warning: element %+v, index %d, of subs is negative! NElems (add/sub/total): %d/%d/%d.\n",
+			//		currScore, i, nPositive, len(protoElems)-nPositive, len(protoElems))
+			//}
+		}*/
 	return crdtOp
 }
 
 func (crdtOp TopSAddAndSubAll) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	protoElems := make([]*proto.ApbIntPair, len(crdtOp.AddScores)+len(crdtOp.SubScores))
+	totalLen := len(crdtOp.AddScores) + len(crdtOp.SubScores)
+	ids, scores := make([]int32, totalLen), make([]int32, totalLen)
+	var data [][]byte //We'll only allocate this if at least one entry has data set.
+	for i, score := range crdtOp.AddScores {
+		ids[i], scores[i] = score.Id, score.Score
+		if score.Data != nil && len(*score.Data) > 0 {
+			if data == nil {
+				data = make([][]byte, totalLen)
+			}
+			data[i] = *score.Data
+		}
+	}
+	offset := len(crdtOp.AddScores)
+	for i, score := range crdtOp.SubScores {
+		ids[offset+i], scores[offset+i] = score.Id, -score.Score
+		if score.Data != nil && len(*score.Data) > 0 {
+			if data == nil {
+				data = make([][]byte, totalLen)
+			}
+			data[offset+i] = *score.Data
+		}
+	}
+	protoElems := &proto.ApbTopKRmvAdd{PlayerIds: ids, Scores: scores, Data: data}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Topkrmvop{Topkrmvop: &proto.ApbTopkRmvUpdate{Adds: protoElems, PositiveLen: pb.Uint32(uint32(offset))}}}
+
+	/*protoElems := make([]*proto.ApbIntPair, len(crdtOp.AddScores)+len(crdtOp.SubScores))
 	for i, score := range crdtOp.AddScores {
 		currElem := proto.ApbIntPair{PlayerId: pb.Int32(score.Id), Score: pb.Int32(score.Score)}
 		if score.Data != nil && len(*score.Data) > 0 {
 			currElem.Data = *score.Data
 		}
 		protoElems[i] = &currElem
-		/*if score.Score < 0 {
-			fmt.Printf("[TopSAddAndSubAll][ToUpdateObject]Warning: element %+v, index %d, of adds is negative! NElems (add/sub/total): %d/%d/%d.\n",
-				score, i, len(crdtOp.AddScores), len(crdtOp.SubScores), len(protoElems))
-		}*/
+		//if score.Score < 0 {
+		//	fmt.Printf("[TopSAddAndSubAll][ToUpdateObject]Warning: element %+v, index %d, of adds is negative! NElems (add/sub/total): %d/%d/%d.\n",
+		//		score, i, len(crdtOp.AddScores), len(crdtOp.SubScores), len(protoElems))
+		//}
 	}
 	offset := len(crdtOp.AddScores)
 	for i, score := range crdtOp.SubScores {
@@ -2110,12 +2228,12 @@ func (crdtOp TopSAddAndSubAll) ToUpdateObject() (protobuf *proto.ApbUpdateOperat
 			currElem.Data = *score.Data
 		}
 		protoElems[offset+i] = &currElem
-		/*if score.Score < 0 {
-			fmt.Printf("[TopSAddAndSubAll][ToUpdateObject]Warning: element %+v, index %d, of subs is negative! NElems (add/sub/total): %d/%d/%d.\n",
-				score, i, len(crdtOp.AddScores), len(crdtOp.SubScores), len(protoElems))
-		}*/
+		//if score.Score < 0 {
+		//	fmt.Printf("[TopSAddAndSubAll][ToUpdateObject]Warning: element %+v, index %d, of subs is negative! NElems (add/sub/total): %d/%d/%d.\n",
+		//		score, i, len(crdtOp.AddScores), len(crdtOp.SubScores), len(protoElems))
+		//}
 	}
-	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Topkrmvop{Topkrmvop: &proto.ApbTopkRmvUpdate{Adds: protoElems, PositiveLen: pb.Uint32(uint32(offset))}}}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Topkrmvop{Topkrmvop: &proto.ApbTopkRmvUpdate{Adds: protoElems, PositiveLen: pb.Uint32(uint32(offset))}}}*/
 }
 
 func (crdtOp TopSInit) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -2128,7 +2246,25 @@ func (crdtOp TopSInit) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
 
 // Same as for TopK
 func (crdtState TopSValueState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
-	protoScores := protobuf.GetTopk().GetValues()
+	protoScores := protobuf.GetTopk()
+	if len(protoScores.PlayerIds) == 0 {
+		//Partial read
+		protoScores = protobuf.GetPartread().GetTopk().GetPairs()
+	}
+	ids, scores, data := protoScores.GetPlayerIds(), protoScores.GetScores(), protoScores.GetData()
+	crdtState.Scores = make([]TopKScore, len(ids))
+	if len(data) == 0 {
+		for i, id := range ids {
+			crdtState.Scores[i] = TopKScore{Id: id, Score: scores[i]}
+		}
+	} else {
+		for i, id := range ids {
+			crdtState.Scores[i] = TopKScore{Id: id, Score: scores[i], Data: &data[i]}
+		}
+	}
+	return crdtState
+
+	/*protoScores := protobuf.GetTopk().GetValues()
 	if protoScores == nil {
 		//Partial read
 		protoScores = protobuf.GetPartread().GetTopk().GetPairs().GetValues()
@@ -2138,16 +2274,44 @@ func (crdtState TopSValueState) FromReadResp(protobuf *proto.ApbReadObjectResp) 
 		data := pair.GetData()
 		crdtState.Scores[i] = TopKScore{Id: pair.GetPlayerId(), Score: pair.GetScore(), Data: &data}
 	}
-	return crdtState
+	return crdtState*/
 }
 
 // Same as for TopK
-func (crdtState TopSValueState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
-	protos := make([]*proto.ApbIntPair, len(crdtState.Scores))
+func (crdtState TopSValueState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
+	var ids, scores []int32
+	topKBuf := TopStateBufs{}
+	if len(crdtState.Scores) >= shared.MIN_SLICE_POOL_SIZE {
+		ids, scores = int32SlicePool.Get(len(crdtState.Scores)), int32SlicePool.Get(len(crdtState.Scores))
+		topKBuf.Ids, topKBuf.Scores = ids, scores
+	} else {
+		ids, scores = make([]int32, len(crdtState.Scores)), make([]int32, len(crdtState.Scores))
+	}
+	var data [][]byte //We'll only allocate this if needed.
+	for i, score := range crdtState.Scores {
+		ids[i], scores[i] = score.Id, score.Score
+		if score.Data != nil && len(*score.Data) > 0 {
+			if data == nil {
+				if len(crdtState.Scores) >= shared.MIN_SLICE_POOL_SIZE {
+					data = bytesSlicePool.Get(len(crdtState.Scores))
+					topKBuf.DataBuf = data
+				} else {
+					data = make([][]byte, len(crdtState.Scores))
+				}
+			}
+			data[i] = *score.Data
+		}
+	}
+
+	if len(ids) >= shared.MIN_SLICE_POOL_SIZE {
+		buf.AddBufToReturn(crdtState.GetCRDTType(), topKBuf)
+	}
+	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Topk{Topk: &proto.ApbGetTopkResp{PlayerIds: ids, Scores: scores, Data: data}}}
+	/*protos := make([]*proto.ApbIntPair, len(crdtState.Scores))
 	for i, score := range crdtState.Scores {
 		protos[i] = &proto.ApbIntPair{PlayerId: pb.Int32(score.Id), Score: pb.Int32(score.Score), Data: *score.Data}
 	}
-	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Topk{Topk: &proto.ApbGetTopkResp{Values: protos}}}
+	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Topk{Topk: &proto.ApbGetTopkResp{Values: protos}}}*/
 }
 
 func (downOp DownstreamTopSAdd) FromReplicatorObj(protobuf *proto.ProtoOpDownstream) (downArgs DownstreamArguments) {
@@ -2356,7 +2520,7 @@ func (crdt *TopSumCrdt) ToProtoState() (protobuf *proto.ProtoState) {
 		/*Smallest: smallest,*/ MaxElems: pb.Int32(int32(crdt.maxElems))}}}
 }
 
-func (crdt *TopSumCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
+func (crdt *TopSumCrdt) FromProtoState(proto *proto.ProtoState, ts clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	topSumProto := proto.GetTopsum()
 	elems, notTop, notProp := make(map[int32]*TopKScore), make(map[int32]*TopKScore), make(map[int32]*TopKScore)
 

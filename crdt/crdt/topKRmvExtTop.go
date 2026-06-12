@@ -67,6 +67,8 @@ type TopKRmvExtTopCrdt struct {
 	rems             map[int32]clocksi.Timestamp           //Removes of all elements that were ever in the visible or extended top.
 	duplicateEntries tools.SliceMap[int32, setTopKElement] //Used to keep concurrent, duplicate adds for elems. Check discussion at the top of the file for an explanation why this is needed.
 
+	//Acts as a query cache, to avoid expensive map access on reads (as usually the top part is rarely updated)
+	//Since any update that changes the top part sets sortedElems to nil, this slice can be directly shared on read.
 	sortedElems         []TopKScore
 	visibleMin          TopKScore
 	isTopFull           bool   //True if both visible and extended top are full. Avoids having to check len(elems) == maxElems + maxNotTopElems.
@@ -166,11 +168,11 @@ func (args DownstreamTopKRmvExtRem) MustReplicate() bool            { return tru
 func (args DownstreamTopKRmvExtRemAll) MustReplicate() bool         { return true }
 func (args TopKRmvExtTopInit) MustReplicate() bool                  { return true }
 
-func (crdt *TopKRmvExtTopCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *TopKRmvExtTopCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	return crdt.InitializeWithSize(startTs, replicaID, defaultTopKSize)
 }
 
-func (crdt *TopKRmvExtTopCrdt) InitializeWithSize(startTs *clocksi.Timestamp, replicaID uint16, size int) (newCrdt CRDT) {
+func (crdt *TopKRmvExtTopCrdt) InitializeWithSize(startTs clocksi.Timestamp, replicaID uint16, size int) (newCrdt CRDT) {
 	crdt = &TopKRmvExtTopCrdt{
 		CRDTVM:           (&genericInversibleCRDT{}).initialize(crdt),
 		vc:               clocksi.NewSliceTimestamp(),
@@ -192,7 +194,7 @@ func (crdt *TopKRmvExtTopCrdt) initializeBuffers() {
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *TopKRmvExtTopCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *TopKRmvExtTopCrdt) {
+func (crdt *TopKRmvExtTopCrdt) initializeFromSnapshot(startTs clocksi.Timestamp, replicaID uint16) (sameCRDT *TopKRmvExtTopCrdt) {
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
@@ -206,7 +208,7 @@ func (crdt *TopKRmvExtTopCrdt) CRDTGC(safeClk clocksi.Timestamp) {
 		if !latestClk.IsLowerOrEqual(safeClk) { //Must generate an effect here.
 			var effect Effect = TopKRmvRemoveAllWithCleanEffect{cleanedRems: cleaned}
 			var fakeUpd DownstreamArguments = DownstreamTopKRemoveAll{}
-			crdt.addToHistory(&latestClk, &fakeUpd, &effect)
+			crdt.addToHistory(latestClk, fakeUpd, &effect)
 		} //Else: no need to store effect.
 		crdt.nClkUpdsSinceLastGC = 0
 	}
@@ -258,9 +260,10 @@ func (crdt *TopKRmvExtTopCrdt) getState(updsNotYetApplied []UpdateArguments) (st
 	if crdt.sortedElems == nil { //Make sortedElems, as we need to find out the actual top.
 		crdt.makeSortedElems()
 	}
-	values := make([]TopKScore, len(crdt.sortedElems))
+	/*values := make([]TopKScore, len(crdt.sortedElems))
 	copy(values, crdt.sortedElems)
-	return TopKValueState{Scores: values}
+	return TopKValueState{Scores: values}*/
+	return TopKValueState{Scores: crdt.sortedElems}
 }
 
 func (crdt *TopKRmvExtTopCrdt) getTopN(numberEntries int32, updsNotYetApplied []UpdateArguments) (state State) {
@@ -270,19 +273,21 @@ func (crdt *TopKRmvExtTopCrdt) getTopN(numberEntries int32, updsNotYetApplied []
 	if numberEntries > int32(len(crdt.sortedElems)) {
 		numberEntries = int32(len(crdt.sortedElems))
 	}
-	values := make([]TopKScore, numberEntries)
+	/*values := make([]TopKScore, numberEntries)
 	copy(values, crdt.sortedElems[:numberEntries])
-	return TopKValueState{Scores: values}
+	return TopKValueState{Scores: values}*/
+	return TopKValueState{Scores: crdt.sortedElems[:numberEntries]}
 }
 
 func (crdt *TopKRmvExtTopCrdt) getTopKAboveValue(minValue int32, updsNotYetApplied []UpdateArguments) (state State) {
 	var values []TopKScore
 	if crdt.sortedElems != nil { //Faster if it is available.
 		if !crdt.smallestScores.hasMin() || minValue <= crdt.smallestScores.getMin().Score { //If it doesn't have min, the top is empty. So we can use this codepath.
-			values = make([]TopKScore, len(crdt.elems))
-			copy(values, crdt.sortedElems)
-		} else if len(crdt.sortedElems) > 200 { //Attempt to find the end position and use a direct copy (faster)
-			//Binary search + copy.
+			/*values = make([]TopKScore, len(crdt.elems))
+			copy(values, crdt.sortedElems)*/
+			values = crdt.sortedElems
+		} else if len(crdt.sortedElems) > 200 { //Attempt to find the end position.
+			//Binary search.
 			left := 0
 			right := len(crdt.sortedElems) - 1
 			for left <= right {
@@ -293,16 +298,18 @@ func (crdt *TopKRmvExtTopCrdt) getTopKAboveValue(minValue int32, updsNotYetAppli
 					right = mid - 1
 				}
 			}
-			values = make([]TopKScore, left)
-			copy(values, crdt.sortedElems[:left])
-		} else { //Just iterate and copy manually.
-			values = make([]TopKScore, len(crdt.elems))
+			/*values = make([]TopKScore, left)
+			copy(values, crdt.sortedElems[:left])*/
+			values = crdt.sortedElems[:left]
+		} else { //Just iterate to find the end point, then slice it accordingly.
+			//values = make([]TopKScore, len(crdt.elems))
 			for i, elem := range crdt.sortedElems {
 				if elem.Score >= minValue {
 					//values[actuallyAdded] = TopKScore{Id: elem.Id, Score: elem.Score, Data: elem.Data}
-					values[i] = elem //This will copy as its a value type.
+					//values[i] = elem //This will copy as its a value type.
 				} else {
-					values = values[:i]
+					//values = values[:i]
+					values = crdt.sortedElems[:i]
 					break
 				}
 			}
@@ -321,8 +328,9 @@ func (crdt *TopKRmvExtTopCrdt) getTopKAboveValue(minValue int32, updsNotYetAppli
 		sort.Slice(values, func(i, j int) bool { return values[i].Score > values[j].Score })
 		if i >= crdt.maxElems { //This is actually sortedElems! Store it.
 			crdt.visibleMin = values[crdt.maxElems-1]
-			crdt.sortedElems = make([]TopKScore, crdt.maxElems) //Store a copy with the right size.
-			copy(crdt.sortedElems, values[:crdt.maxElems])
+			//crdt.sortedElems = make([]TopKScore, crdt.maxElems) //Store a copy with the right size.
+			//copy(crdt.sortedElems, values[:crdt.maxElems])
+			crdt.sortedElems = values[:crdt.maxElems]             //Hide non-top elements.
 			return TopKValueState{Scores: values[:crdt.maxElems]} //Return original.
 		} else {
 			return TopKValueState{Scores: values} //Number of elems is < maxElems, so we just return directly.
@@ -526,11 +534,11 @@ func (crdt *TopKRmvExtTopCrdt) Downstream(updTs clocksi.Timestamp, downstreamArg
 	}
 	effect, otherDownstreamArgs := crdt.applyDownstream(downstreamArgs)
 	//Necessary for inversibleCrdt
-	crdt.addToHistory(&updTs, &downstreamArgs, effect)
+	crdt.addToHistory(updTs, downstreamArgs, effect)
 	return
 }
 
-func (crdt *TopKRmvExtTopCrdt) applyDownstream(downstreamArgs UpdateArguments) (effect *Effect, otherDownstreamArgs DownstreamArguments) {
+func (crdt *TopKRmvExtTopCrdt) applyDownstream(downstreamArgs UpdateArguments) (effect Effect, otherDownstreamArgs DownstreamArguments) {
 	switch opType := downstreamArgs.(type) {
 	case DownstreamTopKRmvExtAdd:
 		effect = crdt.applyAdd(opType)
@@ -548,7 +556,7 @@ func (crdt *TopKRmvExtTopCrdt) applyDownstream(downstreamArgs UpdateArguments) (
 	return
 }
 
-func (crdt *TopKRmvExtTopCrdt) applyInit(op TopKRmvExtTopInit) (effect *Effect) {
+func (crdt *TopKRmvExtTopCrdt) applyInit(op TopKRmvExtTopInit) (effect Effect) {
 	if op.ExtendedTopSize <= 0 {
 		op.ExtendedTopSize = op.TopSize * DEFAULT_TOPKRMVEXT_FACTOR
 	}
@@ -571,9 +579,9 @@ func (crdt *TopKRmvExtTopCrdt) applyInit(op TopKRmvExtTopInit) (effect *Effect) 
 	return
 }
 
-func (crdt *TopKRmvExtTopCrdt) applyAdd(op DownstreamTopKRmvExtAdd) (effect *Effect) {
+func (crdt *TopKRmvExtTopCrdt) applyAdd(op DownstreamTopKRmvExtAdd) (effect Effect) {
 	//Mostly the same as in TopKRmv.
-	var effectValue Effect = NoEffect{}
+	effect = NoEffect{}
 	opTs, opReplicaID := op.TsId.getTs(), op.TsId.getReplicaID()
 	oldTs := crdt.vc.GetPos(opReplicaID)
 	crdt.vc.UpdatePos(opReplicaID, opTs)
@@ -586,13 +594,13 @@ func (crdt *TopKRmvExtTopCrdt) applyAdd(op DownstreamTopKRmvExtAdd) (effect *Eff
 		if hasId {
 			//Check if the "new elem" is > elem. If it is, add it. On the end, check if min should be updated.
 			if opElem.isHigher(elem) {
-				effectValue = TopKRmvExtTopReplaceEffect{newElem: opElem, oldElem: elem, oldTs: oldTs}
+				effect = TopKRmvExtTopReplaceEffect{newElem: opElem, oldElem: elem, oldTs: oldTs}
 				crdt.elems[op.Id] = opElem
 				if elem.TsId.getReplicaID() != opReplicaID {
 					//Store old value in duplicateEntries, in case of a concurrent remove.
 					clean := crdt.addAndCleanDuplicateEntries(elem, clocksi.GetNumberReplicas())
 					if len(clean) > 0 {
-						effectValue = TopKRmvExtTopReplaceWithCleanEffect{TopKRmvExtTopReplaceEffect: effectValue.(TopKRmvExtTopReplaceEffect), cleanEntries: clean}
+						effect = TopKRmvExtTopReplaceWithCleanEffect{TopKRmvExtTopReplaceEffect: effect.(TopKRmvExtTopReplaceEffect), cleanEntries: clean}
 					}
 				}
 				//Update min if needed
@@ -609,9 +617,9 @@ func (crdt *TopKRmvExtTopCrdt) applyAdd(op DownstreamTopKRmvExtAdd) (effect *Eff
 				//Store value in duplicateEntries, in case of a concurrent remove.
 				clean := crdt.addAndCleanDuplicateEntries(opElem, clocksi.GetNumberReplicas())
 				if len(clean) > 0 {
-					effectValue = TopKRmvExtTopDuplicateWithCleanEffect{TopKRmvExtTopDuplicateEffect: TopKRmvExtTopDuplicateEffect{newElem: opElem, oldTs: oldTs}, cleanEntries: clean}
+					effect = TopKRmvExtTopDuplicateWithCleanEffect{TopKRmvExtTopDuplicateEffect: TopKRmvExtTopDuplicateEffect{newElem: opElem, oldTs: oldTs}, cleanEntries: clean}
 				} else {
-					effectValue = TopKRmvExtTopDuplicateEffect{newElem: opElem, oldTs: oldTs}
+					effect = TopKRmvExtTopDuplicateEffect{newElem: opElem, oldTs: oldTs}
 				}
 			}
 		} else { //Note: From now on, we know this ID doesn't exist in the top yet.
@@ -620,13 +628,13 @@ func (crdt *TopKRmvExtTopCrdt) applyAdd(op DownstreamTopKRmvExtAdd) (effect *Eff
 				crdt.elems[op.Id] = opElem
 				//Check if min should be updated
 				removedMin := crdt.smallestScores.addIfInBetween(opElem, len(crdt.elems))
-				effectValue = TopKRmvExtTopAddEffect{newElem: opElem, removedMin: removedMin, oldTs: oldTs}
+				effect = TopKRmvExtTopAddEffect{newElem: opElem, removedMin: removedMin, oldTs: oldTs}
 				if crdt.isFull() {
 					crdt.isTopFull = true
 				}
 			} else if opElem.isHigher(crdt.smallestScores.getMin()) {
 				oldMin := crdt.smallestScores.removeMin()
-				effectValue = TopKRmvExtTopReplaceEffect{newElem: opElem, oldElem: oldMin, oldTs: oldTs}
+				effect = TopKRmvExtTopReplaceEffect{newElem: opElem, oldElem: oldMin, oldTs: oldTs}
 				//Get rid of this element and also from duplicateEntries, if it exists there.
 				delete(crdt.elems, oldMin.Id)
 				crdt.duplicateEntries.Delete(oldMin.Id)
@@ -641,10 +649,10 @@ func (crdt *TopKRmvExtTopCrdt) applyAdd(op DownstreamTopKRmvExtAdd) (effect *Eff
 			}
 		}
 	} //Else: A more recent remove exists. Not a problem, this remove will be propagated by who originated it.
-	return &effectValue
+	return
 }
 
-func (crdt *TopKRmvExtTopCrdt) applyAddAll(op DownstreamTopKRmvExtAddAll) (effect *Effect) {
+func (crdt *TopKRmvExtTopCrdt) applyAddAll(op DownstreamTopKRmvExtAddAll) (effect Effect) {
 	//Mostly the same as in TopKRmv.
 	listEffects := tools.NewSliceWithCounter[Effect](len(op))
 	firstElem := op[0]
@@ -714,7 +722,6 @@ func (crdt *TopKRmvExtTopCrdt) applyAddAll(op DownstreamTopKRmvExtAddAll) (effec
 				}
 			}
 		} //Else: A more recent remove exists. Not a problem, this remove will be propagated by who originated it.
-		//TODO: Effects. Also take into consideration NoEffect{}, as they're common here.
 	}
 	if changedTop {
 		crdt.nUpds++
@@ -730,11 +737,10 @@ func (crdt *TopKRmvExtTopCrdt) applyAddAll(op DownstreamTopKRmvExtAddAll) (effec
 	} else {
 		addAllEffect.effects = listEffects.ToSlice()
 	}
-	var effectValue Effect = addAllEffect
-	return &effectValue
+	return addAllEffect
 }
 
-func (crdt *TopKRmvExtTopCrdt) applyRemove(op DownstreamTopKRmvExtRem) (effect *Effect) {
+func (crdt *TopKRmvExtTopCrdt) applyRemove(op DownstreamTopKRmvExtRem) (effect Effect) {
 	remEffect := TopKRmvExtTopRemoveEffect{id: op.Id}
 	rems, hasRems := crdt.rems[op.Id]
 	if !hasRems {
@@ -789,16 +795,13 @@ func (crdt *TopKRmvExtTopCrdt) applyRemove(op DownstreamTopKRmvExtRem) (effect *
 	if len(crdt.rems) > 5*(crdt.maxElems+crdt.maxNotTopElems) {
 		removed := crdt.cleanupRems()
 		if len(removed) > 0 {
-			remWithClean := TopKRmvExtTopRemoveWithCleanEffect{TopKRmvExtTopRemoveEffect: remEffect, cleanRems: removed}
-			var effectValue Effect = remWithClean
-			return &effectValue
+			return TopKRmvExtTopRemoveWithCleanEffect{TopKRmvExtTopRemoveEffect: remEffect, cleanRems: removed}
 		}
 	}
-	var effectValue Effect = remEffect
-	return &effectValue
+	return remEffect
 }
 
-func (crdt *TopKRmvExtTopCrdt) applyRemoveAll(op DownstreamTopKRmvExtRemAll) (effect *Effect) {
+func (crdt *TopKRmvExtTopCrdt) applyRemoveAll(op DownstreamTopKRmvExtRemAll) (effect Effect) {
 	//If it's nil (or not full), we can act as if the top was changed. It won't have any impact but avoids some extra checks when applying the op.
 	changedTop := (crdt.sortedElems == nil || len(crdt.elems) < crdt.maxElems)
 	listEffect := TopKRmvExtTopRemoveAllEffect{effects: make([]TopKRmvExtTopRemoveEffect, len(op.DownRems))}
@@ -863,8 +866,7 @@ func (crdt *TopKRmvExtTopCrdt) applyRemoveAll(op DownstreamTopKRmvExtRemAll) (ef
 	if len(crdt.rems) > 5*(crdt.maxElems+crdt.maxNotTopElems) {
 		listEffect.cleanRems = crdt.cleanupRems()
 	}
-	var effectValue Effect = listEffect
-	return &effectValue
+	return listEffect
 }
 
 // This will be called by remove operations when crdt.rems' size exceeds considerably the size of the visible+extended top.
@@ -1020,13 +1022,13 @@ func (crdt *TopKRmvExtTopCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) 
 	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
-func (crdt *TopKRmvExtTopCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *TopKRmvExtTopCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	effect, _ = crdt.applyDownstream(updArgs)
 	return
 }
 
-func (crdt *TopKRmvExtTopCrdt) undoEffect(effect *Effect) {
-	switch typedEffect := (*effect).(type) {
+func (crdt *TopKRmvExtTopCrdt) undoEffect(effect Effect) {
+	switch typedEffect := (effect).(type) {
 	case TopKRmvExtTopAddEffect:
 		crdt.undoAddEffect(typedEffect)
 	case TopKRmvExtTopReplaceEffect:
@@ -1164,7 +1166,7 @@ func (crdt *TopKRmvExtTopCrdt) undoCleanRems(clean []tools.Pair[int32, clocksi.T
 	}
 }
 
-func (crdt *TopKRmvExtTopCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+func (crdt *TopKRmvExtTopCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {}
 
 // Protobuf functions
 // Other than the initializer, the add/rem operations (update version) are the same as TopK. Downstreams are different though.

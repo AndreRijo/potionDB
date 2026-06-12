@@ -21,7 +21,7 @@ func (args EmptyState) GetREADType() proto.READType { return proto.READType_FULL
 
 func (args EmptyState) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 
-func (crdt *EmptyCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *EmptyCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	return crdt
 }
 
@@ -47,10 +47,10 @@ func (crdt *EmptyCrdt) Copy() (copyCRDT InversibleCRDT) { return nil }
 
 func (crdt *EmptyCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {}
 
-func (crdt *EmptyCrdt) undoEffect(effect *Effect) {}
+func (crdt *EmptyCrdt) undoEffect(effect Effect) {}
 
-func (crdt *EmptyCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) { return nil }
+func (crdt *EmptyCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) { return nil }
 
-func (crdt *EmptyCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+func (crdt *EmptyCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {}
 
 func (crdt *EmptyCrdt) GetCRDT() CRDT { return crdt }

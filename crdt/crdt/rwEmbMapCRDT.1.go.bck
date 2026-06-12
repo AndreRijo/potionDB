@@ -127,7 +127,7 @@ func (args DownstreamRWEmbMapUpdateAll) MustReplicate() bool { return true }
 func (args DownstreamRWEmbMapRemoveAll) MustReplicate() bool { return true }
 
 //Note: crdt can (and most often will be) nil
-func (crdt *RWEmbMapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID int64) (newCrdt CRDT) {
+func (crdt *RWEmbMapCrdt) Initialize(startTs clocksi.Timestamp, replicaID int64) (newCrdt CRDT) {
 	crdt = &RWEmbMapCrdt{
 		genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
 		entries:               make(map[string]CRDT),
@@ -155,7 +155,7 @@ func (crdt *RWEmbMapCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArg
 
 func (crdt *RWEmbMapCrdt) getState(updsNotYetApplied []UpdateArguments) (state EmbMapEntryState) {
 	states := make(map[string]State)
-	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+	if  len(updsNotYetApplied) == 0 {
 		for key, embCrdt := range crdt.entries {
 			states[key] = embCrdt.Read(StateReadArguments{}, updsNotYetApplied)
 		}
@@ -232,7 +232,7 @@ func (crdt *RWEmbMapCrdt) getState(updsNotYetApplied []UpdateArguments) (state E
 
 func (crdt *RWEmbMapCrdt) getKeys(updsNotYetApplied []UpdateArguments) (state MapKeysState) {
 	//Literally a copy from ORMap. Sigh
-	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+	if  len(updsNotYetApplied) == 0 {
 		keys := make([]string, len(crdt.entries))
 		i := 0
 		for key, _ := range crdt.entries {
@@ -290,7 +290,7 @@ func (crdt *RWEmbMapCrdt) getKeys(updsNotYetApplied []UpdateArguments) (state Ma
 }
 
 func (crdt *RWEmbMapCrdt) getValue(updsNotYetApplied []UpdateArguments, key string) (state EmbMapGetValueState) {
-	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+	if  len(updsNotYetApplied) == 0 {
 		//Return right away
 		return EmbMapGetValueState{State: crdt.entries[key].Read(StateReadArguments{}, updsNotYetApplied)}
 	}
@@ -348,7 +348,7 @@ func (crdt *RWEmbMapCrdt) getValue(updsNotYetApplied []UpdateArguments, key stri
 }
 
 func (crdt *RWEmbMapCrdt) hasKey(updsNotYetApplied []UpdateArguments, key string) (state MapHasKeyState) {
-	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+	if  len(updsNotYetApplied) == 0 {
 		_, has := crdt.entries[key]
 		return MapHasKeyState{HasKey: has}
 	}
@@ -452,7 +452,7 @@ func (crdt *RWEmbMapCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs Dow
 	//When applying downstreams in the emb CRDTs, new ops may be returned from a NuCRDT
 	effect, otherDownstreamArgs := crdt.applyDownstream(updTs, downstreamArgs, NORMAL)
 	//Necessary for inversibleCrdt
-	crdt.addToHistory(&updTs, &downstreamArgs, effect)
+	crdt.addToHistory(updTs, downstreamArgs, effect)
 	return
 }
 
@@ -582,13 +582,13 @@ func (crdt *RWEmbMapCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	crdt.genericInversibleCRDT.rebuildCRDTToVersion(targetTs, crdt.undoEffect, crdt.reapplyOp, crdt.notifyRebuiltComplete)
 }
 
-func (crdt *RWEmbMapCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *RWEmbMapCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	//The timestamp (nil) is only used by embedded CRDTs, which won't be changed now due to the REDO flag.
 	effect, _ = crdt.applyDownstream(nil, updArgs, REDO)
 	return effect
 }
 
-func (crdt *RWEmbMapCrdt) undoEffect(effect *Effect) {
+func (crdt *RWEmbMapCrdt) undoEffect(effect Effect) {
 	switch typedEffect := (*effect).(type) {
 	case RWEmbMapUpdateAllEffect:
 		crdt.undoUpdateAllEffect(typedEffect.Updated, typedEffect.PreviousRmvs)
@@ -618,7 +618,7 @@ func (crdt *RWEmbMapCrdt) undoRemoveAllEffect(removedCRDTs map[string]CRDT, repl
 	}
 	crdt.rmvClock.UpdateForcedPos(replicaID, previousClk)
 }
-func (crdt *RWEmbMapCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {
+func (crdt *RWEmbMapCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {
 	//Only redo CRDTs that were altered
 	for key := range crdt.keysToRebuild {
 		crdt.entries[key].(InversibleCRDT).RebuildCRDTToVersion(*currTs)

@@ -184,11 +184,11 @@ var minTopKElement = TopKElement{Id: math.MinInt32, Score: math.MinInt32} //For 
 func (crdt *TopKHeapCrdt) GetCRDTType() proto.CRDTType { return proto.CRDTType_TOPK_RMV }
 func (crdt *TopKHeapCrdt) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 
-func (crdt *TopKHeapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *TopKHeapCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	return crdt.InitializeWithSize(startTs, replicaID, defaultTopKSize)
 }
 
-func (crdt *TopKHeapCrdt) InitializeWithSize(startTs *clocksi.Timestamp, replicaID uint16, size int) (newCrdt CRDT) {
+func (crdt *TopKHeapCrdt) InitializeWithSize(startTs clocksi.Timestamp, replicaID uint16, size int) (newCrdt CRDT) {
 	crdt = &TopKHeapCrdt{
 		CRDTVM:       (&genericInversibleCRDT{}).initialize(crdt),
 		vc:           clocksi.NewSliceTimestamp(),
@@ -205,7 +205,7 @@ func (crdt *TopKHeapCrdt) InitializeWithSize(startTs *clocksi.Timestamp, replica
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *TopKHeapCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *TopKHeapCrdt) {
+func (crdt *TopKHeapCrdt) initializeFromSnapshot(startTs clocksi.Timestamp, replicaID uint16) (sameCRDT *TopKHeapCrdt) {
 	crdt.CRDTVM, crdt.replicaID = (&genericInversibleCRDT{}).initialize(crdt), replicaID
 	return crdt
 }
@@ -263,11 +263,11 @@ func (crdt *TopKHeapCrdt) Update(args UpdateArguments) (downstreamArgs Downstrea
 func (crdt *TopKHeapCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs DownstreamArguments) (otherDownstreamArgs DownstreamArguments) {
 	effect, otherDownstreamArgs := crdt.applyDownstream(downstreamArgs)
 	//Necessary for inversibleCrdt
-	crdt.addToHistory(&updTs, &downstreamArgs, effect)
+	crdt.addToHistory(updTs, downstreamArgs, effect)
 	return
 }
 
-func (crdt *TopKHeapCrdt) applyDownstream(downstreamArgs UpdateArguments) (effect *Effect, otherDownstreamArgs DownstreamArguments) {
+func (crdt *TopKHeapCrdt) applyDownstream(downstreamArgs UpdateArguments) (effect Effect, otherDownstreamArgs DownstreamArguments) {
 	switch opType := downstreamArgs.(type) {
 	case DownstreamTopKAdd:
 		effect, otherDownstreamArgs = crdt.applyAdd(&opType)
@@ -290,10 +290,9 @@ func (crdt *TopKHeapCrdt) applyDownstream(downstreamArgs UpdateArguments) (effec
 
 // Effect addToTop (include previousMin and previousEntry, if any)?
 // Effect addToNotTop
-func (crdt *TopKHeapCrdt) applyAdd(op *DownstreamTopKAdd) (effect *Effect, otherDownstreamArgs DownstreamArguments) {
+func (crdt *TopKHeapCrdt) applyAdd(op *DownstreamTopKAdd) (effect Effect, otherDownstreamArgs DownstreamArguments) {
 	//fmt.Println("Applying topK add")
 	//TODO: Effects.
-	var effectValue Effect
 	opReplicaID, opTs := op.TsId.getReplicaID(), op.TsId.getTs()
 	oldTs := crdt.vc.GetPos(opReplicaID)
 	if op.Data == nil {
@@ -308,7 +307,7 @@ func (crdt *TopKHeapCrdt) applyAdd(op *DownstreamTopKAdd) (effect *Effect, other
 			//Check if the "new elem" is > elem. If it is, add it.
 			if op.TopKElement.isHigher(elem.TopKElement) {
 				//fmt.Printf("[TOPK][ADD]Id already exists and new value is higher, number elems %d, max elems %d, min score %d\n", len(crdt.elems), crdt.maxElems, crdt.smallestScore.Score)
-				effectValue = TopKRmvReplaceEffect{newElem: op.TopKElement, oldElem: elem.TopKElement, oldTs: oldTs}
+				effect = TopKRmvReplaceEffect{newElem: op.TopKElement, oldElem: elem.TopKElement, oldTs: oldTs}
 				old := elem.TopKElement
 				elem.TopKElement = op.TopKElement
 				heap.Fix(crdt.elemsHeap, elem.pos) //Update position of element in the heap
@@ -319,7 +318,7 @@ func (crdt *TopKHeapCrdt) applyAdd(op *DownstreamTopKAdd) (effect *Effect, other
 				crdt.sortedElems = nil
 			} else {
 				//fmt.Printf("[TOPK][ADD]Id already exists but new value is lower, number elems %d, max elems %d, min score %d\n", len(crdt.elems), crdt.maxElems, crdt.smallestScore.Score)
-				effectValue = TopKRmvAddNotTopEffect{newElem: op.TopKElement, oldTs: oldTs}
+				effect = TopKRmvAddNotTopEffect{newElem: op.TopKElement, oldTs: oldTs}
 				//Store as it might be relevant later on
 				elem.notTop.add(op.TopKElement)
 			}
@@ -356,7 +355,7 @@ func (crdt *TopKHeapCrdt) applyAdd(op *DownstreamTopKAdd) (effect *Effect, other
 				crdt.sortedElems = nil
 			} else {
 				//fmt.Printf("[TOPK][ADD]Doesn't have space for more elements and new is smaller than smallest score. Number elems %d, max elems %d, min score %d\n", len(crdt.elems), crdt.maxElems, crdt.smallestScore.Score)
-				effectValue = TopKRmvAddNotTopEffect{newElem: op.TopKElement, oldTs: oldTs}
+				effect = TopKRmvAddNotTopEffect{newElem: op.TopKElement, oldTs: oldTs}
 				//effectValue = TopKAddEffect{TopKElement: op.TopKElement}
 				//Add to notInTop
 				crdt.addToNotInTop(op.TopKElement)
@@ -366,10 +365,10 @@ func (crdt *TopKHeapCrdt) applyAdd(op *DownstreamTopKAdd) (effect *Effect, other
 	} else {
 		//Must return this remove to propagate to other replicas
 		otherDownstreamArgs = DownstreamTopKRemove{Id: op.Id, Vc: remsVc}
-		effectValue = NoEffect{}
+		effect = NoEffect{}
 		//fmt.Println("[TOPKRMV]Apply add is returning a new remove.")
 	}
-	return &effectValue, otherDownstreamArgs
+	return effect, otherDownstreamArgs
 }
 
 /*
@@ -385,7 +384,7 @@ Variants for element removed:
   - Wasn't able to find an element to add and the removed one was the min;
   - Didn't find an element to add;
 */
-func (crdt *TopKHeapCrdt) applyRemove(op *DownstreamTopKRemove) (effect *Effect, otherDownstreamArgs DownstreamArguments) {
+func (crdt *TopKHeapCrdt) applyRemove(op *DownstreamTopKRemove) (effect Effect, otherDownstreamArgs DownstreamArguments) {
 	//Must be <= as the remove's clk is a copy without incrementing.
 	remEffect := TopKRmvRemoveEffect{id: op.Id, notTopRemoved: tools.NewSliceSet[TopKElement](int(NReplicas))}
 	rems, hasRems := crdt.rems[op.Id]
@@ -463,11 +462,11 @@ func (crdt *TopKHeapCrdt) applyRemove(op *DownstreamTopKRemove) (effect *Effect,
 	return &eff, otherDownstreamArgs
 }
 
-func (crdt *TopKHeapCrdt) applyAddAll(op *DownstreamTopKAddAll) (effect *Effect, otherDownstreamArgs DownstreamArguments) {
+func (crdt *TopKHeapCrdt) applyAddAll(op *DownstreamTopKAddAll) (effect Effect, otherDownstreamArgs DownstreamArguments) {
 	return
 }
 
-func (crdt *TopKHeapCrdt) applyRemoveAll(op *DownstreamTopKRemoveAll) (effect *Effect, otherDownstreamArgs DownstreamArguments) {
+func (crdt *TopKHeapCrdt) applyRemoveAll(op *DownstreamTopKRemoveAll) (effect Effect, otherDownstreamArgs DownstreamArguments) {
 	return
 }
 
@@ -544,12 +543,12 @@ func (crdt *TopKHeapCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
-func (crdt *TopKHeapCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *TopKHeapCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	return nil
 }
 
-func (crdt *TopKHeapCrdt) undoEffect(effect *Effect) {}
+func (crdt *TopKHeapCrdt) undoEffect(effect Effect) {}
 
-func (crdt *TopKHeapCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+func (crdt *TopKHeapCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {}
 
 func (crdt *TopKHeapCrdt) GetCRDT() CRDT { return crdt }

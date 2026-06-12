@@ -71,14 +71,14 @@ func (args AvgState) GetAggregateResult(aggrType AggregateType, aggrKey string) 
 }
 
 // Note: crdt can (and most often will be) nil
-func (crdt *AvgCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *AvgCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	crdt = &AvgCrdt{sum: 0, nAdds: 0}
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *AvgCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *AvgCrdt) {
+func (crdt *AvgCrdt) initializeFromSnapshot(startTs clocksi.Timestamp, replicaID uint16) (sameCRDT *AvgCrdt) {
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
@@ -98,7 +98,7 @@ func (crdt *AvgCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArgument
 }
 
 func (crdt *AvgCrdt) getValue(updsNotYetApplied []UpdateArguments) (state State) {
-	if updsNotYetApplied == nil || len(updsNotYetApplied) > 0 {
+	if len(updsNotYetApplied) > 0 {
 		return AvgState{Value: float64(crdt.sum) / float64(crdt.nAdds)}
 	}
 	sum, nAdds := crdt.sum, crdt.nAdds
@@ -111,7 +111,7 @@ func (crdt *AvgCrdt) getValue(updsNotYetApplied []UpdateArguments) (state State)
 }
 
 func (crdt *AvgCrdt) getFullValue(updsNotYetApplied []UpdateArguments) (state State) {
-	if updsNotYetApplied == nil || len(updsNotYetApplied) > 0 {
+	if len(updsNotYetApplied) > 0 {
 		return AvgFullState{Sum: crdt.sum, NAdds: crdt.nAdds}
 	}
 	sum, nAdds := crdt.sum, crdt.nAdds
@@ -143,7 +143,8 @@ func (crdt *AvgCrdt) Update(args UpdateArguments) (downstreamArgs DownstreamArgu
 		}
 		downstreamArgs = AddMultipleValue{SumValue: sumValue, NAdds: nAdds}
 	default:
-		fmt.Printf("[AVGCrdt][Update]Unknown update type: %v (%T)\n", args, args)
+		fmt.Printf("[AVGCrdt][Update]Unknown update type: %+v (%T)\n", args, args)
+		return WrongOp{RecOp: args, RecOpCrdtType: args.GetCRDTType(), CrdtType: crdt.GetCRDTType(), DataType: crdt.GetDATAType()}
 	}
 	return
 }
@@ -151,17 +152,17 @@ func (crdt *AvgCrdt) Update(args UpdateArguments) (downstreamArgs DownstreamArgu
 func (crdt *AvgCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs DownstreamArguments) (otherDownstreamArgs DownstreamArguments) {
 	effect := crdt.applyDownstream(downstreamArgs)
 	//Necessary for inversibleCrdt
-	crdt.addToHistory(&updTs, &downstreamArgs, effect)
+	crdt.addToHistory(updTs, downstreamArgs, effect)
 
 	return nil
 }
 
-func (crdt *AvgCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect *Effect) {
+func (crdt *AvgCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect Effect) {
 	typedUpd := downstreamArgs.(AddMultipleValue)
-	var effectValue Effect = AddMultipleValueEffect(typedUpd)
+	effect = AddMultipleValueEffect(typedUpd)
 	crdt.sum += typedUpd.SumValue
 	crdt.nAdds += typedUpd.NAdds
-	return &effectValue
+	return
 }
 
 func (crdt *AvgCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err error) {
@@ -182,17 +183,17 @@ func (crdt *AvgCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
-func (crdt *AvgCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *AvgCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	return crdt.applyDownstream(updArgs)
 }
 
-func (crdt *AvgCrdt) undoEffect(effect *Effect) {
-	typedEffect := (*effect).(AddMultipleValueEffect)
+func (crdt *AvgCrdt) undoEffect(effect Effect) {
+	typedEffect := (effect).(AddMultipleValueEffect)
 	crdt.sum -= typedEffect.SumValue
 	crdt.nAdds -= typedEffect.NAdds
 }
 
-func (crdt *AvgCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+func (crdt *AvgCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {}
 
 //Protobuf functions
 
@@ -222,7 +223,7 @@ func (crdtState AvgState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state
 	return crdtState
 }
 
-func (crdtState AvgState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState AvgState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Avg{Avg: &proto.ApbGetAverageResp{Avg: pb.Float64(crdtState.Value)}}}
 }
 
@@ -232,7 +233,7 @@ func (crdtState AvgFullState) FromReadResp(protobuf *proto.ApbReadObjectResp) (s
 	return crdtState
 }
 
-func (crdtState AvgFullState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState AvgFullState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Avg{Avg: &proto.ApbAvgPartialReadResp{
 		Getfull: &proto.ApbAvgGetFullReadResp{Sum: &crdtState.Sum, NAdds: &crdtState.NAdds},
 	}}}}}
@@ -261,7 +262,7 @@ func (crdt *AvgCrdt) ToProtoState() (protobuf *proto.ProtoState) {
 	return &proto.ProtoState{State: &proto.ProtoState_Avg{Avg: &proto.ProtoAvgState{Sum: &sum, NAdds: &nAdds}}}
 }
 
-func (crdt *AvgCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
+func (crdt *AvgCrdt) FromProtoState(proto *proto.ProtoState, ts clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	protoAvg := proto.GetAvg()
 	return (&AvgCrdt{sum: protoAvg.GetSum(), nAdds: protoAvg.GetNAdds()}).initializeFromSnapshot(ts, replicaID)
 }

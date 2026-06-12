@@ -8,7 +8,7 @@ import (
 	pb "google.golang.org/protobuf/proto"
 )
 
-func CreateS2SWrapperProto(clientID int32, msgID proto.WrapperType, msg pb.Message) *proto.S2SWrapper {
+func CreateS2SWrapperProto(clientID uint64, msgID proto.WrapperType, msg pb.Message) *proto.S2SWrapper {
 	protobuf := &proto.S2SWrapper{ClientID: &clientID, MsgID: &msgID}
 
 	switch msgID {
@@ -39,8 +39,31 @@ func CreateS2SWrapperProto(clientID int32, msgID proto.WrapperType, msg pb.Messa
 	return protobuf
 }
 
-func CreateS2SWrapperReplyProto(clientID int32, msgID proto.WrapperType, msg pb.Message) *proto.S2SWrapperReply {
+func CreateS2SWrapperReplyProto(clientID uint64, msgID proto.WrapperType, msg pb.Message) *proto.S2SWrapperReply {
 	protobuf := &proto.S2SWrapperReply{ClientID: &clientID, MsgID: &msgID}
+
+	switch msgID {
+	case proto.WrapperType_STATIC_READ_OBJS:
+		protobuf.StaticReadObjs = msg.(*proto.ApbStaticReadObjectsResp)
+	case proto.WrapperType_STATIC_SINGLE_READ:
+		protobuf.SingleRead = msg.(*proto.S2SSingleReadResp)
+	case proto.WrapperType_START_TXN:
+		protobuf.StartTxn = msg.(*proto.ApbStartTransactionResp)
+	case proto.WrapperType_READ_OBJS:
+		protobuf.ReadObjs = msg.(*proto.ApbReadObjectsResp)
+	case proto.WrapperType_UPD:
+		protobuf.Upd = msg.(*proto.ApbOperationResp)
+	case proto.WrapperType_COMMIT:
+		protobuf.CommitTxn = msg.(*proto.ApbCommitResp)
+	}
+
+	return protobuf
+}
+
+func CreateS2SWrapperReplyProtoReuse(clientID uint64, msgID proto.WrapperType, msg pb.Message, reuseBuf *proto.S2SWrapperReply) *proto.S2SWrapperReply {
+	protobuf := reuseBuf
+	*protobuf.ClientID = clientID
+	*protobuf.MsgID = msgID
 
 	switch msgID {
 	case proto.WrapperType_STATIC_READ_OBJS:

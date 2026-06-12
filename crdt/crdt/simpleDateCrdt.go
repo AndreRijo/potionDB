@@ -399,7 +399,7 @@ func DateTypeToCRDTType(dateType DateType) proto.CRDTType {
 	return proto.CRDTType_SET_ONLY_DATE
 }
 
-func (crdt *SimpleDateCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *SimpleDateCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	return &SimpleDateCrdt{
 		CRDTVM: (&genericInversibleCRDT{}).initialize(crdt),
 		dateTs: GregorianToTs(1, 1, 1),
@@ -407,7 +407,7 @@ func (crdt *SimpleDateCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uin
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *SimpleDateCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *SimpleDateCrdt) {
+func (crdt *SimpleDateCrdt) initializeFromSnapshot(startTs clocksi.Timestamp, replicaID uint16) (sameCRDT *SimpleDateCrdt) {
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
@@ -510,11 +510,11 @@ func (crdt *SimpleDateCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs D
 		}
 		return nil
 	}
-	crdt.addToHistory(&updTs, &downstreamArgs, crdt.applyDownstream(downstreamArgs))
+	crdt.addToHistory(updTs, downstreamArgs, crdt.applyDownstream(downstreamArgs))
 	return nil
 }
 
-func (crdt *SimpleDateCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect *Effect) {
+func (crdt *SimpleDateCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect Effect) {
 	switch typedArgs := downstreamArgs.(type) {
 	case DownstreamIncMS:
 		effect = crdt.applyInc(int64(typedArgs))
@@ -526,16 +526,14 @@ func (crdt *SimpleDateCrdt) applyDownstream(downstreamArgs DownstreamArguments) 
 	return
 }
 
-func (crdt *SimpleDateCrdt) applyInc(opInc int64) (effect *Effect) {
-	var effectValue Effect = IncMSEffect(opInc)
+func (crdt *SimpleDateCrdt) applyInc(opInc int64) (effect Effect) {
 	crdt.dateTs += opInc
-	return &effectValue
+	return IncMSEffect(opInc)
 }
 
-func (crdt *SimpleDateCrdt) applyInitializer(opSet int64) (effect *Effect) {
-	var effectValue Effect = SetInitialDateEffect(opSet)
+func (crdt *SimpleDateCrdt) applyInitializer(opSet int64) (effect Effect) {
 	crdt.dateTs = opSet //Can't inc due to the crdt's initialization setting the date to a non-zero value.
-	return &effectValue
+	return SetInitialDateEffect(opSet)
 }
 
 func (crdt *SimpleDateCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err error) {
@@ -554,12 +552,12 @@ func (crdt *SimpleDateCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	crdt.CRDTVM.rebuildCRDTToVersion(targetTs) //Maybe could be simpler?
 }
 
-func (crdt *SimpleDateCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *SimpleDateCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	return crdt.applyDownstream(updArgs) //Maybe could be simpler?
 }
 
-func (crdt *SimpleDateCrdt) undoEffect(effect *Effect) {
-	switch typedEffect := (*effect).(type) {
+func (crdt *SimpleDateCrdt) undoEffect(effect Effect) {
+	switch typedEffect := (effect).(type) {
 	case DownstreamIncMS:
 		crdt.dateTs -= int64(typedEffect) //Undo the inc.
 	case DownstreamSetInitialDate:
@@ -567,7 +565,7 @@ func (crdt *SimpleDateCrdt) undoEffect(effect *Effect) {
 	}
 }
 
-func (crdt *SimpleDateCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+func (crdt *SimpleDateCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {}
 
 func HourMinSecToMs(hour, minute, second int8) int64 {
 	return int64(second)*1000 + int64(minute)*60000 + int64(hour)*3600000
@@ -757,7 +755,7 @@ func (crdtState DateState) FromReadResp(protobuf *proto.ApbReadObjectResp) (stat
 		Hour: int8(dateProto.GetHour()), Minute: int8(dateProto.GetMinute()), Second: int8(dateProto.GetSecond())}
 }
 
-func (crdtState DateState) ToReadResp() *proto.ApbReadObjectResp {
+func (crdtState DateState) ToReadResp(buf *BufsToReturnToPool) *proto.ApbReadObjectResp {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Date{Date: &proto.ApbGetDateResp{
 		Year: pb.Int32(int32(crdtState.Year)), Month: pb.Int32(int32(crdtState.Month)), Day: pb.Int32(int32(crdtState.Day)),
 		Hour: pb.Int32(int32(crdtState.Hour)), Minute: pb.Int32(int32(crdtState.Minute)), Second: pb.Int32(int32(crdtState.Second)),
@@ -770,7 +768,7 @@ func (crdtState DateFullState) FromReadResp(protobuf *proto.ApbReadObjectResp) (
 		Hour: int8(dateProto.GetHour()), Minute: int8(dateProto.GetMinute()), Second: int8(dateProto.GetSecond()), Millisecond: int16(dateProto.GetMillisecond())}
 }
 
-func (crdtState DateFullState) ToReadResp() *proto.ApbReadObjectResp {
+func (crdtState DateFullState) ToReadResp(buf *BufsToReturnToPool) *proto.ApbReadObjectResp {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Date{Date: &proto.ApbDatePartialReadResp{Full: &proto.ApbDateFullResp{
 		Year: pb.Int32(int32(crdtState.Year)), Month: pb.Int32(int32(crdtState.Month)), Day: pb.Int32(int32(crdtState.Day)),
 		Hour: pb.Int32(int32(crdtState.Hour)), Minute: pb.Int32(int32(crdtState.Minute)), Second: pb.Int32(int32(crdtState.Second)), Millisecond: pb.Int32(int32(crdtState.Millisecond)),
@@ -782,7 +780,7 @@ func (crdtState TimeState) FromReadResp(protobuf *proto.ApbReadObjectResp) (stat
 	return TimeState{Hour: int8(dateProto.GetHour()), Minute: int8(dateProto.GetMinute()), Second: int8(dateProto.GetSecond()), Millisecond: int16(dateProto.GetMillisecond())}
 }
 
-func (crdtState TimeState) ToReadResp() *proto.ApbReadObjectResp {
+func (crdtState TimeState) ToReadResp(buf *BufsToReturnToPool) *proto.ApbReadObjectResp {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Date{Date: &proto.ApbDatePartialReadResp{Time: &proto.ApbTimeResp{
 		Hour: pb.Int32(int32(crdtState.Hour)), Minute: pb.Int32(int32(crdtState.Minute)), Second: pb.Int32(int32(crdtState.Second)), Millisecond: pb.Int32(int32(crdtState.Millisecond))}}}}}}
 }
@@ -793,7 +791,7 @@ func (crdtState DateOnlyState) FromReadResp(protobuf *proto.ApbReadObjectResp) (
 		Hour: int8(dateProto.GetHour()), Minute: int8(dateProto.GetMinute()), Second: int8(dateProto.GetSecond())}
 }
 
-func (crdtState DateOnlyState) ToReadResp() *proto.ApbReadObjectResp {
+func (crdtState DateOnlyState) ToReadResp(buf *BufsToReturnToPool) *proto.ApbReadObjectResp {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Date{Date: &proto.ApbDatePartialReadResp{
 		DateOnly: &proto.ApbDateOnlyResp{Year: pb.Int32(int32(crdtState.Year)), Month: pb.Int32(int32(crdtState.Month)), Day: pb.Int32(int32(crdtState.Day))}}}}}}
 }
@@ -804,7 +802,7 @@ func (crdtState TimestampState) FromReadResp(protobuf *proto.ApbReadObjectResp) 
 		Hour: int8(dateProto.GetHour()), Minute: int8(dateProto.GetMinute()), Second: int8(dateProto.GetSecond())}
 }
 
-func (crdtState TimestampState) ToReadResp() *proto.ApbReadObjectResp {
+func (crdtState TimestampState) ToReadResp(buf *BufsToReturnToPool) *proto.ApbReadObjectResp {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Date{Date: &proto.ApbDatePartialReadResp{Timestamp: &proto.ApbTimestampResp{Timestamp: pb.Int64(int64(crdtState))}}}}}}
 }
 
@@ -860,7 +858,7 @@ func (crdt *SimpleDateCrdt) ToProtoState() (protobuf *proto.ProtoState) {
 	return &proto.ProtoState{State: &proto.ProtoState_SimpleDate{SimpleDate: &proto.ProtoSimpleDateState{DateTs: pb.Int64(crdt.dateTs)}}}
 }
 
-func (crdt *SimpleDateCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
+func (crdt *SimpleDateCrdt) FromProtoState(proto *proto.ProtoState, ts clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	return (&SimpleDateCrdt{dateTs: proto.GetSimpleDate().GetDateTs()}).initializeFromSnapshot(ts, replicaID)
 }
 

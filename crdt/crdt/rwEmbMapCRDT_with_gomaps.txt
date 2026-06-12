@@ -534,7 +534,7 @@ func CheckInnerForVariablesMapComparable(args map[string]CompareArguments, point
 }
 
 // Note: crdt can (and most often will be) nil
-func (crdt *RWEmbMapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *RWEmbMapCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	crdt = &RWEmbMapCrdt{
 		entries: make(map[string]CRDT),
 		removes: make(map[string]markedVC),
@@ -552,7 +552,7 @@ func (crdt *RWEmbMapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint1
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *RWEmbMapCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *RWEmbMapCrdt) {
+func (crdt *RWEmbMapCrdt) initializeFromSnapshot(startTs clocksi.Timestamp, replicaID uint16) (sameCRDT *RWEmbMapCrdt) {
 	crdt.CRDTVM, crdt.replicaID = (&genericInversibleCRDT{}).initialize(crdt), replicaID
 	return crdt
 }
@@ -2175,7 +2175,7 @@ func (crdt *RWEmbMapCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs Dow
 	//fmt.Printf("[RWEmbMapCRDT]Downstream. HasUpdsSinceGC set to true.\n")
 	effect, otherDownstreamArgs := crdt.applyDownstream(updTs, downstreamArgs, NORMAL)
 	//Necessary for inversibleCrdt
-	crdt.addToHistory(&updTs, &downstreamArgs, effect)
+	crdt.addToHistory(updTs, downstreamArgs, effect)
 	return
 }
 
@@ -3027,13 +3027,13 @@ func (crdt *RWEmbMapCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
-func (crdt *RWEmbMapCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *RWEmbMapCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	//The timestamp (nil) is only used by embedded CRDTs, which won't be changed now due to the REDO flag.
 	effect, _ = crdt.applyDownstream(nil, updArgs, REDO)
 	return effect
 }
 
-func (crdt *RWEmbMapCrdt) undoEffect(effect *Effect) {
+func (crdt *RWEmbMapCrdt) undoEffect(effect Effect) {
 	switch typedEffect := (*effect).(type) {
 	case RWEmbMapUpdateAllEffect:
 		crdt.undoUpdateAllEffect(typedEffect.Updated, typedEffect.PreviousRmvClk, typedEffect.AddedMark, typedEffect.ReplicaID)
@@ -3083,7 +3083,7 @@ func (crdt *RWEmbMapCrdt) undoRemoveAllEffect(removedCRDTs map[string]CRDT, repl
 	crdt.rmvClock.UpdateForcedPos(replicaID, previousClk)
 }
 
-func (crdt *RWEmbMapCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {
+func (crdt *RWEmbMapCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {
 	//Only redo CRDTs that were altered
 	for key := range crdt.keysToRebuild {
 		crdt.entries[key].(InversibleCRDT).RebuildCRDTToVersion(*currTs)
@@ -3213,7 +3213,7 @@ func (crdtState EmbMapEntryState) FromReadResp(protobuf *proto.ApbReadObjectResp
 	return crdtState
 }
 
-func (crdtState EmbMapEntryState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState EmbMapEntryState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Map: &proto.ApbGetMapResp{Entries: crdtsToApbMapEntries(crdtState.States)}}
 }
 
@@ -3222,7 +3222,7 @@ func (crdtState EmbMapHasKeyState) FromReadResp(protobuf *proto.ApbReadObjectRes
 	return crdtState
 }
 
-func (crdtState EmbMapHasKeyState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState EmbMapHasKeyState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Partread: &proto.ApbPartialReadResp{Map: &proto.ApbMapPartialReadResp{
 		Haskey: &proto.ApbMapHasKeyReadResp{Has: pb.Bool(crdtState.HasKey)},
 	}}}
@@ -3233,7 +3233,7 @@ func (crdtState EmbMapKeysState) FromReadResp(protobuf *proto.ApbReadObjectResp)
 	return crdtState
 }
 
-func (crdtState EmbMapKeysState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState EmbMapKeysState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Partread: &proto.ApbPartialReadResp{Map: &proto.ApbMapPartialReadResp{
 		Getkeys: &proto.ApbMapGetKeysReadResp{Keys: crdtState.Keys},
 	}}}
@@ -3246,11 +3246,11 @@ func (crdtState EmbMapGetValueState) FromReadResp(protobuf *proto.ApbReadObjectR
 	return crdtState
 }
 
-func (crdtState EmbMapGetValueState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState EmbMapGetValueState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	innerCrdtType, innerReadType := crdtState.State.GetCRDTType(), crdtState.State.GetREADType()
 	return &proto.ApbReadObjectResp{Partread: &proto.ApbPartialReadResp{Map: &proto.ApbMapPartialReadResp{
 		Getvalue: &proto.ApbMapGetValueResp{
-			Value: crdtState.State.(ProtoState).ToReadResp(), Crdttype: &innerCrdtType, Parttype: &innerReadType,
+			Value: crdtState.State.(ProtoState).ToReadResp(buf *BufsToReturnToPool), Crdttype: &innerCrdtType, Parttype: &innerReadType,
 		},
 	}}}
 }
@@ -3267,13 +3267,13 @@ func (crdtState EmbMapGetValuesState) FromReadResp(protobuf *proto.ApbReadObject
 	return crdtState
 }
 
-func (crdtState EmbMapGetValuesState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
-	//fmt.Printf("[RWEmb][EmbMapGetValuesState]ToReadResp(). States: %+v\n", crdtState.States)
+func (crdtState EmbMapGetValuesState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
+	//fmt.Printf("[RWEmb][EmbMapGetValuesState]ToReadResp(buf *BufsToReturnToPool). States: %+v\n", crdtState.States)
 	keys, values := make([][]byte, len(crdtState.States)), make([]*proto.ApbMapGetValueResp, len(crdtState.States))
 	i := 0
 	for key, state := range crdtState.States {
 		crdtType, readType := state.GetCRDTType(), state.GetREADType()
-		keys[i], values[i] = []byte(key), &proto.ApbMapGetValueResp{Crdttype: &crdtType, Parttype: &readType, Value: state.(ProtoState).ToReadResp()}
+		keys[i], values[i] = []byte(key), &proto.ApbMapGetValueResp{Crdttype: &crdtType, Parttype: &readType, Value: state.(ProtoState).ToReadResp(buf *BufsToReturnToPool)}
 		i++
 	}
 	//sfmt.Printf("[RWEmb][EmbMapGetValuesState]ToReadResp end. Keys: %+v, Values: %+v\n", keys, values)
@@ -3891,7 +3891,7 @@ func (crdt *RWEmbMapCrdt) ToProtoState() (protobuf *proto.ProtoState) {
 	return &proto.ProtoState{Embmap: &proto.ProtoEmbMapState{Crdts: protoCRDTs, Removes: protoRems, RmvClock: protoClk}}
 }
 
-func (crdt *RWEmbMapCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
+func (crdt *RWEmbMapCrdt) FromProtoState(proto *proto.ProtoState, ts clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	protoMap := proto.GetEmbmap()
 	protoCRDTs, protoRmvs, protoClk := protoMap.GetCrdts(), protoMap.GetRemoves(), protoMap.GetRmvClock()
 	entries, removes := make(map[string]CRDT, len(protoCRDTs)), make(map[string]markedVC, len(protoRmvs))

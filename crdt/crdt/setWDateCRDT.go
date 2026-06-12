@@ -126,7 +126,7 @@ func (args DownstreamIncTsSetW) GetDATAType() proto.DATAType { return proto.DATA
 func (args DownstreamSetTsSetW) MustReplicate() bool         { return true }
 func (args DownstreamIncTsSetW) MustReplicate() bool         { return true }
 
-func (crdt *SetWDateCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *SetWDateCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	return &SetWDateCrdt{
 		CRDTVM: (&genericInversibleCRDT{}).initialize(crdt),
 		setClk: clocksi.MinimumTs, setValue: GregorianToTs(1, 1, 1), setTs: math.MinInt64, setReplicaID: math.MaxInt16,
@@ -135,7 +135,7 @@ func (crdt *SetWDateCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint1
 }
 
 // Used to initialize when building a CRDT from a remote snapshot. Not used in this CRDT (FromProtoState does its own initialization)
-func (crdt *SetWDateCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *SetWDateCrdt) {
+func (crdt *SetWDateCrdt) initializeFromSnapshot(startTs clocksi.Timestamp, replicaID uint16) (sameCRDT *SetWDateCrdt) {
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
@@ -202,11 +202,11 @@ func (crdt *SetWDateCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs Dow
 		}
 		return nil
 	}
-	crdt.addToHistory(&updTs, &downstreamArgs, crdt.applyDownstream(downstreamArgs))
+	crdt.addToHistory(updTs, downstreamArgs, crdt.applyDownstream(downstreamArgs))
 	return nil
 }
 
-func (crdt *SetWDateCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect *Effect) {
+func (crdt *SetWDateCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect Effect) {
 	switch typedArgs := downstreamArgs.(type) {
 	case DownstreamIncTsSetW:
 		effect = crdt.applyIncTs(typedArgs.Inc, typedArgs.Vc)
@@ -218,31 +218,29 @@ func (crdt *SetWDateCrdt) applyDownstream(downstreamArgs DownstreamArguments) (e
 	return
 }
 
-func (crdt *SetWDateCrdt) applyIncTs(opInc int64, opVc clocksi.Timestamp) (effect *Effect) {
-	var effectValue Effect
+func (crdt *SetWDateCrdt) applyIncTs(opInc int64, opVc clocksi.Timestamp) (effect Effect) {
 	if opVc.IsHigherOrEqual(crdt.setClk) { //Can apply inc.
 		crdt.inc += opInc
-		effectValue = IncTsSetWEffect{Inc: opInc}
+		effect = IncTsSetWEffect{Inc: opInc}
 	} else { //Ignore op due to a concurrent set.
-		effectValue = NoEffect{}
+		effect = NoEffect{}
 	}
 	crdt.currClk.MergeInto(opVc) //Always update the highest clock seen
-	return &effectValue
+	return
 }
 
-func (crdt *SetWDateCrdt) applySetTs(opSet int64, opReplicaID uint16, opVc clocksi.Timestamp) (effect *Effect) {
+func (crdt *SetWDateCrdt) applySetTs(opSet int64, opReplicaID uint16, opVc clocksi.Timestamp) (effect Effect) {
 	compResult := opVc.Compare(crdt.setClk)
-	var effectValue Effect
 	if compResult == clocksi.HigherTs || compResult == clocksi.EqualTs || compResult == clocksi.ConcurrentTs && opReplicaID <= crdt.setReplicaID {
 		//Can apply set.
-		effectValue = SetTsSetWEffect{OldClk: crdt.setClk, OldValue: crdt.setValue, OldTs: crdt.setTs, OldReplicaID: crdt.setReplicaID}
+		effect = SetTsSetWEffect{OldClk: crdt.setClk, OldValue: crdt.setValue, OldTs: crdt.setTs, OldReplicaID: crdt.setReplicaID}
 		crdt.setValue, crdt.setTs, crdt.setClk, crdt.setReplicaID = opSet, opVc.GetPos(opReplicaID), opVc, opReplicaID
 		crdt.inc = 0 //Reset incs, as they are all before the set.
 	} else { //Ignore op due to a winning concurrent set.
-		effectValue = NoEffect{}
+		effect = NoEffect{}
 	}
 	crdt.currClk.MergeInto(opVc) //Always update the highest clock seen
-	return &effectValue
+	return
 }
 
 func (crdt *SetWDateCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err error) {
@@ -262,12 +260,12 @@ func (crdt *SetWDateCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
-func (crdt *SetWDateCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *SetWDateCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	return crdt.applyDownstream(updArgs)
 }
 
-func (crdt *SetWDateCrdt) undoEffect(effect *Effect) {
-	switch typedEffect := (*effect).(type) {
+func (crdt *SetWDateCrdt) undoEffect(effect Effect) {
+	switch typedEffect := (effect).(type) {
 	case NoEffect:
 		return
 	case IncTsSetWEffect:
@@ -280,7 +278,7 @@ func (crdt *SetWDateCrdt) undoEffect(effect *Effect) {
 	}
 }
 
-func (crdt *SetWDateCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+func (crdt *SetWDateCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {}
 
 ///Protobuf functions - most are already defined in simpleDateCrdt. Only need to define downstream, ProtoState and Inc/SetMS.
 
@@ -324,7 +322,7 @@ func (crdt *SetWDateCrdt) ToProtoState() (state *proto.ProtoState) {
 		SetReplicaID: pb.Int32(int32(crdt.setReplicaID)), Inc: pb.Int64(crdt.inc), CurrClk: crdt.currClk.ToBytes()}}}
 }
 
-func (crdt *SetWDateCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (sameCRDT *SetWDateCrdt) {
+func (crdt *SetWDateCrdt) FromProtoState(proto *proto.ProtoState, ts clocksi.Timestamp, replicaID uint16) (sameCRDT *SetWDateCrdt) {
 	protoState := proto.GetSetWDate()
 	crdt.setClk, crdt.setValue, crdt.setTs = clocksi.SliceTimestamp{}.FromBytes(protoState.GetSetClk()), protoState.GetSetValue(), protoState.GetSetTs()
 	crdt.setReplicaID, crdt.localReplicaID, crdt.inc = uint16(protoState.GetSetReplicaID()), replicaID, protoState.GetInc()

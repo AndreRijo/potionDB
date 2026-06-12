@@ -73,7 +73,7 @@ func (vm *SnapshotVM) GetLatestCRDT() (crdt crdt.CRDT) {
 	return vm.CRDT
 }
 
-func (vm *SnapshotVM) GC(safeClk clocksi.Timestamp, safeClkKey clocksi.TimestampKey) {
+func (vm *SnapshotVM) GC(safeClk clocksi.Timestamp, safeClkKey clocksi.TimestampKey, fastGC bool) {
 	//Same algorithm as in inverseOpVM.
 	if !vm.updatedSinceGC {
 		return
@@ -99,5 +99,5 @@ func (vm *SnapshotVM) GC(safeClk clocksi.Timestamp, safeClkKey clocksi.Timestamp
 		//Do not set updatedSinceGC to false as there is still past versions to be cleaned by a future GC.
 		//Do not delete highestSafe - This contains the version that is correct at the time of safeClk
 	}
-	vm.CRDT.(crdt.CRDTVM).GC(safeClk)
+	vm.CRDT.(crdt.CRDTVM).GC(safeClk, fastGC)
 }

@@ -187,6 +187,7 @@ func CreateRemoteConnStruct(ip string, bucketsToListen []string, replicaID uint1
 	if isSelfConn { //We only replicate txns in our connection.
 		go remote.handleReplicatorReqs() //Safe to start this early, as this will only marshall and prepare the txn for sending, not actually send it.
 	}
+	go remote.debugCollectStatistics()
 	go remote.connectToRabbitMQ(link, ip, isSelfConn)
 
 	return
@@ -254,9 +255,9 @@ func (remote *RemoteConn) connectToRabbitMQ(link, ip string, isSelfConn bool) {
 		conn, err = amqp.Dial(link)
 	}
 	timeString = time.Now().Format("15:04:05.000")
-	fmt.Printf("[RC][%s]Connected to %s\n", timeString, link)
 	remote.conn = conn
 	remote.finishInitialization(isSelfConn, ip)
+	fmt.Printf("[RC][%s]Connected to %s. Listening to buckets: %v.\n", timeString, link, remote.buckets)
 }
 
 func (remote *RemoteConn) finishInitialization(isSelfConn bool, ip string) {
@@ -387,11 +388,13 @@ func deleteRabbitMQStructures(ch *amqp.Channel) {
 }
 
 // Just for signature.
-func (work PrepareTxnWork) DoWork(replicaID uint16) {}
+func (work PrepareTxnWork) DoWork(replicaID uint16, buffers RCProtoBuffers) {}
 
 func (remote *RemoteConn) SendTxn(txn RemoteTxn) {
 	remote.replCount++
+	//fmt.Printf("[RC]SendTxn with %d partitions, %d internal ID: starting.\n", len(txn.Upds), remote.replCount)
 	remote.replReqChan <- PrepareTxnWork{txn: txn, reqId: remote.replCount}
+	//fmt.Printf("[RC]SendTxn with %d partitions, %d internal ID: sent to replReqChan channel.\n", len(txn.Upds), remote.replCount)
 }
 
 func (remote *RemoteConn) SendStableClk(ts int64) {
@@ -421,28 +424,53 @@ func (remote *RemoteConn) doSenderRoutine() {
 	//Txn and Clk messages are forced to be sent by order. Join and similar are naturally sent by order too, as the requester is single-threaded and sends directly to this channel.
 	lastSentReq := int32(0)
 	waitingReqs := tools.NewHeap[RCSendRequest](ReqCompFunc, 10)
+	nextPrintTarget := int32(50)                          //Since we may send multiple requests each time, we set a "target" for the next debug print. (Also this is temporary, should be removed.)
+	bufsToReturn := tools.NewSliceWithCounter[[]byte](10) //Idea: syncPool has sync overhead. So we group some buffers before sending to syncPool.
+	lastTimePrint := time.Now()
 	for msg := range remote.senderRoutineCh {
 		switch typedMsg := msg.(type) {
 		case RCTxnReq:
 			if msg.GetID() > lastSentReq+1 {
 				waitingReqs.Push(msg)
 			} else {
+				if msg.GetID() <= lastSentReq {
+					panic(fmt.Sprintf("[RC%d][doSenderRoutine]Error: got a RCTxnReq with an unexpected msgID: %d. Last sent req: %d. MsgID should be one above last sent req.\n", remote.connID, msg.GetID(), lastSentReq))
+				}
+				prevLastSent := lastSentReq
 				lastSentReq++
 				bkts, datas := typedMsg.bktTxn.GetKeys(), typedMsg.bktTxn.GetValues()
+				//fmt.Printf("[RC%d]Sending txn req %d with %d bkts (data len: %d).\n", remote.connID, typedMsg.reqId, len(bkts), len(datas))
 				for i, bkt := range bkts {
 					remote.sendMsg(bkt, datas[i])
+					bufsToReturn.AddToEnd(datas[i])
+					if bufsToReturn.IsFull() {
+						replMarshalByteBufs.PutAll(&bufsToReturn)
+					}
 				}
-				lastSentReq = remote.handleWaitingReqs(waitingReqs, lastSentReq)
+				replMarshalByteBufs.PutAll(&bufsToReturn)
+				lastSentReq = remote.handleWaitingReqs(waitingReqs, lastSentReq, &bufsToReturn)
+				if lastSentReq-prevLastSent >= 100 {
+					copyLastSent, time := lastSentReq, time.Now().Format("15:04:05.000")
+					fmt.Printf("[RC%d]WARNING! Sent %d requests in a row (trigger: RCTxnReq) at %s. This means many requests out of order arrived, and may be abnormal.\n", remote.connID, copyLastSent-prevLastSent, time)
+				}
 			}
 		case RCClkReq:
 			if msg.GetID() > lastSentReq+1 {
 				waitingReqs.Push(msg)
 			} else {
+				if msg.GetID() <= lastSentReq {
+					panic(fmt.Sprintf("[RC%d][doSenderRoutine]Error: got a RCClkReq with an unexpected msgID: %d. Last sent req: %d. MsgID should be one above last sent req.\n", remote.connID, msg.GetID(), lastSentReq))
+				}
+				prevLastSent := lastSentReq
 				lastSentReq++
-				remote.publishHelper(clockTopic, amqp.Publishing{CorrelationId: remote.replicaString, Body: typedMsg.data})
-				lastSentReq = remote.handleWaitingReqs(waitingReqs, lastSentReq)
+				//remote.publishHelper(clockTopic, amqp.Publishing{CorrelationId: remote.replicaString, Body: typedMsg.data})
+				remote.sendMsg(clockTopic, typedMsg.data)
+				lastSentReq = remote.handleWaitingReqs(waitingReqs, lastSentReq, &bufsToReturn)
+				if lastSentReq-prevLastSent >= 100 {
+					copyLastSent, time := lastSentReq, time.Now().Format("15:04:05.000")
+					fmt.Printf("[RC%d]WARNING! Sent %d requests in a row (trigger: RCClkReq) at %s. This means many requests out of order arrived, and may be abnormal.\n", remote.connID, copyLastSent-prevLastSent, time)
+				}
 			}
-			remote.publishHelper(clockTopic, amqp.Publishing{CorrelationId: remote.replicaString, Body: typedMsg.data})
 		case RCIdReq:
 			remote.publishHelper(joinTopic, amqp.Publishing{CorrelationId: remote.replicaString, ContentType: remoteIDContent, Body: typedMsg.data})
 		case RCJoinReq:
@@ -459,10 +487,17 @@ func (remote *RemoteConn) doSenderRoutine() {
 		case RCTriggerReq:
 			remote.publishHelper(triggerTopic, amqp.Publishing{CorrelationId: remote.replicaString, Body: typedMsg.data})
 		}
+		if nextPrintTarget <= lastSentReq {
+			copyLastSent, currTime := lastSentReq, time.Now() //These helper variables ensure that if the print happens late (due to concurrency), we still get an accurate count and time.
+			if currTime.Sub(lastTimePrint) >= 500*time.Millisecond {
+				fmt.Printf("[RC%d]Sent %d replication requests so far, at %s.\n", remote.connID, copyLastSent, currTime)
+			}
+			nextPrintTarget += 50
+		}
 	}
 }
 
-func (remote *RemoteConn) handleWaitingReqs(waitingReqs *tools.Heap[RCSendRequest], lastSentReq int32) (newLastSentReq int32) {
+func (remote *RemoteConn) handleWaitingReqs(waitingReqs *tools.Heap[RCSendRequest], lastSentReq int32, bufsToReturn *tools.SliceWithCounter[[]byte]) (newLastSentReq int32) {
 	for !waitingReqs.IsEmpty() {
 		next := waitingReqs.PeekMin()
 		if next.GetID() == lastSentReq+1 {
@@ -473,7 +508,12 @@ func (remote *RemoteConn) handleWaitingReqs(waitingReqs *tools.Heap[RCSendReques
 				bkts, datas := typedMsg.bktTxn.GetKeys(), typedMsg.bktTxn.GetValues()
 				for i, bkt := range bkts {
 					remote.sendMsg(bkt, datas[i])
+					bufsToReturn.AddToEnd(datas[i])
+					if bufsToReturn.IsFull() {
+						replMarshalByteBufs.PutAll(bufsToReturn)
+					}
 				}
+				replMarshalByteBufs.PutAll(bufsToReturn)
 			case RCClkReq:
 				remote.publishHelper(clockTopic, amqp.Publishing{CorrelationId: remote.replicaString, Body: typedMsg.data})
 			}
@@ -486,7 +526,6 @@ func (remote *RemoteConn) handleWaitingReqs(waitingReqs *tools.Heap[RCSendReques
 
 func (remote *RemoteConn) handleReplicatorReqs() {
 	nRoutines := tools.Max(2, tools.Min(10, runtime.NumCPU()/16))
-	go remote.debugCollectStatistics()
 	for i := 0; i < nRoutines; i++ {
 		go remote.handleReplicatorReqsRoutine(i)
 	}
@@ -495,7 +534,10 @@ func (remote *RemoteConn) handleReplicatorReqs() {
 func (remote *RemoteConn) handleReplicatorReqsRoutine(id int) {
 	bktBuf := make([]map[string]*tools.SliceWithCounter[crdt.UpdateObjectParams], nGoRoutines)
 	//We slightly randomize the ticker frequency for cleaning buffers, in an attempt to get different routines to trigger this at different times.
-	ticker := time.NewTicker(time.Duration(tools.Max(10000, int(tsSendDelay)*2)+rand.Intn(100)*100) * time.Millisecond)
+	ticker := time.NewTicker(time.Duration(tools.Max(15000, int(TS_SEND_DELAY)*2)+rand.Intn(100)*50) * time.Millisecond)
+	for remote.buckets == nil { //Concurrency artifact... we just sleep until it's available. No problem.
+		time.Sleep(100 * time.Millisecond)
+	}
 	if !remote.allBuckets {
 		for i := uint64(0); i < nGoRoutines; i++ {
 			currPart := make(map[string]*tools.SliceWithCounter[crdt.UpdateObjectParams], len(remote.buckets))
@@ -511,8 +553,9 @@ func (remote *RemoteConn) handleReplicatorReqsRoutine(id int) {
 		case req := <-remote.replReqChan:
 			switch typedReq := req.(type) {
 			case PrepareTxnWork:
-				fmt.Printf("[RC%d][handleReplicatorReqsRoutine%d]Received PrepareTxnWork req, preparing txn with clk %s and %d parts.\n", remote.connID, id, typedReq.txn.Clk.ToString(), len(typedReq.txn.Upds))
+				//fmt.Printf("[RC%d][handleReplicatorReqsRoutine%d]Received PrepareTxnWork req %d, preparing txn with clk %s and %d parts.\n", remote.connID, id, typedReq.reqId, typedReq.txn.Clk.ToString(), len(typedReq.txn.Upds))
 				remote.prepareTxn(typedReq.txn, typedReq.reqId, bktBuf)
+				//fmt.Printf("[RC%d][handleReplicatorReqsRoutine%d]Finished preparing req%d txn with clk %s and %d parts.\n", remote.connID, id, typedReq.reqId, typedReq.txn.Clk.ToString(), len(typedReq.txn.Upds))
 			}
 		case <-ticker.C:
 			if hasHadTxns && len(remote.replReqChan) == 0 { //Skip ticker if there's still pending requests, as then we'll overwrite part of the buffer anyway.
@@ -527,69 +570,84 @@ func (remote *RemoteConn) handleReplicatorReqsRoutine(id int) {
 }
 
 func (remote *RemoteConn) debugCollectStatistics() {
+	fmt.Printf("[RC%d][Debug]Starting to collect debug statistics.\n", remote.connID)
 	nTxnsFullyProc, totalSeqTime := int64(0), int64(0)
 	lastNSplit, lastNToProto, lastNPrepRec := int64(0), int64(0), int64(0)              //StatisticsTxnPrep
 	lastNProtoCreation, lastNMarshall, lastNMarshallRec := int64(0), int64(0), int64(0) //StatisticsMarshall
 	nTxnsFullyRec, totalRecTime := int64(0), int64(0)
 	lastNRec, lastNRecUnmarshall, lastNRecConvertTime, lastNRecMergeTime := int64(0), int64(0), int64(0), int64(0) //StatisticsTxnRec and StatisticsTxnRecComplete
 	ms := int64(time.Millisecond)
+	nextNPrecRecTarget, nextNRecTarget := int64(100), int64(100)
 	for info := range remote.replDebugData.debugChan {
 		switch typedInfo := info.(type) {
 		case StatisticsTxnPrep:
+			//fmt.Printf("[RC%d][Debug]Received StatisticsTxnPrep info: splitTime %d ms, toProtoTotalTime %d ms.\n", remote.connID, typedInfo.splitTime/ms, typedInfo.toProtoTotalTime/ms)
 			nTxnsFullyProc++
 			lastNSplit += typedInfo.splitTime / ms
 			lastNToProto += typedInfo.toProtoTotalTime / ms
 			totalSeqTime += (typedInfo.splitTime + typedInfo.toProtoTotalTime) / ms
 			lastNPrepRec++
-			if lastNPrepRec == 100 { //Print and reset lastN statistics
-				avgSplit, avgToProto := float64(lastNSplit)/float64(lastNPrepRec), float64(lastNToProto)/float64(lastNPrepRec)
-				avgProtoCreation, avgMarshall := float64(lastNProtoCreation)/float64(lastNMarshallRec), float64(lastNMarshall)/float64(lastNMarshallRec)
-				avgTotalTimeLast := avgSplit + avgToProto
-				fullAvgTime := float64(totalSeqTime) / float64(nTxnsFullyProc)
-				currTime := time.Now()
-				//Note: statistics from the marshalling process may be regarding more or less than 100 txns. Also, it's the average per bucket of a txn.
-				fmt.Printf("[RC%d][Debug][%s]Processed %d txns. Last 100 txn statistics.\n Avg split time: %.2f ms.\n Avg toProto time: %.2f ms.\n Avg last 100 full proc time: %.2f ms.\n Avg proto (per bkt) creation time: %.2f ms.\n Avg marshall (per bkt) time: %.2f ms.\n Avg total time since start: %.2f ms.\n\n",
-					remote.connID, currTime.Format("2006-01-02 15:04:05"), nTxnsFullyProc, avgSplit, avgToProto, avgTotalTimeLast, avgProtoCreation, avgMarshall, fullAvgTime)
-				lastNSplit, lastNToProto, lastNPrepRec = 0, 0, 0
-				lastNProtoCreation, lastNMarshall, lastNMarshallRec = 0, 0, 0
+			if lastNPrepRec == nextNPrecRecTarget { //Print and reset lastN statistics
+				if lastNProtoCreation+lastNMarshall+lastNSplit+lastNToProto < 50 { //Too small samples, delay statistics.
+					nextNPrecRecTarget += 100
+				} else {
+					avgSplit, avgToProto := float64(lastNSplit)/float64(lastNPrepRec), float64(lastNToProto)/float64(lastNPrepRec)
+					avgProtoCreation, avgMarshall := float64(lastNProtoCreation)/float64(lastNMarshallRec), float64(lastNMarshall)/float64(lastNMarshallRec)
+					avgTotalTimeLast := avgSplit + avgToProto
+					fullAvgTime := float64(totalSeqTime) / float64(nTxnsFullyProc)
+					currTime := time.Now()
+					//Note: statistics from the marshalling process may be regarding more or less than 100 txns. Also, it's the average per bucket of a txn.
+					fmt.Printf("[RC%d][Debug][%s]Processed (sending) %d txns. Last %d txn statistics.\n Avg split time: %.2f ms.\n Avg toProto time: %.2f ms.\n Avg last 100 full proc time: %.2f ms.\n Avg proto (per bkt) creation time: %.2f ms.\n Avg marshall (per bkt) time: %.2f ms.\n Avg total time since start: %.2f ms.\n\n",
+						remote.connID, currTime.Format("2006-01-02 15:04:05"), nTxnsFullyProc, nextNPrecRecTarget, avgSplit, avgToProto, avgTotalTimeLast, avgProtoCreation, avgMarshall, fullAvgTime)
+					lastNSplit, lastNToProto, lastNPrepRec, nextNPrecRecTarget = 0, 0, 0, 100
+					lastNProtoCreation, lastNMarshall, lastNMarshallRec = 0, 0, 0
+				}
 			}
 		case StatisticsMarshall:
+			//fmt.Printf("[RC%d][Debug]Received StatisticsMarshall info: protoCreationTime %d ms, marshallTime %d ms.\n", remote.connID, typedInfo.protoCreationTime/ms, typedInfo.marshallTime/ms)
 			lastNProtoCreation += typedInfo.protoCreationTime / ms
 			lastNMarshall += typedInfo.marshallTime / ms
 			lastNMarshallRec++
 
 		case StatisticsTxnRec:
+			//fmt.Printf("[RC%d][Debug]Received StatisticsTxnRec info: unmarshallTime %d ms, convertTime %d ms.\n", remote.connID, typedInfo.unmarshallTime/ms, typedInfo.convertTime/ms)
 			lastNRecUnmarshall += typedInfo.unmarshallTime / ms
 			lastNRecConvertTime += typedInfo.convertTime / ms
 			totalRecTime += (typedInfo.unmarshallTime + typedInfo.convertTime) / ms
 		case StatisticsTxnRecComplete:
+			//fmt.Printf("[RC%d][Debug]Received StatisticsTxnRecComplete info: mergeTime %d ms.\n", remote.connID, typedInfo.mergeTime/ms)
 			nTxnsFullyRec++
 			lastNRecMergeTime += typedInfo.mergeTime / ms
 			totalRecTime += typedInfo.mergeTime / ms
 			lastNRec++
-			if lastNRec == 100 { //Print and reset lastN statistics
-				avgUnmarshall, avgConvert, avgMerge := float64(lastNRecUnmarshall)/float64(lastNRec), float64(lastNRecConvertTime)/float64(lastNRec), float64(lastNRecMergeTime)/float64(lastNRec)
-				avgTotalTimeLast := avgUnmarshall + avgConvert + avgMerge
-				fullAvgTime := float64(totalRecTime) / float64(nTxnsFullyRec)
-				currTime := time.Now()
-				fmt.Printf("[RC%d][Debug][%s]Processed %d txns. Last 100 txn statistics.\n Avg unmarshall time: %.2f ms.\n Avg convert time: %.2f ms.\n Avg merge time: %.2f ms.\n Avg last 100 full proc time: %.2f ms.\n Avg total time since start: %.2f ms.\n\n",
-					remote.connID, currTime.Format("2006-01-02 15:04:05"), nTxnsFullyRec, avgUnmarshall, avgConvert, avgMerge, avgTotalTimeLast, fullAvgTime)
-				lastNRec, lastNRecUnmarshall, lastNRecConvertTime, lastNRecMergeTime = 0, 0, 0, 0
+			if lastNRec == nextNRecTarget { //Print and reset lastN statistics
+				if lastNRecUnmarshall+lastNRecConvertTime+lastNRecMergeTime < 50 { //Too small samples, delay statistics
+					nextNRecTarget += 100
+				} else {
+					avgUnmarshall, avgConvert, avgMerge := float64(lastNRecUnmarshall)/float64(lastNRec), float64(lastNRecConvertTime)/float64(lastNRec), float64(lastNRecMergeTime)/float64(lastNRec)
+					avgTotalTimeLast := avgUnmarshall + avgConvert + avgMerge
+					fullAvgTime := float64(totalRecTime) / float64(nTxnsFullyRec)
+					currTime := time.Now()
+					fmt.Printf("[RC%d][Debug][%s]Processed (receiving) %d txns. Last %d txn statistics.\n Avg unmarshall time: %.2f ms.\n Avg convert time: %.2f ms.\n Avg merge time: %.2f ms.\n Avg last 100 full proc time: %.2f ms.\n Avg total time since start: %.2f ms.\n\n",
+						remote.connID, currTime.Format("2006-01-02 15:04:05"), nTxnsFullyRec, nextNRecTarget, avgUnmarshall, avgConvert, avgMerge, avgTotalTimeLast, fullAvgTime)
+					lastNRec, lastNRecUnmarshall, lastNRecConvertTime, lastNRecMergeTime, nextNRecTarget = 0, 0, 0, 0, 100
+				}
 			}
 		}
 	}
 }
 
 func (remote *RemoteConn) prepareTxn(txn RemoteTxn, reqId int32, bktBuf []map[string]*tools.SliceWithCounter[crdt.UpdateObjectParams]) {
+	//fmt.Printf("[RC%d][prepareTxn%d]Started prep txn %d.\n", remote.connID, reqId, txn.TxnID)
 	start := time.Now().UnixNano()
 	txn.TxnID = reqId
 	bktTxn := remote.splitTxnIntoBuckets(txn, bktBuf)
 	endSplit := time.Now().UnixNano()
-	fmt.Printf("[RC%d][prepareTxn%d]Split txn of %d parts into %d buckets, took %dms\n", remote.connID, reqId, len(txn.Upds), len(bktTxn), (endSplit-start)/int64(time.Millisecond))
+	//fmt.Printf("[RC%d][prepareTxn%d]Split txn of %d parts into %d buckets, took %dms\n", remote.connID, reqId, len(txn.Upds), len(bktTxn), (endSplit-start)/int64(time.Millisecond))
 	replyChan, waitFor := make(chan PairKeyBytes, len(bktTxn)), len(bktTxn)
 	for bkt, bktTxns := range bktTxn {
-		fmt.Printf("[RC%d][prepareTxn%d]Sending txn to bucket %s with %d parts, senderID %d, clk %s\n", remote.connID, reqId, bkt, len(bktTxns.Upds), txn.SenderID, txn.Clk.ToString())
-		remote.workChan <- ReplMarshallWork{Bucket: bkt, Txn: bktTxns, ReplyChan: replyChan}
+		//fmt.Printf("[RC%d][prepareTxn%d]Sending txn to bucket %s with %d parts, senderID %d, clk %s\n", remote.connID, reqId, bkt, len(bktTxns.Upds), txn.SenderID, txn.Clk.ToString())
+		remote.workChan <- ReplMarshallWork{Bucket: bkt, Txn: bktTxns, ReplyChan: replyChan, DebugChan: remote.debugChan}
 	}
 	//We must ensure the sender will send txns by order. It's easier to manage this if we gather all buckets of this txn here first.
 	//(In theory only the order within a bucket must be ensured, but this complicates a lot the whole replication logic with little to no benefit)
@@ -599,10 +657,15 @@ func (remote *RemoteConn) prepareTxn(txn RemoteTxn, reqId int32, bktBuf []map[st
 		replies.SetNew(reply.Key, reply.Data)
 	}
 	end := time.Now().UnixNano()
+	//fmt.Printf("[RC%d][prepareTxn%d]Finished prep txn %d, sending to senderRoutineCh.\n", remote.connID, reqId, txn.TxnID)
 	remote.senderRoutineCh <- RCTxnReq{bktTxn: replies, reqId: reqId}
+	//fmt.Printf("[RC%d][prepareTxn%d]Sending to debugChan info about txn %d.\n", remote.connID, reqId, txn.TxnID)
 	remote.debugChan <- StatisticsTxnPrep{splitTime: endSplit - start, toProtoTotalTime: end - endSplit}
+	//fmt.Printf("[RC%d][prepareTxn%d]Finished txn %d.\n", remote.connID, reqId, txn.TxnID)
 }
 
+// IMPORTANT USAGE NOTE: When calling this method, make sure to not alter the contents of bktBuf until the result (bktTxn) is no longer needed.
+// This is essential as we do soft copies (i.e., slicing) of what is in bktBuf.
 func (remote *RemoteConn) splitTxnIntoBuckets(txn RemoteTxn, bktBuf []map[string]*tools.SliceWithCounter[crdt.UpdateObjectParams]) (bktTxn map[string]RemoteTxn) {
 	//Do we want to send this per pair (topic, partition), or per topic?
 	//Honestly it's up to us! But would make sense to have a topic have all relevant partitions.
@@ -628,7 +691,8 @@ func (remote *RemoteConn) splitTxnIntoBuckets(txn RemoteTxn, bktBuf []map[string
 						txn = RemoteTxn{SenderID: txn.SenderID, Clk: txn.Clk, Upds: make(map[int][]crdt.UpdateObjectParams, nGoRoutines), TxnID: txn.TxnID}
 						bktTxn[bkt] = txn
 					}
-					txn.Upds[partID] = upds.Copy().ToSlice()
+					//txn.Upds[partID] = upds.CopyGoSlice()
+					txn.Upds[partID] = upds.ToSlice()
 					upds.Clear()
 				}
 			}
@@ -640,6 +704,9 @@ func (remote *RemoteConn) splitTxnIntoBuckets(txn RemoteTxn, bktBuf []map[string
 			currPart := bktBuf[partID]
 			for _, upd := range upds {
 				bkt := upd.Bucket
+				/*if _, has := currPart[bkt]; !has {
+					panic(fmt.Sprintf("[RC][FATAL]Bucket %s not found in bktBuf for partID %d. TxnID: %d. SenderID: %d. Our replicaID: %d. Upd: %+v.\n", bkt, partID, txn.TxnID, txn.SenderID, remote.replicaID, upd))
+				}*/
 				currPart[bkt].Append(upd)
 			}
 		}
@@ -647,10 +714,12 @@ func (remote *RemoteConn) splitTxnIntoBuckets(txn RemoteTxn, bktBuf []map[string
 		for bkt := range remote.buckets {
 			bktTxn[bkt] = RemoteTxn{SenderID: txn.SenderID, Clk: txn.Clk, Upds: make(map[int][]crdt.UpdateObjectParams, nGoRoutines), TxnID: txn.TxnID}
 		}
+		//BktBuf: partID -> bkt -> slice of upds. We reset the slice of upds.
 		for partID, currPart := range bktBuf {
 			for bkt, upds := range currPart {
 				if upds.Len() > 0 {
-					bktTxn[bkt].Upds[partID] = upds.Copy().ToSlice()
+					//bktTxn[bkt].Upds[partID] = upds.CopyGoSlice()
+					bktTxn[bkt].Upds[partID] = upds.ToSlice()
 					upds.Clear()
 				}
 			}
@@ -672,12 +741,15 @@ func (remote *RemoteConn) sendMsg(key string, data []byte) {
 	//start := time.Now()
 	if len(data) <= MAX_MSG_SIZE {
 		//fmt.Printf("[RC%d][SendMsg]Starting to send txn as a single msg. Size of msg: %.2f (MB). Started at: %s.\n", remote.connID, float64(len(data))/float64(1024*1024), start.Format("2006-01-02 15:04:05.000"))
+		//fmt.Printf("[RC%d][SendMsg]Sending txn as single msg. Key: %s. Size of msg: %.2f (MB).\n", remote.connID, key, float64(len(data))/float64(1024*1024))
 		remote.publishHelper(key, amqp.Publishing{CorrelationId: remote.replicaString, Body: data})
 		//remote.sendCh.Publish(exchangeName, key, false, false, amqp.Publishing{CorrelationId: remote.replicaString, Body: data})
 		/*end := time.Now()
 		fmt.Printf("[RC][SendMsg]Finished sending txn as a single msg. Size of msg: %.3f (MB). Started at: %s. Finished at: %s. Time taken: %d (ms)\n", float64(len(data))/float64(1024*1024),
 			start.Format("2006-01-02 15:04:05.000"), end.Format("2006-01-02 15:04:05.000"), (end.UnixNano()-start.UnixNano())/1000000)*/
+		//fmt.Printf("[RC%d][SendMsg]Finished sending txn with topic %s (correlationId %s) as a single msg. Size of msg: %.3f (MB), at: %s.\n", remote.connID, key, remote.replicaString, float64(len(data))/float64(1024*1024), time.Now().Format("2006-01-02 15:04:05.000"))
 	} else {
+		fmt.Printf("[RC%d][SendMsg]Sending txn as split msgs. Key: %s. Total size of txn: %.3f (MB).\n", remote.connID, key, float64(len(data))/float64(1024*1024))
 		remote.publishHelper(bigTopicPrefix+key, amqp.Publishing{CorrelationId: remote.replicaString, AppId: strconv.Itoa(len(data)), Body: data[0:MAX_MSG_SIZE]})
 		//remote.sendCh.Publish(exchangeName, bigTopicPrefix+key, false, false, amqp.Publishing{CorrelationId: remote.replicaString, AppId: strconv.Itoa(len(data)), Body: data[0:MAX_MSG_SIZE]})
 		j := 1
@@ -698,6 +770,7 @@ func (remote *RemoteConn) sendMsg(key string, data []byte) {
 			//	remote.connID, j, len(toSend), float64(len(toSend))/float64(1024*1024), totalSent, float64(totalSent)/float64(1024*1024), len(data), float64(len(data))/float64(1024*1024))
 			leftData = leftData[utilities.MinInt(MAX_MSG_SIZE, len(leftData)):]
 		}
+		//fmt.Printf("[RC%d][SendMsg]Finished sending split msg txn with topic %s (correlationId %s). Total size of msg: %.3f (MB). Sent %d parts. Finished at: %s.\n", remote.connID, key, remote.replicaString, float64(len(data))/float64(1024*1024), j, time.Now().Format("2006-01-02 15:04:05.000"))
 	}
 }
 
@@ -707,13 +780,15 @@ func (remote *RemoteConn) publishHelper(topic string, publish amqp.Publishing) {
 
 // This should not be called externally.
 func (remote *RemoteConn) startReceiver() {
-	//fmt.Println("[RC]Receiver started")
-	nTxnReceived := 0
+	//fmt.Printf("[RC%d]Receiver started\n", remote.connID)
+	nTxnReceived := 0 //Tmp, remove.
+	msgCount := 0     //tmp, remove
 	for data := range remote.recCh {
 		//utilities.FancyInfoPrint(utilities.REMOTE_PRINT, remote.replicaID, "Received something!")
-		//fmt.Printf("[RC%d]Receiving something (%s) at: %s\n", remote.connID, data.RoutingKey, time.Now().String())
+		//fmt.Printf("[RC%d]Receiving something (%s, msgCount %d) at: %s\n", remote.connID, data.RoutingKey, msgCount, time.Now().String())
 		switch data.RoutingKey {
 		case clockTopic:
+			//fmt.Printf("[RC%d]Received clk msg.\n", remote.connID)
 			remote.handleReceivedStableClock(data.Body)
 		case joinTopic:
 			remote.handleReceivedJoinTopic(data.ContentType, data.Body)
@@ -725,13 +800,24 @@ func (remote *RemoteConn) startReceiver() {
 				//	remote.connID, len(data.Body), float64(len(data.Body))/float64(1024*1024), data.AppId)
 				remote.receiveSplitMsg(data)
 			} else {
+				//fmt.Printf("[RC%d]Received txn message (correlationId %s, msgCount %d).\n", remote.connID, data.CorrelationId, msgCount)
 				remote.handleReceivedOps(data.Body)
 			}
 			nTxnReceived++
+			/*if nTxnReceived%50 == 0 {
+				fmt.Printf("[RC%d]Received %d txn messages so far.\n", remote.connID, nTxnReceived)
+			}*/
 		}
-		//fmt.Printf("[RC%d]Finished receiving something at: %s\n", remote.connID, time.Now().String())
+		msgCount++
+		if msgCount&255 == 0 {
+			count, nTxn, currTime := msgCount, nTxnReceived, time.Now().Format("2006-01-02 15:04:05.000")
+			fmt.Printf("[RC%d]Received %d msgs so far (%d txn msgs), at %s.\n", remote.connID, count, nTxn, currTime)
+		}
+		//fmt.Printf("[RC%d]Finished receiving something (%s, msgCount %d) at: %s\n", remote.connID, data.RoutingKey, msgCount, time.Now().String())
 		//}
 	}
+	//fmt.Printf("[RC%d]Warning! Receiver broke out of infinite loop of receiving messages from RabbitMQ. This is unexpected.\n", remote.connID)
+	//panic(fmt.Sprintf("[RC%d]Receiver broke out of infinite loop of receiving messages from RabbitMQ. This is unexpected.\n", remote.connID))
 }
 
 func (remote *RemoteConn) receiveSplitMsg(data amqp.Delivery) {
@@ -768,11 +854,13 @@ func (remote *RemoteConn) receiveSplitMsg(data amqp.Delivery) {
 	remote.handleReceivedOps(buf)
 }
 
+// TODO: Remove msgId.
 func (remote *RemoteConn) handleReceivedOps(data []byte) {
-	//fmt.Printf("[RC%d]HandleReceivedOps called for data with size %d\n", remote.connID, len(data))
+	//fmt.Printf("[RC%d]HandleReceivedOps called for data with size %.2fKBs\n", remote.connID, float64(len(data))/1024)
 	protobuf := &proto.ProtoReplicateTxn{}
 	start := time.Now().UnixNano()
-	err := pb.Unmarshal(data, protobuf)
+	//err := pb.Unmarshal(data, protobuf)
+	err := protobuf.UnmarshalVT(data)
 	endMarshall := time.Now().UnixNano()
 	if err != nil {
 		fmt.Printf("[RC%d][ERROR]Failed to decode bytes of received ProtoReplicateTxn. Error: %s\n", remote.connID, err)
@@ -784,6 +872,7 @@ func (remote *RemoteConn) handleReceivedOps(data []byte) {
 	//This is identified by receiving another transaction or a clock.
 	bktTxn := protoToRemoteTxn(protobuf)
 	end := time.Now().UnixNano()
+	//fmt.Printf("[RC%d]HandleReceivedOps finished unmarshall + protoToRemoteTxn for msgID %d.\n", remote.connID, msgId)
 	remote.debugChan <- StatisticsTxnRec{unmarshallTime: endMarshall - start, convertTime: end - endMarshall}
 	/*for i, upds := range bktTxn.Upds {
 		for _, upd := range upds {
@@ -793,10 +882,12 @@ func (remote *RemoteConn) handleReceivedOps(data []byte) {
 	//fmt.Printf("[RC%d]Received txn %d\n", remote.connID, bktTxn.TxnID)
 	if bktTxn.TxnID != remote.txnID {
 		//Need to send the previous txn that is now complete
+		//fmt.Printf("[RC%d]HandleReceivedOps will send merged txn and create hold for msgID %d.\n", remote.connID, msgId)
 		remote.sendMerged()
 		remote.createHold(bktTxn.TxnID)
 	}
 	remote.storeTxn(bktTxn)
+	//fmt.Printf("[RC%d]HandleReceivedOps, finished for msgID %d.\n", remote.connID, msgId)
 }
 
 func (remote *RemoteConn) handleReceivedStableClock(data []byte) {
@@ -812,26 +903,30 @@ func (remote *RemoteConn) handleReceivedStableClock(data []byte) {
 		utilities.FancyInfoPrint(utilities.REMOTE_PRINT, remote.replicaID, "Ignored received stableClock as it was sent by myself.")
 	} else {
 		remote.sendMerged() //No-op if there's no txn on hold. This will also clear the hold if needed.
+		fmt.Printf("[RC%d]Sending clk to TM, ts %d, from replicaID %d, at %s.\n", remote.replicaID, clkReq.Ts, clkReq.SenderID, time.Now().Format("15:04:05.000"))
 		remote.listenerChan <- clkReq
 	}
 }
 
 func (remote *RemoteConn) sendMerged() {
 	if !remote.onHold.IsEmpty() { //It may be empty after a clock is received without txns inbetween.
-		remote.listenerChan <- remote.getMergedTxn()
+		txn := remote.getMergedTxn()
+		fmt.Printf("[RC%d]Sending merged txn to TM, with clk %s, ts of sender replica %d, from replicaID %d, at %s.\n",
+			remote.replicaID, txn.Clk.ToString(), txn.Clk.GetPos(clocksi.GetSortedPosOfId(txn.SenderID)), txn.SenderID, time.Now().Format("15:04:05.000"))
+		remote.listenerChan <- txn
+		//remote.listenerChan <- remote.getMergedTxn()
 	}
 }
 
-func (remote *RemoteConn) getMergedTxn() (merged *RemoteTxn) {
+func (remote *RemoteConn) getMergedTxn() (merged RemoteTxn) {
+	//fmt.Printf("[RC%d]Started merging txn on hold with %d txns.\n", remote.connID, remote.onHold.Len())
 	start := time.Now().UnixNano()
-	var currReq RemoteTxn
 	if remote.onHold.Len() == 1 { //We use directly the (only) bucket txn's buffers
-		currReq = remote.onHold.Get(0)
-		merged = &currReq
+		merged = remote.onHold.Get(0)
 	} else { //Need to merge multiple buffers.
-		merged = &RemoteTxn{}
-		//merged.Upds = make(map[int][]crdt.UpdateObjectParams, remote.partsInvolved.GetNBitsSet(len(remote.partBuf)))
 		holdSlice := remote.onHold.ToSlice()
+		firstTxn := holdSlice[0]
+		merged.SenderID, merged.Clk = firstTxn.SenderID, firstTxn.Clk
 		for _, req := range holdSlice {
 			for partID, partUpds := range req.Upds {
 				remote.partBuf[partID].AppendAll(partUpds)
@@ -839,11 +934,20 @@ func (remote *RemoteConn) getMergedTxn() (merged *RemoteTxn) {
 			}
 		}
 		merged.Upds = make(map[int][]crdt.UpdateObjectParams, remote.partsInvolved.GetNBitsSet(int(nGoRoutines)))
-		merged.SenderID, merged.Clk = currReq.SenderID, currReq.Clk
+		for partID, buf := range remote.partBuf {
+			if remote.partsInvolved.GetBit(partID) {
+				merged.Upds[partID] = buf.CopyGoSlice()
+				remote.partBuf[partID].Clear()
+			}
+		}
 	}
-	remote.clearHold()
+	remote.partsInvolved.Reset()
+	remote.onHold.Clear()
+	//remote.clearHold()
 	end := time.Now().UnixNano()
+	//fmt.Printf("[RC%d]Finished merging txn on hold. Time taken: %d ms.\n", remote.connID, (end-start)/int64(time.Millisecond))
 	remote.debugChan <- StatisticsTxnRecComplete{mergeTime: end - start}
+	//fmt.Printf("[RC%d]Finished merging txn on hold and statistics were sent to debugChan.\n", remote.connID)
 	return
 }
 
@@ -851,13 +955,13 @@ func (remote *RemoteConn) createHold(txnID int32) {
 	remote.txnID = txnID
 }
 
-func (remote *RemoteConn) clearHold() {
+/*func (remote *RemoteConn) clearHold() {
 	remote.onHold.Clear()
 	for i := range remote.partBuf {
 		remote.partBuf[i].Clear()
 	}
 	remote.partsInvolved.Reset()
-}
+}*/
 
 func (remote *RemoteConn) storeTxn(txn RemoteTxn) {
 	remote.onHold.Append(txn)

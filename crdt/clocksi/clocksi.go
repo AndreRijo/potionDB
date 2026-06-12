@@ -67,15 +67,23 @@ type Timestamp interface {
 	MergeInto(otherTs Timestamp)
 	//Adds entries for all replicas in knownIDs that aren't already existent in the Timestamp. This operation only makes sense for vector clock implementations.
 	Update() Timestamp //Returns itself, in case of implementations that may need to expand the storage
+	//Returns how many bytes would be used by ToBytes() to represent this Timestamp.
+	GetBytesSize() int
 	//Converts the timestamp to a byte array
 	ToBytes() (bytes []byte)
+	//Converts the timestamp to a byte array, reusing the provided buffer. This buffer must have enough space (len) to accomodate the timestamp.
+	ToBytesBuf(bytes []byte) (nWritten int)
 	//Gets the timestamp that is represented in the byte array
 	//Note: This method is safe to call on an empty Timestamp instance.
 	FromBytes(bytes []byte) (newTs Timestamp)
+	//Same as FromBytes, but writes directly into ts, if possible. When possible, newTs will be ts, otherwise it'll be a fresh allocation.
+	FromBytesInto(bytes []byte) (newTs Timestamp)
 	//Useful for debugging purposes
 	ToString() (tsString string)
 	//Also useful for debugging purposes
 	ToSortedString() (tsString string)
+	//Prints the two timestamps in a format that is friendly to copy in order to compare ts by ts.
+	ToDebugCompString(otherTs Timestamp) (tsString string)
 	//Gets a representation of this clock that is safe to use in GO maps
 	GetMapKey() (key TimestampKey)
 	//Performs a deep copy of the current timestamp and returns the copy
@@ -90,6 +98,8 @@ type Timestamp interface {
 	IsLowerOrEqualTotalOrder(otherTs Timestamp) (compResult bool)
 	//For vector clocks, get the list of IDs sorted numerically
 	GetSortedKeys() (keys []uint16)
+	//Mostly a debug method, returns how many entries does this timestamp have.
+	GetNumberEntries() int
 }
 
 type ClockSiTimestamp struct {
@@ -132,7 +142,9 @@ const (
 	UnknownTs    TsResult = 4
 
 	//Specific to clocksi implementation
-	entrySize     = 8
+	entrySize = 8
+	idSize    = 2
+
 	randomFactor  = 500 //max value that can be added to the timestamp to avoid collisions
 	usePointerKey = true
 	useByteKey    = false //true = TimestampKey uses byte representation (ByteKey). Otherwise, uses StringKey.
@@ -148,8 +160,9 @@ var (
 	//MinimumTs = ClockSiTimestamp{VectorClock: make(map[uint16]int64, 5)}
 	//HighestTs = SliceTimestamp{vc: make([]int64, 5)}
 	//MinimumTs = SliceTimestamp{vc: make([]int64, 5)}
-	HighestTs, MinimumTs = SliceTimestamp{vc: make([]int64, 0, 5)}, SliceTimestamp{vc: make([]int64, 0, 5)}
-	nReplicas            = 0
+	HighestTs, MinimumTs           = SliceTimestamp{vc: make([]int64, 0, 5)}, SliceTimestamp{vc: make([]int64, 0, 5)}
+	nReplicas                      = 0
+	EmptyTs              Timestamp = NewSliceTimestamp()
 )
 
 func AddNewID(id uint16) {
@@ -598,6 +611,29 @@ func addToHighestAndMinimumTs(id uint16) {
 	MinimumTs.vc = append(MinimumTs.vc, math.MinInt64)
 }
 
+func GetClockSiBytesSize() int {
+	return len(sortedIDs) * (entrySize + idSize)
+}
+
+func GetClockSiBytesSizeForNEntries(nEntries int) int {
+	return nEntries * (entrySize + idSize)
+}
+
+func (ts ClockSiTimestamp) GetBytesSize() int {
+	return len(ts.VectorClock) * (entrySize + idSize)
+}
+
+func (ts ClockSiTimestamp) ToBytesBuf(bytes []byte) (nWritten int) {
+	const pairSize int = entrySize + idSize
+	offset := 0
+	for i, vcEntry := range ts.VectorClock {
+		binary.LittleEndian.PutUint16(bytes[offset*pairSize:], i)
+		binary.LittleEndian.PutUint64(bytes[offset*pairSize+2:], uint64(vcEntry))
+		offset++
+	}
+	return offset * pairSize
+}
+
 func (ts ClockSiTimestamp) ToBytes() (bytes []byte) {
 	/*
 		bytes = make([]byte, len(*ts.VectorClock)*entrySize)
@@ -606,12 +642,22 @@ func (ts ClockSiTimestamp) ToBytes() (bytes []byte) {
 		}
 		return
 	*/
-	bytes = make([]byte, len(ts.VectorClock)*2*entrySize)
-	nAdded := 0
+	/*
+		bytes = make([]byte, len(ts.VectorClock)*2*entrySize)
+		nAdded := 0
+		for i, vcEntry := range ts.VectorClock {
+			binary.LittleEndian.PutUint16(bytes[nAdded*2*entrySize:nAdded*2*entrySize+entrySize], uint16(i))
+			binary.LittleEndian.PutUint64(bytes[nAdded*2*entrySize+entrySize:(nAdded+1)*2*entrySize], uint64(vcEntry))
+			nAdded++
+		}
+		return*/
+	const pairSize int = entrySize + idSize
+	bytes = make([]byte, len(ts.VectorClock)*(pairSize))
+	nWritten := 0
 	for i, vcEntry := range ts.VectorClock {
-		binary.LittleEndian.PutUint16(bytes[nAdded*2*entrySize:nAdded*2*entrySize+entrySize], uint16(i))
-		binary.LittleEndian.PutUint64(bytes[nAdded*2*entrySize+entrySize:(nAdded+1)*2*entrySize], uint64(vcEntry))
-		nAdded++
+		binary.LittleEndian.PutUint16(bytes[nWritten*pairSize:], i)
+		binary.LittleEndian.PutUint64(bytes[nWritten*pairSize+2:], uint64(vcEntry))
+		nWritten++
 	}
 	return
 }
@@ -639,15 +685,38 @@ func (ts ClockSiTimestamp) FromBytes(bytes []byte) (newTs Timestamp) {
 	if len(bytes) == 0 {
 		newVC[0] = 0
 	} else {
-		nEntries := len(bytes) / (entrySize * 2)
+		/*nEntries := len(bytes) / (entrySize * 2)
 		for i := 0; i < nEntries; i++ {
 			replicaID := binary.LittleEndian.Uint16(bytes[i*2*entrySize : (i+1)*2*entrySize-entrySize])
 			value := int64(binary.LittleEndian.Uint64(bytes[i*2*entrySize+entrySize : (i+1)*2*entrySize]))
+			newVC[replicaID] = value
+		}*/
+		const pairSize int = entrySize + idSize
+		nEntries := len(bytes) / pairSize
+		for i := 0; i < nEntries; i++ {
+			replicaID := binary.LittleEndian.Uint16(bytes[i*pairSize:])
+			value := int64(binary.LittleEndian.Uint64(bytes[i*pairSize+idSize:]))
 			newVC[replicaID] = value
 		}
 	}
 	//fmt.Println("Decoded clock:", newVC)
 	return ClockSiTimestamp{VectorClock: newVC}
+}
+func (ts ClockSiTimestamp) FromBytesInto(bytes []byte) (sameTs Timestamp) {
+	const pairSize int = entrySize + idSize
+	if len(bytes) == len(ts.VectorClock)*pairSize { //Fast path.
+		var replicaID uint16
+		var value uint64
+		for i := 0; i < len(ts.VectorClock); i++ {
+			replicaID, value = binary.LittleEndian.Uint16(bytes[i*pairSize:]), binary.LittleEndian.Uint64(bytes[i*pairSize+idSize:])
+			ts.VectorClock[replicaID] = int64(value)
+		}
+		return ts
+	} else if len(bytes) == 0 && len(ts.VectorClock) == len(knownIDs) {
+		return ts
+	} else { //Safe, slow path. Will allocate new.
+		return ts.FromBytes(bytes)
+	}
 }
 
 func (ts ClockSiTimestamp) ToString() (tsString string) {
@@ -676,6 +745,28 @@ func (ts ClockSiTimestamp) ToSortedString() (tsString string) {
 	}
 	builder.WriteString("]}")
 	return builder.String()
+}
+
+func (ts ClockSiTimestamp) ToDebugCompString(otherTs Timestamp) (tsString string) {
+	keys := ts.GetSortedKeys()
+	var builder strings.Builder
+	builder.WriteString("{[")
+	for _, key := range keys {
+		builder.WriteString(fmt.Sprint(key))
+		builder.WriteRune(':')
+		builder.WriteString(fmt.Sprint(ts.VectorClock[key]))
+		builder.WriteRune(',')
+		builder.WriteString(fmt.Sprint(key))
+		builder.WriteRune(':')
+		builder.WriteString(fmt.Sprint(otherTs.GetPos(key)))
+		builder.WriteRune(',')
+	}
+	builder.WriteString("]}")
+	return builder.String()
+}
+
+func (ts ClockSiTimestamp) GetNumberEntries() int {
+	return len(ts.VectorClock)
 }
 
 // NOTE: If we one day support adding/removing replicas on the fly this will probably no longer work, as it ignores the replica's ID (map key)

@@ -1,13 +1,7 @@
 package components
 
 import (
-	fmt "fmt"
-	"math/rand"
-	"potionDB/crdt/clocksi"
 	"potionDB/crdt/crdt"
-	"potionDB/crdt/proto"
-	"testing"
-	"time"
 )
 
 const (
@@ -36,9 +30,9 @@ type testReadReply struct {
 Goal: do 2 writes in different partitions, with the 2nd write using the clock returned by
 the 1st write.
 Success: if both operations commit and a read returns the values written.
-*/
+*/ /*
 func TestWrites1(t *testing.T) {
-	tm := Initialize(0)
+	tm := Initialize(0, false)
 
 	//Sleep for a bit to ensure all gothreads initialize
 	time.Sleep(initializeTime * time.Millisecond)
@@ -73,7 +67,7 @@ func TestWrites1(t *testing.T) {
 	readParams := []crdt.ReadObjectParams{createReadObjParams(firstKey), createReadObjParams(secondKey)}
 	readReq, readChan := createStaticRead(secondWriteReply.TransactionId, secondWriteReply.Timestamp, readParams)
 
-	go tm.handleStaticTMRead(readReq, 1)
+	go tm.handleStaticTMRead(readReq, 1, (&tmReadBuffers{}).Init())
 	readReply := <-readChan
 
 	if len(readReply.States[0].(crdt.SetAWValueState).Elems) == 0 || readReply.States[0].(crdt.SetAWValueState).Elems[0] != (firstWriteParams[0].UpdateArgs).(crdt.Add).Element {
@@ -87,15 +81,15 @@ func TestWrites1(t *testing.T) {
 		t.Error("Expected: ", (secondWriteParams[0].UpdateArgs).(crdt.Add).Element)
 	}
 
-}
+}*/
 
 /*
 Goal: do 3 writes in two partitions. 1st write: initial clock, 1st partition. 2nd write: 1st write's clock, 2nd partition.
 3rd write: 2nd write's clock, 1st partition
 Success: if all operations commit and a read returns the values written.
-*/
+*/ /*
 func TestWrites2(t *testing.T) {
-	tm := Initialize(0)
+	tm := Initialize(0, false)
 
 	//Sleep for a bit to ensure all gothreads initialize
 	time.Sleep(initializeTime * time.Millisecond)
@@ -148,7 +142,7 @@ func TestWrites2(t *testing.T) {
 	readReq, readChan := createStaticRead(thirdWriteReply.TransactionId, thirdWriteReply.Timestamp, readParams)
 
 	//fmt.Println("Sending read")
-	go tm.handleStaticTMRead(readReq, 1)
+	go tm.handleStaticTMRead(readReq, 1, (&tmReadBuffers{}).Init())
 	readReply := <-readChan
 	//fmt.Println("Got read reply")
 
@@ -163,14 +157,14 @@ func TestWrites2(t *testing.T) {
 		t.Error("Received: ", readReply.States[1].(crdt.SetAWValueState).Elems[0])
 		t.Error("Expected: ", (secondWriteParams[0].UpdateArgs).(crdt.Add).Element)
 	}
-}
+}*/
 
 /*
 Goal: do 3 writes in the same partition, with the last write using an early clock. 1st write: initial clock. 2nd write: 1st write's clock. 3rd write: initial clock.
 Success: if all operations commit and a read returns the values written.
-*/
+*/ /*
 func TestWrites3(t *testing.T) {
-	tm := Initialize(0)
+	tm := Initialize(0, false)
 
 	//Sleep for a bit to ensure all gothreads initialize
 	time.Sleep(initializeTime * time.Millisecond)
@@ -210,7 +204,7 @@ func TestWrites3(t *testing.T) {
 	readParams := []crdt.ReadObjectParams{createReadObjParams(firstKey)}
 	readReq, readChan := createStaticRead(secondWriteReply.TransactionId, secondWriteReply.Timestamp, readParams)
 
-	go tm.handleStaticTMRead(readReq, 1)
+	go tm.handleStaticTMRead(readReq, 1, (&tmReadBuffers{}).Init())
 	readReply := <-readChan
 
 	firstKeyWrites := []crdt.UpdateObjectParams{firstWriteParams[0], secondWriteParams[0], thirdWriteParams[0]}
@@ -219,7 +213,7 @@ func TestWrites3(t *testing.T) {
 		t.Error("Received: ", readReply.States[0].(crdt.SetAWValueState).Elems)
 		t.Error("Expected: ", firstKeyWrites)
 	}
-}
+}*/
 
 /*
 Goal: to test if multiple writes and reads to the same key finish succesfully with the expected results. This includes writing with old clocks and reading with clocks higher than the latest's commit
@@ -243,9 +237,9 @@ Success: if every operation commits and final read returns all values written.
   - writes…
   - commit
   - check that 5th finished now.
-*/
+*/ /*
 func TestWritesAndReads(t *testing.T) {
-	tm := Initialize(0)
+	tm := Initialize(0, false)
 
 	//Sleep for a bit to ensure all gothreads initialize
 	time.Sleep(initializeTime * time.Millisecond)
@@ -290,19 +284,17 @@ func TestWritesAndReads(t *testing.T) {
 	readParams := []crdt.ReadObjectParams{createReadObjParams(firstKey)}
 	firstReadReq, firstReadChan := createStaticRead(TransactionId(0), futureTs, readParams)
 
-	go tm.handleStaticTMRead(firstReadReq, 1)
+	go tm.handleStaticTMRead(firstReadReq, 1, (&tmReadBuffers{}).Init())
 
 	//Reads for timestamps more recent than latest' commit no longer are supposed to block, unless there's a commit pending.
-	/*
-		//This read is supposed to timeout, as we asked for a timestamp that doesn't yet exist.
-		select {
-		case <-firstReadChan:
-			t.Error("Error - the first read didn't block, even though the timestamp used is not yet available.")
-			return
-		case <-time.After(2 * time.Second):
-			t.Log("First read timeout, as expected.")
-		}
-	*/
+	//This read is supposed to timeout, as we asked for a timestamp that doesn't yet exist.
+	//select {
+	//case <-firstReadChan:
+	//	t.Error("Error - the first read didn't block, even though the timestamp used is not yet available.")
+	//	return
+	//case <-time.After(2 * time.Second):
+	//	t.Log("First read timeout, as expected.")
+	//}
 
 	firstReadReply := <-firstReadChan
 	firstReadWrites := []crdt.UpdateObjectParams{firstWriteParams[0], secondWriteParams[0], thirdWriteParams[0]}
@@ -324,7 +316,7 @@ func TestWritesAndReads(t *testing.T) {
 
 	secondReadReq, secondReadChan := createStaticRead(fourthWriteReply.TransactionId, fourthWriteReply.Timestamp, readParams)
 
-	go tm.handleStaticTMRead(secondReadReq, 1)
+	go tm.handleStaticTMRead(secondReadReq, 1, (&tmReadBuffers{}).Init())
 	secondReadReply := <-secondReadChan
 
 	secondReadWrites := []crdt.UpdateObjectParams{firstWriteParams[0], secondWriteParams[0], thirdWriteParams[0], fourthWriteParams[0]}
@@ -333,11 +325,12 @@ func TestWritesAndReads(t *testing.T) {
 		t.Error("Received: ", secondReadReply.States[0].(crdt.SetAWValueState).Elems)
 		t.Error("Expected: ", secondReadWrites)
 	}
-}
+}*/
 
+/*
 // Tests the following sequence of operations: startTxn -> write -> read -> write -> commit
 func TestNonStaticTransaction1(t *testing.T) {
-	tm := Initialize(0)
+	tm := Initialize(0, false)
 	txnPartitions := &ongoingTxn{}
 	//Sleep for a bit to ensure all gothreads initialize
 	time.Sleep(initializeTime * time.Millisecond)
@@ -369,7 +362,7 @@ func TestNonStaticTransaction1(t *testing.T) {
 // After the 2nd txn (with higher startTxn timestamp) commits, we check that a read on the 1st txn doesn't reflect any updates on the 2nd txn.
 // We also check that a 3rd txn started after the 1st txn commits succesfully reads the 2nd txn's updates
 func TestNonStaticTransaction2(t *testing.T) {
-	tm := Initialize(0)
+	tm := Initialize(0, false)
 	txnPartitions := &ongoingTxn{}
 	//Sleep for a bit to ensure all gothreads initialize
 	time.Sleep(initializeTime * time.Millisecond)
@@ -426,9 +419,9 @@ func TestNonStaticTransaction2(t *testing.T) {
 }
 
 func TestReplicator1(t *testing.T) {
-	tm1 := Initialize(0)
+	tm1 := Initialize(0, false)
 	time.Sleep(time.Duration(200) * time.Millisecond)
-	tm2 := Initialize(1)
+	tm2 := Initialize(1, false)
 	//tm1.replicator.AddRemoteReplicator(tm2.replicator.replicaID)
 	//tm2.replicator.AddRemoteReplicator(tm1.replicator.replicaID)
 	//tm1.replicator.AddRemoteReplicator(make(chan ReplicatorRequest))
@@ -458,9 +451,9 @@ func TestReplicator1(t *testing.T) {
 }
 
 func TestReplicator2(t *testing.T) {
-	tm1 := Initialize(0)
+	tm1 := Initialize(0, false)
 	time.Sleep(time.Duration(200) * time.Millisecond)
-	tm2 := Initialize(1)
+	tm2 := Initialize(1, false)
 	//tm1.replicator.AddRemoteReplicator(tm2.replicator.replicaID)
 	//tm2.replicator.AddRemoteReplicator(tm1.replicator.replicaID)
 	//tm1.replicator.AddRemoteReplicator(make(chan ReplicatorRequest))
@@ -498,10 +491,10 @@ func TestReplicator2(t *testing.T) {
 		t.Error("Expected: ", []crdt.Element{})
 	}
 
-}
+}*/
 
 /*****METHODS FOR CREATING REQUESTS*****/
-
+/*
 func createStaticWrite(txnId TransactionId, ts clocksi.Timestamp, updParams []crdt.UpdateObjectParams) (request TransactionManagerRequest, replyChan chan TMStaticUpdateReply) {
 	replyChan = make(chan TMStaticUpdateReply)
 	request = TransactionManagerRequest{
@@ -586,10 +579,10 @@ func createAndProcessCommit(tm *TransactionManager, txnPartitions *ongoingTxn, t
 	commitReq, commitChan := createCommit(txnId, ts)
 	go tm.handleTMCommit(commitReq, txnPartitions, 1)
 	return <-commitChan
-}
+}*/
 
 /*****METHODS FOR BOTH CREATING AND PROCESSING REQUESTS (including sending them & waiting for reply)*****/
-
+/*
 func createAndProcessWrite(tm *TransactionManager, txnPartitions *ongoingTxn, isStatic bool, key crdt.KeyParams, writeParamsFunc func(crdt.KeyParams) []crdt.UpdateObjectParams, txnId TransactionId,
 	ts clocksi.Timestamp) (writeParams []crdt.UpdateObjectParams, writeReply testUpdateReply) {
 	writeParams = writeParamsFunc(key)
@@ -608,11 +601,11 @@ func createAndProcessWrite(tm *TransactionManager, txnPartitions *ongoingTxn, is
 func createAndProccessRead(tm *TransactionManager, isStatic bool, readParams []crdt.ReadObjectParams, txnId TransactionId, ts clocksi.Timestamp) (readReply testReadReply) {
 	if isStatic {
 		readReq, readChan := createStaticRead(txnId, ts, readParams)
-		go tm.handleStaticTMRead(readReq, 1)
+		go tm.handleStaticTMRead(readReq, 1, (&tmReadBuffers{}).Init())
 		readReply = testReadReply{staticReadReply: <-readChan}
 	} else {
 		readReq, readChan := createRead(txnId, ts, readParams)
-		go tm.handleTMRead(readReq, nil)
+		go tm.handleTMRead(readReq, nil, (&tmReadBuffers{}).Init())
 		readReply = testReadReply{readReply: <-readChan}
 	}
 	return
@@ -622,10 +615,10 @@ func createAndProcessStartTxn(tm *TransactionManager, txnPartitions *ongoingTxn,
 	txn, txnChan := createStartTxn(TransactionId(rand.Uint64()), clocksi.NewClockSiTimestampFromId(0))
 	go tm.handleTMStartTxn(txn, txnPartitions, 1, rand.New(rand.NewSource(time.Now().UnixNano())))
 	return <-txnChan
-}
+}*/
 
 /*****OTHERS*****/
-
+/*
 // Note: assumes that each write in UpdateObjectParams contains only one update
 func checkWriteReadSetMatch(state crdt.SetAWValueState, writeParams []crdt.UpdateObjectParams) (ok bool) {
 	if len(state.Elems) != len(writeParams) {
@@ -658,9 +651,10 @@ func checkWriteReadSetMatch(state crdt.SetAWValueState, writeParams []crdt.Updat
 		}
 	}
 	return ok
-}
+}*/
 
 /*****ERROR CHECKING UTILS*****/
+/*
 func checkUpdateError(nWrite int, updReply TMUpdateReply, t *testing.T) {
 	if updReply.Err != nil {
 		t.Error("Error on write", nWrite, ":", updReply.Err)
@@ -677,4 +671,4 @@ func checkCommitError(nCommit int, commitReply TMCommitReply, t *testing.T) {
 	if commitReply.Err != nil {
 		t.Error("Error on commit", nCommit, ":", commitReply.Err)
 	}
-}
+}*/

@@ -21,7 +21,7 @@ type VersionManager interface {
 
 	GetLatestCRDT() (crdt crdt.CRDT)
 
-	GC(safeClk clocksi.Timestamp, safeClkKey clocksi.TimestampKey)
+	GC(safeClk clocksi.Timestamp, safeClkKey clocksi.TimestampKey, fastGC bool)
 }
 
 type VMType byte

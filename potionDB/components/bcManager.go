@@ -59,7 +59,7 @@ func StartBCTimer(mat *Materializer, connPool *connPool, replicaIDToIndex map[ui
 			//fmt.Println("[BCM]Processed all replies from partitions: ", hasReqPerServer)
 			for id, perms := range bcPermsPerServer {
 				if hasReqPerServer[id] {
-					protoReq := CreateS2SWrapperProto(int32(rng.Int63()), proto.WrapperType_BC_PERMS_REQ,
+					protoReq := CreateS2SWrapperProto(uint64(rng.Int63()), proto.WrapperType_BC_PERMS_REQ,
 						CreateBCPermissionsReqProto(perms, serverID))
 					connPool.sendRequest(S2S, protoReq, replicaIDToIndex[id])
 					hasAny = true

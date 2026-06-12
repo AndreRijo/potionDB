@@ -90,7 +90,7 @@ func (args ReadSecondArguments) HasInnerReads() bool               { return fals
 func (args ReadFirstArguments) HasVariables() bool                 { return false }
 func (args ReadSecondArguments) HasVariables() bool                { return false }
 
-func (crdt *PairCounterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *PairCounterCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	return &PairCounterCrdt{
 		CRDTVM: (&genericInversibleCRDT{}).initialize(crdt),
 		first:  0,
@@ -99,7 +99,7 @@ func (crdt *PairCounterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID ui
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *PairCounterCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *PairCounterCrdt) {
+func (crdt *PairCounterCrdt) initializeFromSnapshot(startTs clocksi.Timestamp, replicaID uint16) (sameCRDT *PairCounterCrdt) {
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
@@ -202,36 +202,37 @@ func (crdt *PairCounterCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs 
 	}
 	effect := crdt.applyDownstream(downstreamArgs)
 	//Necessary for inversibleCrdt
-	crdt.addToHistory(&updTs, &downstreamArgs, effect)
+	crdt.addToHistory(updTs, downstreamArgs, effect)
 
 	return nil
 }
 
-func (crdt *PairCounterCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect *Effect) {
-	var effectValue Effect
+func (crdt *PairCounterCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect Effect) {
 	switch incOrDec := downstreamArgs.(type) {
 	case IncrementFirst:
 		crdt.first += int32(incOrDec)
-		effectValue = IncrementFirstEffect(incOrDec)
+		effect = IncrementFirstEffect(incOrDec)
 	case DecrementFirst:
 		crdt.first -= int32(incOrDec)
-		effectValue = DecrementFirstEffect(incOrDec)
+		effect = DecrementFirstEffect(incOrDec)
 	case IncrementSecond:
 		crdt.second += float64(incOrDec)
-		effectValue = IncrementSecondEffect(incOrDec)
+		effect = IncrementSecondEffect(incOrDec)
 	case DecrementSecond:
 		crdt.second -= float64(incOrDec)
-		effectValue = DecrementSecondEffect(incOrDec)
+		effect = DecrementSecondEffect(incOrDec)
 	case IncrementBoth:
 		crdt.first += incOrDec.ChangeFirst
 		crdt.second += incOrDec.ChangeSecond
+		effect = incOrDec
 	case DecrementBoth:
 		crdt.first -= incOrDec.ChangeFirst
 		crdt.second -= incOrDec.ChangeSecond
+		effect = incOrDec
 	default:
 		fmt.Printf("[PairCounter][Downstream]Unsupported downstream type: %v (%T)\n", downstreamArgs, downstreamArgs)
 	}
-	return &effectValue
+	return
 }
 
 func (crdt *PairCounterCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err error) {
@@ -248,12 +249,12 @@ func (crdt *PairCounterCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
-func (crdt *PairCounterCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *PairCounterCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	return crdt.applyDownstream(updArgs)
 }
 
-func (crdt *PairCounterCrdt) undoEffect(effect *Effect) {
-	switch typedEffect := (*effect).(type) {
+func (crdt *PairCounterCrdt) undoEffect(effect Effect) {
+	switch typedEffect := (effect).(type) {
 	case IncrementFirstEffect:
 		crdt.first -= int32(typedEffect)
 	case DecrementFirstEffect:
@@ -271,7 +272,7 @@ func (crdt *PairCounterCrdt) undoEffect(effect *Effect) {
 	}
 }
 
-func (crdt *PairCounterCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+func (crdt *PairCounterCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {}
 
 //Protobuf functions
 
@@ -332,7 +333,7 @@ func (crdtState PairCounterState) FromReadResp(protobuf *proto.ApbReadObjectResp
 	return PairCounterState{First: proto.GetFirst(), Second: proto.GetSecond()}
 }
 
-func (crdtState PairCounterState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState PairCounterState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Paircounter{Paircounter: &proto.ApbGetPairCounterResp{First: pb.Int32(crdtState.First), Second: pb.Float64(crdtState.Second)}}}
 }
 
@@ -340,7 +341,7 @@ func (crdtState SingleFirstCounterState) FromReadResp(protobuf *proto.ApbReadObj
 	return SingleFirstCounterState(protobuf.GetPaircounter().GetFirst())
 }
 
-func (crdtState SingleFirstCounterState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState SingleFirstCounterState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Paircounter{Paircounter: &proto.ApbGetPairCounterResp{First: pb.Int32(int32(crdtState))}}}
 }
 
@@ -348,7 +349,7 @@ func (crdtState SingleSecondCounterState) FromReadResp(protobuf *proto.ApbReadOb
 	return SingleSecondCounterState(protobuf.GetPaircounter().GetSecond())
 }
 
-func (crdtState SingleSecondCounterState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState SingleSecondCounterState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Paircounter{Paircounter: &proto.ApbGetPairCounterResp{Second: pb.Float64(float64(crdtState))}}}
 }
 
@@ -433,7 +434,7 @@ func (crdt *PairCounterCrdt) ToProtoState() (protobuf *proto.ProtoState) {
 	return &proto.ProtoState{State: &proto.ProtoState_PairCounter{PairCounter: &proto.ProtoPairCounterState{First: &first, Second: &second}}}
 }
 
-func (crdt *PairCounterCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
+func (crdt *PairCounterCrdt) FromProtoState(proto *proto.ProtoState, ts clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	pairProto := proto.GetPairCounter()
 	return (&PairCounterCrdt{first: pairProto.GetFirst(), second: pairProto.GetSecond()}).initializeFromSnapshot(ts, replicaID)
 }

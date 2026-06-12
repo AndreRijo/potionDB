@@ -281,14 +281,14 @@ func (args ByteArrayExceptArguments) HasVariables() bool        { return false }
 func (args ByteArrayRangeArguments) HasVariables() bool         { return false }
 func (args ByteArraySubArguments) HasVariables() bool           { return false }
 
-func (crdt *ByteArrayCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *ByteArrayCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	crdt = &ByteArrayCrdt{}
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *ByteArrayCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *ByteArrayCrdt) {
+func (crdt *ByteArrayCrdt) initializeFromSnapshot(startTs clocksi.Timestamp, replicaID uint16) (sameCRDT *ByteArrayCrdt) {
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
@@ -514,11 +514,11 @@ func (crdt *ByteArrayCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs Do
 		}
 	}
 	effect := crdt.applyDownstream(downstreamArgs)
-	crdt.addToHistory(&updTs, &downstreamArgs, effect) //Necessary for inversibleCrdt
+	crdt.addToHistory(updTs, downstreamArgs, effect) //Necessary for inversibleCrdt
 	return nil
 }
 
-func (crdt *ByteArrayCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect *Effect) {
+func (crdt *ByteArrayCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect Effect) {
 	switch typedArgs := downstreamArgs.(type) {
 	case DownstreamByteArraySetValue:
 		return crdt.applyDownstreamSetValue(typedArgs.Pos, typedArgs.NewValue, typedArgs.TsId)
@@ -534,19 +534,16 @@ func (crdt *ByteArrayCrdt) applyDownstream(downstreamArgs DownstreamArguments) (
 		return crdt.downstreamFloatHelper(typedArgs.Pos, -typedArgs.Change)
 	case ByteArraySetDataInitialize: //Only once per CRDT, and before any other update.
 		crdt.data, crdt.dataStarts = typedArgs.Data, typedArgs.DataStarts
-		var effectValue Effect = NoEffect{}
-		return &effectValue
+		return NoEffect{}
 	default:
 		fmt.Printf("[ByteArrayCrdt][Downstream]Unsupported downstream type: %v (%T)\n", downstreamArgs, downstreamArgs)
 	}
 	return nil
 }
 
-func (crdt *ByteArrayCrdt) applyDownstreamSetValue(pos int32, newValue []byte, tsId uint64) (effect *Effect) {
-	var effectValue Effect
+func (crdt *ByteArrayCrdt) applyDownstreamSetValue(pos int32, newValue []byte, tsId uint64) (effect Effect) {
 	if crdt.dataTsId[pos] >= tsId { //No-op
-		effectValue = NoEffect{}
-		return &effectValue
+		return NoEffect{}
 	}
 	var oldValue []byte
 	if pos >= int32(len(crdt.dataStarts)) {
@@ -554,22 +551,22 @@ func (crdt *ByteArrayCrdt) applyDownstreamSetValue(pos int32, newValue []byte, t
 	}
 	//Fast path: the new value has the same size as the old one.
 	if pos < int32(len(crdt.dataStarts)-1) && len(newValue) == int(crdt.dataStarts[pos+1]-crdt.dataStarts[pos]) {
-		effectValue = ByteArraySetValueDirectEffect{OldValue: oldValue, Pos: pos, OldTsId: crdt.dataTsId[pos]}
+		effect = ByteArraySetValueDirectEffect{OldValue: oldValue, Pos: pos, OldTsId: crdt.dataTsId[pos]}
 		copy(crdt.data[crdt.dataStarts[pos]:crdt.dataStarts[pos+1]], newValue)
 		crdt.dataTsId[pos] = tsId
-		return &effectValue
+		return effect
 	}
 	//Also fast path, but at the end of the array.
 	if pos == int32(len(crdt.dataStarts)-1) && len(newValue) == int(len(crdt.data)-int(crdt.dataStarts[pos])) {
-		effectValue = ByteArraySetValueDirectEffect{OldValue: oldValue, Pos: pos, OldTsId: crdt.dataTsId[pos]}
+		effect = ByteArraySetValueDirectEffect{OldValue: oldValue, Pos: pos, OldTsId: crdt.dataTsId[pos]}
 		copy(crdt.data[crdt.dataStarts[pos]:], newValue)
 		crdt.dataTsId[pos] = tsId
-		return &effectValue
+		return effect
 	}
 
 	if pos >= int32(len(crdt.dataStarts)) { //Expand array.
 		oldSize, oldNElements := len(crdt.data), len(crdt.dataStarts)
-		effectValue = ByteArraySetValueExpandEffect{OldLen: uint16(oldNElements)}
+		effect = ByteArraySetValueExpandEffect{OldLen: uint16(oldNElements)}
 		crdt.expandArray(pos+1, int32(len(crdt.data)+len(newValue)))
 		copy(crdt.data[oldSize:], newValue)
 		//Must fill all new empty positions of dataStarts with oldSize.
@@ -577,10 +574,10 @@ func (crdt *ByteArrayCrdt) applyDownstreamSetValue(pos int32, newValue []byte, t
 			crdt.dataStarts[i] = uint16(oldSize)
 		}
 		crdt.dataTsId[pos] = tsId
-		return &effectValue
+		return effect
 	}
 
-	effectValue = ByteArraySetValueDiffSizeEffect{OldValue: oldValue, Pos: pos, OldTsId: crdt.dataTsId[pos]}
+	effect = ByteArraySetValueDiffSizeEffect{OldValue: oldValue, Pos: pos, OldTsId: crdt.dataTsId[pos]}
 	//Pos is somewhere in the existing array, but size is different. It means we will need to "make space".
 	//Two options:
 	//1 - Always make new slice with appropriate size. Memory-efficient but can lead to many memory allocations/slow.
@@ -646,11 +643,10 @@ func (crdt *ByteArrayCrdt) applyDownstreamSetValue(pos int32, newValue []byte, t
 			crdt.data = newData
 		}
 	}
-	return &effectValue
+	return effect
 }
 
-func (crdt *ByteArrayCrdt) applyDownstreamSetData(updData []byte, updDataStarts []uint16, tsId uint64) (effect *Effect) {
-	var effectValue Effect
+func (crdt *ByteArrayCrdt) applyDownstreamSetData(updData []byte, updDataStarts []uint16, tsId uint64) (effect Effect) {
 	//Figure out the new data size (iterate both TsId, calculate new starts and decide where to take from)
 	//Due to the possibility of different sizes for each "data", we have to always create a new byte slice.
 	//Sadly nothing we can reuse :( (unless the new slice wins every TsId)
@@ -677,9 +673,9 @@ func (crdt *ByteArrayCrdt) applyDownstreamSetData(updData []byte, updDataStarts 
 		}
 	}
 	if allTsLower { //No-op.
-		effectValue = NoEffect{}
+		effect = NoEffect{}
 	} else if allTsHigher && len(updDataStarts) >= len(crdt.dataStarts) { //Can just use the update slices
-		effectValue = ByteArraySetDataEffect{OldData: crdt.data, OldDataStarts: crdt.dataStarts, OldDataTsId: oldTsId}
+		effect = ByteArraySetDataEffect{OldData: crdt.data, OldDataStarts: crdt.dataStarts, OldDataTsId: oldTsId}
 		crdt.data, crdt.dataStarts = updData, updDataStarts
 	} else { //Have to make new slices
 		var size uint16
@@ -702,15 +698,15 @@ func (crdt *ByteArrayCrdt) applyDownstreamSetData(updData []byte, updDataStarts 
 		} else {
 			copy(newData[currStart:], crdt.data[crdt.dataStarts[len(crdt.dataStarts)-1]:])
 		}
-		effectValue = ByteArraySetDataEffect{OldData: crdt.data, OldDataStarts: crdt.dataStarts, OldDataTsId: oldTsId}
+		effect = ByteArraySetDataEffect{OldData: crdt.data, OldDataStarts: crdt.dataStarts, OldDataTsId: oldTsId}
 		crdt.data, crdt.dataStarts = newData, newDataStarts
 	}
-	return &effectValue
+	return
 }
 
 // Applies a downstream update of either ByteArrayIncrement or ByteArrayDecrement
-func (crdt *ByteArrayCrdt) downstreamIntHelper(pos, change int32) (effect *Effect) {
-	var effectValue Effect = ByteArrayIncEffect{Change: change, Pos: uint16(pos), OldNElems: uint16(len(crdt.dataStarts))}
+func (crdt *ByteArrayCrdt) downstreamIntHelper(pos, change int32) (effect Effect) {
+	effect = ByteArrayIncEffect{Change: change, Pos: uint16(pos), OldNElems: uint16(len(crdt.dataStarts))}
 	if pos >= int32(len(crdt.dataStarts)) {
 		oldSize := len(crdt.data)
 		crdt.expandArray(pos+1, int32(len(crdt.data)+8))
@@ -721,10 +717,10 @@ func (crdt *ByteArrayCrdt) downstreamIntHelper(pos, change int32) (effect *Effec
 		value += int64(change)
 		binary.LittleEndian.PutUint64(crdt.data[crdt.dataStarts[pos]:], uint64(value))
 	}
-	return &effectValue
+	return
 }
 
-func (crdt *ByteArrayCrdt) downstreamFloatHelper(pos int32, change float64) (effect *Effect) {
+func (crdt *ByteArrayCrdt) downstreamFloatHelper(pos int32, change float64) (effect Effect) {
 	if pos >= int32(len(crdt.dataStarts)) {
 		oldSize := len(crdt.data)
 		crdt.expandArray(pos+1, int32(len(crdt.data)+8))
@@ -735,8 +731,7 @@ func (crdt *ByteArrayCrdt) downstreamFloatHelper(pos int32, change float64) (eff
 		value += change
 		binary.LittleEndian.PutUint64(crdt.data[crdt.dataStarts[pos]:], math.Float64bits(value))
 	}
-	var effectValue Effect = ByteArrayFloatIncEffect{Change: change, Pos: pos}
-	return &effectValue
+	return ByteArrayFloatIncEffect{Change: change, Pos: pos}
 }
 
 func (crdt *ByteArrayCrdt) expandTSOnly(newSize int) {
@@ -787,12 +782,12 @@ func (crdt *ByteArrayCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
-func (crdt *ByteArrayCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *ByteArrayCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	return crdt.applyDownstream(updArgs)
 }
 
-func (crdt *ByteArrayCrdt) undoEffect(effect *Effect) { //TODO
-	switch typedEffect := (*effect).(type) {
+func (crdt *ByteArrayCrdt) undoEffect(effect Effect) { //TODO
+	switch typedEffect := (effect).(type) {
 	case ByteArraySetDataEffect:
 		crdt.data, crdt.dataStarts, crdt.dataTsId = typedEffect.OldData, typedEffect.OldDataStarts, typedEffect.OldDataTsId
 	case ByteArraySetValueDirectEffect:
@@ -835,7 +830,7 @@ func (crdt *ByteArrayCrdt) undoEffect(effect *Effect) { //TODO
 	}
 }
 
-func (crdt *ByteArrayCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+func (crdt *ByteArrayCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {}
 
 //Protobuf functions
 
@@ -906,7 +901,7 @@ func (crdtState ByteArrayState) FromReadResp(protobuf *proto.ApbReadObjectResp) 
 	return ByteArrayState(protobuf.GetBytearray().GetValues())
 }
 
-func (crdtState ByteArrayState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState ByteArrayState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Bytearray{Bytearray: &proto.ApbGetArrayByteResp{Values: [][]byte(crdtState)}}}
 }
 
@@ -914,7 +909,7 @@ func (crdtState ByteArraySingle) FromReadResp(protobuf *proto.ApbReadObjectResp)
 	return ByteArraySingle(protobuf.GetPartread().GetBytearray().GetDataValue().GetValue())
 }
 
-func (crdtState ByteArraySingle) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState ByteArraySingle) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Bytearray{Bytearray: &proto.ApbByteArrayReadResp{DataValue: &proto.ApbBytePosDataResp{Value: []byte(crdtState)}}}}}}
 }
 
@@ -922,7 +917,7 @@ func (crdtState ByteArrayString) FromReadResp(protobuf *proto.ApbReadObjectResp)
 	return ByteArrayString(protobuf.GetPartread().GetBytearray().GetStringValue().GetValue())
 }
 
-func (crdtState ByteArrayString) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState ByteArrayString) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Bytearray{Bytearray: &proto.ApbByteArrayReadResp{StringValue: &proto.ApbBytePosStringResp{Value: pb.String(string(crdtState))}}}}}}
 }
 
@@ -930,7 +925,7 @@ func (crdtState ByteArrayInt) FromReadResp(protobuf *proto.ApbReadObjectResp) (s
 	return ByteArrayInt(protobuf.GetPartread().GetBytearray().GetIntValue().GetValue())
 }
 
-func (crdtState ByteArrayInt) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState ByteArrayInt) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Bytearray{Bytearray: &proto.ApbByteArrayReadResp{IntValue: &proto.ApbBytePosIntResp{Value: pb.Int64(int64(crdtState))}}}}}}
 }
 
@@ -938,7 +933,7 @@ func (crdtState ByteArrayFloat) FromReadResp(protobuf *proto.ApbReadObjectResp) 
 	return ByteArrayFloat(protobuf.GetPartread().GetBytearray().GetFloatValue().GetValue())
 }
 
-func (crdtState ByteArrayFloat) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState ByteArrayFloat) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Bytearray{Bytearray: &proto.ApbByteArrayReadResp{FloatValue: &proto.ApbBytePosFloatResp{Value: pb.Float64(float64(crdtState))}}}}}}
 }
 
@@ -946,7 +941,7 @@ func (crdtState ByteArrayAny) FromReadResp(protobuf *proto.ApbReadObjectResp) (s
 	return ByteArrayAny{Value: protobuf.GetPartread().GetBytearray().GetAnyValue().GetValue()}
 }
 
-func (crdtState ByteArrayAny) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState ByteArrayAny) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Bytearray{Bytearray: &proto.ApbByteArrayReadResp{AnyValue: &proto.ApbBytePosAnyResp{Value: []byte(any(crdtState).(string))}}}}}}
 }
 
@@ -1071,7 +1066,7 @@ func (crdt *ByteArrayCrdt) ToProtoState() (protobuf *proto.ProtoState) {
 		Data: copyData, DataStarts: copyDataStarts, TsId: copyDataTsId}}}
 }
 
-func (crdt *ByteArrayCrdt) FromProtoState(protobuf *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
+func (crdt *ByteArrayCrdt) FromProtoState(protobuf *proto.ProtoState, ts clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	pbCounter := protobuf.GetBcounter()
 	perms, decs, permsPb, decsPb := make(map[uint16]int32), make(map[uint16]int32), pbCounter.GetPermissions(), pbCounter.GetDecs()
 	for key, value := range permsPb {

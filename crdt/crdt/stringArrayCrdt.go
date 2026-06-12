@@ -163,14 +163,14 @@ func (args StringArrayExceptArguments) HasVariables() bool          { return fal
 func (args StringArrayRangeArguments) HasVariables() bool           { return false }
 func (args StringArraySubArguments) HasVariables() bool             { return false }
 
-func (crdt *StringArrayCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *StringArrayCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 	//return &StringArrayCrdt{CRDTVM: (&genericInversibleCRDT{}).initialize(crdt)
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *StringArrayCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *StringArrayCrdt) {
+func (crdt *StringArrayCrdt) initializeFromSnapshot(startTs clocksi.Timestamp, replicaID uint16) (sameCRDT *StringArrayCrdt) {
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
@@ -200,7 +200,7 @@ func (crdt *StringArrayCrdt) Read(args ReadArguments, updsNotYetApplied []Update
 
 func (crdt *StringArrayCrdt) getState(updsNotYetApplied []UpdateArguments) (state State) {
 	tmpCopy := copySlice(crdt.data)
-	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+	if len(updsNotYetApplied) == 0 {
 		return StringArrayState(tmpCopy)
 	}
 	for _, upd := range updsNotYetApplied {
@@ -222,7 +222,7 @@ func (crdt *StringArrayCrdt) getState(updsNotYetApplied []UpdateArguments) (stat
 }
 
 func (crdt *StringArrayCrdt) getPos(updsNotYetApplied []UpdateArguments, pos int32) (state State) {
-	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+	if len(updsNotYetApplied) == 0 {
 		return StringArraySingleState(crdt.data[pos])
 	}
 	var value string
@@ -253,7 +253,7 @@ func (crdt *StringArrayCrdt) getExcept(updsNotYetApplied []UpdateArguments, pos 
 		copy(result, crdt.data[:pos])
 		copy(result[pos:], crdt.data[pos+1:])
 	}
-	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+	if len(updsNotYetApplied) == 0 {
 		return StringArrayState(result)
 	}
 
@@ -290,7 +290,7 @@ func (crdt *StringArrayCrdt) getExcept(updsNotYetApplied []UpdateArguments, pos 
 }
 
 func (crdt *StringArrayCrdt) getRange(updsNotYetApplied []UpdateArguments, from, to int32) (state State) {
-	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+	if len(updsNotYetApplied) == 0 {
 		return StringArrayState(copySlice(getRangeOfSlice(crdt.data, int(from), int(to))))
 	}
 
@@ -321,7 +321,7 @@ func (crdt *StringArrayCrdt) getRange(updsNotYetApplied []UpdateArguments, from,
 func (crdt *StringArrayCrdt) getSub(updsNotYetApplied []UpdateArguments, positions []int32) (state State) {
 	result := make([]string, len(positions))
 
-	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+	if len(updsNotYetApplied) == 0 {
 		lenInt32 := int32(len(crdt.data))
 		for i, pos := range positions {
 			if pos < lenInt32 {
@@ -399,17 +399,17 @@ func (crdt *StringArrayCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs 
 		return nil
 	}
 	effect := crdt.applyDownstream(downstreamArgs)
-	crdt.addToHistory(&updTs, &downstreamArgs, effect) //Necessary for inversibleCrdt
+	crdt.addToHistory(updTs, downstreamArgs, effect) //Necessary for inversibleCrdt
 	return nil
 }
 
-func (crdt *StringArrayCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect *Effect) {
-	var effectValue Effect = NoEffect{}
+func (crdt *StringArrayCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect Effect) {
+	effect = NoEffect{}
 
 	stringArrayUpd, ok := downstreamArgs.(StringArrayUpd)
 	if !ok {
 		fmt.Printf("[StringArray][Downstream]Unsupported downstream type %v (%T)\n", downstreamArgs, downstreamArgs)
-		return &effectValue
+		return
 	}
 	if stringArrayUpd.GetMinSize() > len(crdt.data) && !stringArrayUpd.IsMultiPos() {
 		crdt.expandArray(int32(stringArrayUpd.GetMinSize()))
@@ -419,9 +419,9 @@ func (crdt *StringArrayCrdt) applyDownstream(downstreamArgs DownstreamArguments)
 
 	case DownstreamStringArraySetValue:
 		if crdt.dataTsId[typedUpd.Pos] > typedUpd.TsId { //Cannot apply
-			return &effectValue
+			return
 		}
-		effectValue = StringArraySetValueEffect{Value: crdt.data[typedUpd.Pos], Pos: typedUpd.Pos, TsId: crdt.dataTsId[typedUpd.Pos]}
+		effect = StringArraySetValueEffect{Value: crdt.data[typedUpd.Pos], Pos: typedUpd.Pos, TsId: crdt.dataTsId[typedUpd.Pos]}
 		crdt.data[typedUpd.Pos], crdt.dataTsId[typedUpd.Pos] = typedUpd.Value, typedUpd.TsId
 	case DownstreamStringArraySetArray:
 		if len(typedUpd.Values) > len(crdt.data) { //We will use the argument slice as the new slice, avoiding an extra allocation.
@@ -434,7 +434,7 @@ func (crdt *StringArrayCrdt) applyDownstream(downstreamArgs DownstreamArguments)
 					crdt.dataTsId[i] = typedUpd.TsId //Update timestamp
 				}
 			}
-			effectValue = StringArraySetArrayEffect{Values: crdt.data, TsId: oldTsSlice}
+			effect = StringArraySetArrayEffect{Values: crdt.data, TsId: oldTsSlice}
 			crdt.data = typedUpd.Values //Re-use the argument slice as the new data slice
 		} else { //First, search for the first position that will need to be replaced. If none is found, can return gracefully with no data allocation.
 			i := 0
@@ -444,7 +444,7 @@ func (crdt *StringArrayCrdt) applyDownstream(downstreamArgs DownstreamArguments)
 				}
 			}
 			if i == len(typedUpd.Values) { //No position could be replaced, so this is effectively a no-op.
-				return &effectValue
+				return
 			}
 			//Will need to copy as they will be used for the effect.
 			copyData, copyDataTs := make([]string, len(crdt.data)), make([]uint64, len(crdt.data))
@@ -456,7 +456,7 @@ func (crdt *StringArrayCrdt) applyDownstream(downstreamArgs DownstreamArguments)
 					crdt.data[j], crdt.dataTsId[j] = typedUpd.Values[j], typedUpd.TsId
 				}
 			}
-			effectValue = StringArraySetArrayEffect{Values: copyData, TsId: copyDataTs}
+			return StringArraySetArrayEffect{Values: copyData, TsId: copyDataTs}
 		}
 
 	case StringArraySetArrayInitialize: //Only once per CRDT, and before any other update.
@@ -464,13 +464,13 @@ func (crdt *StringArrayCrdt) applyDownstream(downstreamArgs DownstreamArguments)
 
 	case StringArraySetSize:
 		if int(typedUpd) > len(crdt.data) {
-			effectValue = StringArraySetSizeEffect(typedUpd)
+			return StringArraySetSizeEffect(typedUpd)
 		}
 
 	default:
 		fmt.Printf("[StringArrayCrdt]Unsupported downstream type: %T\n", downstreamArgs)
 	}
-	return &effectValue
+	return
 }
 
 func (crdt *StringArrayCrdt) expandArray(newSize int32) {
@@ -513,12 +513,12 @@ func (crdt *StringArrayCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
-func (crdt *StringArrayCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *StringArrayCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	return crdt.applyDownstream(updArgs)
 }
 
-func (crdt *StringArrayCrdt) undoEffect(effect *Effect) {
-	switch typedEffect := (*effect).(type) {
+func (crdt *StringArrayCrdt) undoEffect(effect Effect) {
+	switch typedEffect := (effect).(type) {
 	case StringArraySetValueEffect:
 		crdt.data[typedEffect.Pos], crdt.dataTsId[typedEffect.Pos] = typedEffect.Value, typedEffect.TsId
 	case StringArraySetArrayEffect:
@@ -528,7 +528,7 @@ func (crdt *StringArrayCrdt) undoEffect(effect *Effect) {
 	}
 }
 
-func (crdt *StringArrayCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+func (crdt *StringArrayCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {}
 
 //Protobuf functions
 
@@ -569,7 +569,7 @@ func (crdtState StringArrayState) FromReadResp(protobuf *proto.ApbReadObjectResp
 	return StringArrayState(protobuf.GetStringarray().GetData())
 }
 
-func (crdtState StringArrayState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState StringArrayState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Stringarray{Stringarray: &proto.ApbGetArrayStringResp{Data: crdtState}}}
 }
 
@@ -577,7 +577,7 @@ func (crdtState StringArraySingleState) FromReadResp(protobuf *proto.ApbReadObje
 	return StringArraySingleState(protobuf.GetPartread().GetStringarray().GetValue())
 }
 
-func (crdtState StringArraySingleState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState StringArraySingleState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Stringarray{
 		Stringarray: &proto.ApbStringArrayReadResp{Value: pb.String(string(crdtState))}}}}}
 }
@@ -657,7 +657,7 @@ func (crdt StringArrayCrdt) ToProtoState() (protobuf *proto.ProtoState) {
 	return &proto.ProtoState{State: &proto.ProtoState_StringArray{StringArray: &proto.ProtoStringArrayState{Data: crdt.data, TsId: crdt.dataTsId}}}
 }
 
-func (crdt StringArrayCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
+func (crdt StringArrayCrdt) FromProtoState(proto *proto.ProtoState, ts clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	protoState := proto.GetStringArray()
 	return (&StringArrayCrdt{data: protoState.GetData(), dataTsId: protoState.GetTsId()}).initializeFromSnapshot(ts, replicaID)
 }

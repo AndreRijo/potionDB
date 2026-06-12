@@ -210,7 +210,7 @@ var (
 	defaultTopSSize = 100 //Default number of top positions
 )
 
-func (crdt *TopSumCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *TopSumCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	return crdt.InitializeWithSize(startTs, replicaID, defaultTopSSize)
 }
 
@@ -227,7 +227,7 @@ func (crdt *TopSumCrdt) InitializeWithSize(startTs *clocksi.Timestamp, replicaID
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *TopSumCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *TopSumCrdt) {
+func (crdt *TopSumCrdt) initializeFromSnapshot(startTs clocksi.Timestamp, replicaID uint16) (sameCRDT *TopSumCrdt) {
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
@@ -446,7 +446,7 @@ func (crdt *TopSumCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs Downs
 	}
 	effect, otherDownstreamArgs := crdt.applyDownstream(downstreamArgs)
 	//Necessary for inversibleCrdt
-	crdt.addToHistory(&updTs, &downstreamArgs, effect)
+	crdt.addToHistory(updTs, downstreamArgs, effect)
 	return
 }
 
@@ -752,7 +752,7 @@ func (crdt *TopSumCrdt) applyTopSAddAllDownstreamArgs(op DownstreamTopSAddAll) (
 	return &effectValue, nil
 }
 
-func (crdt *TopSumCrdt) applyTopSSubDownstreamArgs(op DownstreamTopSSub) (effect *Effect) {
+func (crdt *TopSumCrdt) applyTopSSubDownstreamArgs(op DownstreamTopSSub) (effect Effect) {
 	//Note: the score in the operation is always negative (hence why += is used)
 	var effectValue Effect = NoEffect{}
 	//TODO: effects
@@ -852,7 +852,7 @@ func (crdt *TopSumCrdt) applyTopSSubDownstreamArgs(op DownstreamTopSSub) (effect
 	return &effectValue
 }
 
-func (crdt *TopSumCrdt) applyTopSSubAllDownstreamArgs(op DownstreamTopSSubAll) (effect *Effect) {
+func (crdt *TopSumCrdt) applyTopSSubAllDownstreamArgs(op DownstreamTopSSubAll) (effect Effect) {
 	//TODO: Effects
 	var effectValue Effect = NoEffect{}
 	scores := *op.Scores
@@ -1006,12 +1006,12 @@ func (crdt *TopSumCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
-func (crdt *TopSumCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *TopSumCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	effect, _ = crdt.applyDownstream(updArgs)
 	return
 }
 
-func (crdt *TopSumCrdt) undoEffect(effect *Effect) {
+func (crdt *TopSumCrdt) undoEffect(effect Effect) {
 	switch typedEffect := (*effect).(type) {
 	case TopSumAddEffect:
 		crdt.undoAddEffect(&typedEffect)
@@ -1074,7 +1074,7 @@ func (crdt *TopSumCrdt) undoSubReplaceEffect(effect *TopSumSubReplaceEffect) {
 	crdt.smallestScore = &newMin
 }
 
-func (crdt *TopSumCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+func (crdt *TopSumCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {}
 
 // Protobuf function
 func (crdtOp TopSAdd) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -1179,7 +1179,7 @@ func (crdtState TopSValueState) FromReadResp(protobuf *proto.ApbReadObjectResp) 
 }
 
 // Same as for TopK
-func (crdtState TopSValueState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState TopSValueState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	protos := make([]*proto.ApbIntPair, len(crdtState.Scores))
 	for i, score := range crdtState.Scores {
 		protos[i] = &proto.ApbIntPair{PlayerId: pb.Int32(score.Id), Score: pb.Int32(score.Score), Data: *score.Data}
@@ -1290,7 +1290,7 @@ func (crdt *TopSumCrdt) ToProtoState() (protobuf *proto.ProtoState) {
 		Smallest: smallest, MaxElems: pb.Int32(int32(crdt.maxElems))}}
 }
 
-func (crdt *TopSumCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
+func (crdt *TopSumCrdt) FromProtoState(proto *proto.ProtoState, ts clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	topSumProto := proto.GetTopsum()
 	elems, notTop, notProp := make(map[int32]*TopKScore), make(map[int32]*TopKScore), make(map[int32]*TopKScore)
 

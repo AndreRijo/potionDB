@@ -5,9 +5,11 @@ import (
 	"math"
 	"os"
 	"runtime"
+	"sync"
 	"time"
 
 	"potionDB/crdt/clocksi"
+	"potionDB/crdt/proto"
 	"potionDB/potionDB/utilities"
 
 	//pb "github.com/golang/protobuf/proto"
@@ -35,7 +37,12 @@ type GroupOrErr struct {
 }
 
 type RCWork interface {
-	DoWork(replicaID uint16)
+	DoWork(replicaID uint16, buffers RCProtoBuffers)
+}
+
+// Holds re-usable protobuf buffers. Not all implementations of RCWork must support re-usable buffers, but they must include this struct in the DoWork method regardless.
+type RCProtoBuffers struct {
+	RemoteBktTxnProtoBuf *proto.ProtoReplicateTxn
 }
 
 /*type MarshallWork struct {
@@ -63,11 +70,93 @@ type ReplMarshallWork struct {
 	DebugChan chan any          //TODO: Comment.
 }
 
+type ReplMarshalBytePool struct {
+	pools [5]sync.Pool
+}
+
 const (
-	defaultListenerSize = 100
+	defaultListenerSize    = 200
+	MIN_REPL_POOL_BUF_SIZE = 1000
 )
 
 var othersIPList []string
+
+var replMarshalByteBufs = initReplMarshalPool()
+
+func initReplMarshalPool() ReplMarshalBytePool {
+	return ReplMarshalBytePool{pools: [5]sync.Pool{
+		{New: func() any { return []byte{} }},
+		{New: func() any { return []byte{} }},
+		{New: func() any { return []byte{} }},
+		{New: func() any { return []byte{} }},
+		{New: func() any { return []byte{} }}}}
+}
+
+func (p *ReplMarshalBytePool) Get(wantedLen int) []byte {
+	if wantedLen < MIN_REPL_POOL_BUF_SIZE {
+		return make([]byte, wantedLen)
+	}
+	pos := 0                //pos 0: [1KB,10KB[
+	if wantedLen < 100000 { //[10KB,100KB[
+		pos = 1
+	} else if wantedLen < 1000000 { //[100KB,1MB[
+		pos = 2
+	} else if wantedLen < 10000000 { //[1MB,10MB[
+		pos = 3
+	} else if wantedLen < 100000000 { //[10MB,100MB[
+		pos = 4
+	} else { //Buffer too big. Unlikely to be updates, most likely initial data load. Return a new buffer.
+		//fmt.Printf("[RG]Allocating a big buffer (%.3f GB). This is unexpected except for initial data loading replication.\n", float64(wantedLen)/1000000000)
+		return make([]byte, wantedLen)
+	}
+	toReturn := p.pools[pos].Get().([]byte)
+	if cap(toReturn) < wantedLen {
+		return make([]byte, wantedLen, wantedLen+wantedLen/10) //We add a small extra buffer, may be useful for next re-use.
+	}
+	//We can re-use, perfect. Slice it to wanted size.
+	return toReturn[:wantedLen]
+}
+
+func (p *ReplMarshalBytePool) Put(buf []byte) {
+	if cap(buf) < MIN_REPL_POOL_BUF_SIZE { //Throw out, too small to store.
+		return
+	}
+	if cap(buf) < 10000 { //pos 0: [1KB,10KB[
+		p.pools[0].Put(buf)
+	} else if cap(buf) < 100000 { //pos 1: [10KB,100KB[
+		p.pools[1].Put(buf)
+	} else if cap(buf) < 1000000 { //pos 2: [100KB,1MB[
+		p.pools[2].Put(buf)
+	} else if cap(buf) < 10000000 { //pos 3: [1MB,10MB[
+		p.pools[3].Put(buf)
+	} else if cap(buf) < 100000000 { //pos 4: [10MB,100MB[
+		p.pools[4].Put(buf)
+	}
+	//else: Ignore, buffer is too big, unlikely to be updates. Most likely initial data load.
+}
+
+func (p *ReplMarshalBytePool) PutAll(bufs *tools.SliceWithCounter[[]byte]) {
+	var buf []byte
+	for i := 0; i < bufs.Len(); i++ {
+		buf = bufs.Get(i)
+		if cap(buf) < MIN_REPL_POOL_BUF_SIZE { //Throw out, too small to store.
+			continue
+		}
+		if cap(buf) < 10000 { //pos 0: [1KB,10KB[
+			p.pools[0].Put(buf)
+		} else if cap(buf) < 100000 { //pos 1: [10KB,100KB[
+			p.pools[1].Put(buf)
+		} else if cap(buf) < 1000000 { //pos 2: [100KB,1MB[
+			p.pools[2].Put(buf)
+		} else if cap(buf) < 10000000 { //pos 3: [1MB,10MB[
+			p.pools[3].Put(buf)
+		} else if cap(buf) < 100000000 { //pos 4: [10MB,100MB[
+			p.pools[4].Put(buf)
+		}
+		//else: Ignore, buffer is too big, unlikely to be updates. Most likely initial data load.
+	}
+	bufs.Clear()
+}
 
 //docker run -d --hostname RMQ1 --name rabbitmq1 -p 5672:5672 rabbitmq:latest
 
@@ -93,61 +182,6 @@ func CreateRemoteGroupStruct(bucketsToListen []string, replicaID uint16) (group 
 	group.prepareWorkerRoutines()
 	return
 }
-
-/*func CreateRemoteGroupStructOld(bucketsToListen []string, replicaID int16) (group *RemoteGroup, err error) {
-	//myInstanceIP := tools.SharedConfig.GetOrDefault("localRabbitMQAddress", "localhost:5672")
-	//othersIPList := strings.Split(tools.SharedConfig.GetConfig("remoteRabbitMQAddresses"), " ")
-	if len(othersIPList) == 1 && len(othersIPList[0]) < 2 {
-		othersIPList = []string{}
-	}
-	fmt.Println("[RG]Remote conns:", othersIPList, "(size:", len(othersIPList), ")")
-
-	group = &RemoteGroup{conns: make([]*RemoteConn, len(othersIPList)), nReplicas: int16(len(othersIPList)), workChan: make(chan RCWork, 100),
-		groupChan: make(chan ReplicatorMsg, defaultListenerSize*len(othersIPList)), replicaID: replicaID, knownIPs: make(map[string]int16)}
-
-	selfConnChan := make(chan GroupOrErr, 1)
-	fmt.Println(localRabbitMQIP)
-	copy := localRabbitMQIP
-	go connectToIp(copy, -1, bucketsToListen, replicaID, int16(len(othersIPList)), selfConnChan, true, group.workChan)
-
-	openConnsChan := make(chan GroupOrErr, 10)
-	for i, ip := range othersIPList {
-		fmt.Println(i, ip)
-		go connectToIp(ip, i, bucketsToListen, replicaID, int16(i), openConnsChan, false, group.workChan)
-		group.knownIPs[ip] = int16(i)
-	}
-
-	//Wait for self first
-	reply := <-selfConnChan
-	if reply.error != nil {
-		fmt.Printf("[RG]Error while connecting to this replica's RabbitMQ at %s: %v\n", localRabbitMQIP, err)
-		panic("")
-	}
-	group.ourConn = reply.RemoteConn
-	//group.conns[len(othersIPList)] = reply.RemoteConn
-	fmt.Println("[RG]Connected to self RabbitMQ instance at", localRabbitMQIP)
-
-	//Wait for others
-	for i := 0; i < len(othersIPList); i++ {
-		reply := <-openConnsChan
-		if reply.error != nil {
-			fmt.Printf("[RG]Error while connecting to remote RabbitMQ at %s: %v\n", othersIPList[reply.index], err)
-			return nil, err
-		}
-		group.conns[i] = reply.RemoteConn
-		fmt.Println("[RG]Connected to", othersIPList[reply.index])
-	}
-	fmt.Println("[RG]All RabbitMQ connections established. Number of conns (not counting self):", len(group.conns))
-	group.prepareMsgListener()
-	group.prepareWorkerRoutines()
-	return
-}
-
-func connectToIp(ip string, index int, bucketsToListen []string, replicaID int16, connID int16, connChan chan GroupOrErr, isSelfConn bool, workChan chan RCWork) {
-	reply := GroupOrErr{index: index}
-	reply.RemoteConn, reply.error = CreateRemoteConnStruct(ip, bucketsToListen, replicaID, connID, isSelfConn, workChan)
-	connChan <- reply
-}*/
 
 // Adds a replica if it isn't already known - a joining replica might be already known e.g. when two new replicas start at the same time, aware of each other.
 func (group *RemoteGroup) AddReplica(ip string, bucketsToListen []string, joiningReplicaID uint16) (connID uint16) {
@@ -265,32 +299,65 @@ func (group *RemoteGroup) prepareWorkerRoutines() {
 		go group.listenForWork()
 	}*/
 	marshallWorkers := tools.Max(2, tools.Min(20, runtime.NumCPU()/8))
+	clkSize := clocksi.GetSliceTimestampSizeForNEntries(len(group.conns) + 1) //+1 for self
+	fmt.Printf("[RG]Starting %d worker routines for marshalling. Expected replicas (including self): %d. Clk buffer size: %d bytes.\n", marshallWorkers, len(group.conns)+1, clkSize)
 	for i := 0; i < marshallWorkers; i++ {
-		go group.listenForWork()
+		go group.listenForWork(clkSize)
 	}
 }
 
-func (group *RemoteGroup) listenForWork() {
+func (group *RemoteGroup) listenForWork(clkSize int) {
+	//For now, ReplMarshallWork is the only work. Later if we have multiple works, we can define a "buffer struct", that holds the re-usable buffer for each work type.
+	//Then the work itself implements a get method to know how to get the buffer from that struct.
+	//TODO: Maybe I need to cleanup the buffers during GC (not fast GC). But that might be hard given we don't have an individual channel per routine.
+	//Also, for byte buffers in particular, I have to be careful as some buffers will ineviatebly be bigger than others. Maybe have to associate the buffer to the kind of work?
+	//(In theory we should discard buffers from initial data replication but... there'll be only 1-2 updates per CRDT, as it's bulk updates, so the buffers will actually tend to be too small - so it's okay)
 	var work RCWork
+	reusableBufs := RCProtoBuffers{RemoteBktTxnProtoBuf: &proto.ProtoReplicateTxn{SenderID: new(int32), Timestamp: make([]byte, clkSize), TxnID: new(int32)}}
 	for {
 		work = <-group.workChan
-		work.DoWork(group.replicaID)
+		work.DoWork(group.replicaID, reusableBufs)
 	}
 }
 
-func (work ReplMarshallWork) DoWork(replicaID uint16) {
+func (work ReplMarshallWork) DoWork(replicaID uint16, buffers RCProtoBuffers) {
+	//Optimization notes.
+	//Both Marshall and createProtoReplicateTxn are heavy - profiling before createProtoReplicateTxnReuse shows time spent is roughtly 45% createProtoReplicateTxn, 55% marshal.
+	//However, Marshall() is expensive due to the cost of traversing the graph/protobuf. In fact, of 70.93s spend on this marshall:
+	//- 29.55s spent on marshalAppendPointer
+	//- 16.66s spent on checkInitialized (16.43s on checkInitializedPointer)
+	//- 23.23s on sizePointer
+	//- Only ~1.18s on makeSlice
+	//So cost of making the byte buffers is very low. Sadly, it is very complicated to reuse these buffers, as they may be alive for long (until the msg is sent, which is async btw - could be an issue too)
+	//And size of buffers may vary a lot between different txns/buckets. It's just hard to keep track. Sync.pool isn't very useful here.
+	//For now, I optimized createProtoReplicateTxnReuse, by allowing proto.ProtoReplicateTxn to be re-used (partially, inner updates are still generated new), hopefully that will help.
+	//ChatGPT suggests we could compute sizes of the inner protobufs first? Maybe that'll help but I'd need to investigate further.
+	//For now I'm content enough that this cost is mostly paid with paralellized CPU time.
 	start := time.Now().UnixNano()
-	protobuf := createProtoReplicateTxn(replicaID, work.Txn.Clk, work.Txn.Upds, work.Txn.TxnID)
+	//protobuf := createProtoReplicateTxn(replicaID, work.Txn.Clk, work.Txn.Upds, work.Txn.TxnID)
+	//oldSize := buffers.RemoteBktTxnProtoBuf.SizeVT()
+	//buffers.RemoteBktTxnProtoBuf = &proto.ProtoReplicateTxn{SenderID: new(int32), Timestamp: make([]byte, clocksi.GetSliceTimestampSize()), TxnID: new(int32)}
+	createProtoReplicateTxnReuse(replicaID, work.Txn.Clk, work.Txn.Upds, work.Txn.TxnID, buffers.RemoteBktTxnProtoBuf)
 	endProto := time.Now().UnixNano()
-	data, err := pb.Marshal(protobuf)
+	//data, err := pb.Marshal(protobuf)
+	//TODO: Change to VT. Figure out also a way to re-use thede data ([]byte) buffers.
+	size := buffers.RemoteBktTxnProtoBuf.SizeVT()
+	/*if size > 100*1024*1024 {
+		fmt.Printf("[RG][DoWork]Warning: Large ProtoReplicateTxn of size %d bytes, old size (before createProtoReplicateTxnReuse) %d bytes, at time %s.\n", size, oldSize, time.Now().Format("2006-01-02 15:04:05.000"))
+	}*/
+	data := replMarshalByteBufs.Get(size)
+	_, err := buffers.RemoteBktTxnProtoBuf.MarshalToSizedBufferVT(data)
+	//data, err := pb.Marshal(buffers.RemoteBktTxnProtoBuf)
 	endMarshall := time.Now().UnixNano()
 	if err != nil {
 		fmt.Printf("[RC]Error creating ProtoReplicateTxn (error: %v). Timestamp: %s.\n", err,
-			(clocksi.SliceTimestamp{}.FromBytes(protobuf.GetTimestamp())).ToSortedString())
+			(clocksi.SliceTimestamp{}.FromBytes(buffers.RemoteBktTxnProtoBuf.GetTimestamp())).ToSortedString())
 		os.Exit(0)
 	}
-	work.ReplyChan <- PairKeyBytes{Key: work.Bucket, Data: data}
+	work.ReplyChan <- PairKeyBytes{Key: bucketTopicPrefix + work.Bucket, Data: data}
+	//fmt.Printf("[RG][DoWork]Replied to replyChan regarding bkt %s, txnID %d.\n", work.Bucket, work.Txn.TxnID)
 	work.DebugChan <- StatisticsMarshall{protoCreationTime: endProto - start, marshallTime: endMarshall - endProto}
+	//fmt.Printf("[RG][DoWork]Replied to debugChan regarding bkt %s, txnID %d.\n", work.Bucket, work.Txn.TxnID)
 }
 
 /*func (work MarshallWork) DoWork(replicaID uint16) {

@@ -91,7 +91,7 @@ func (args DownstreamDecBCounter) GetCRDTType() proto.CRDTType { return proto.CR
 func (args DownstreamDecBCounter) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 func (args DownstreamDecBCounter) MustReplicate() bool         { return *args.ToReplicate }
 
-func (crdt *BoundedCounterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *BoundedCounterCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	crdt = &BoundedCounterCrdt{
 		permissions: make(map[uint16]int32),
 		decs:        make(map[uint16]int32),
@@ -107,7 +107,7 @@ func (crdt *BoundedCounterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *BoundedCounterCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *BoundedCounterCrdt) {
+func (crdt *BoundedCounterCrdt) initializeFromSnapshot(startTs clocksi.Timestamp, replicaID uint16) (sameCRDT *BoundedCounterCrdt) {
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
@@ -161,11 +161,11 @@ func (crdt *BoundedCounterCrdt) Downstream(updTs clocksi.Timestamp, downstreamAr
 			crdt.Downstream(updTs, upd.(DownstreamArguments))
 		}
 	}
-	crdt.addToHistory(&updTs, &downstreamArgs, crdt.applyDownstream(downstreamArgs))
+	crdt.addToHistory(updTs, downstreamArgs, crdt.applyDownstream(downstreamArgs))
 	return nil
 }
 
-func (crdt *BoundedCounterCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect *Effect) {
+func (crdt *BoundedCounterCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect Effect) {
 	fmt.Printf("[BC][Downstream]Downstream type: %T\n", downstreamArgs)
 	switch opType := downstreamArgs.(type) {
 	case DownstreamIncBCounter:
@@ -184,7 +184,7 @@ func (crdt *BoundedCounterCrdt) applyDownstream(downstreamArgs DownstreamArgumen
 }
 
 // Pre: op.Change >= 0.
-func (crdt *BoundedCounterCrdt) increment(op DownstreamIncBCounter) (effect *Effect) {
+func (crdt *BoundedCounterCrdt) increment(op DownstreamIncBCounter) (effect Effect) {
 	crdt.permissions[op.ReplicaID] += op.Change
 	crdt.value += op.Change
 	//TODO: Effects
@@ -192,7 +192,7 @@ func (crdt *BoundedCounterCrdt) increment(op DownstreamIncBCounter) (effect *Eff
 }
 
 // Pre: op.Change <= 0
-func (crdt *BoundedCounterCrdt) decrement(op DownstreamDecBCounter) (effect *Effect) {
+func (crdt *BoundedCounterCrdt) decrement(op DownstreamDecBCounter) (effect Effect) {
 	if op.Change > crdt.permissions[op.ReplicaID] {
 		*op.ToReplicate = false
 	} else {
@@ -203,7 +203,7 @@ func (crdt *BoundedCounterCrdt) decrement(op DownstreamDecBCounter) (effect *Eff
 	return nil
 }
 
-func (crdt *BoundedCounterCrdt) counterInitOp(op SetCounterBound) (effect *Effect) {
+func (crdt *BoundedCounterCrdt) counterInitOp(op SetCounterBound) (effect Effect) {
 	fmt.Println("[BC][InitOp]Start")
 	crdt.limit = op.Bound
 	crdt.value = op.InitialValue
@@ -224,7 +224,7 @@ func (crdt *BoundedCounterCrdt) counterInitOp(op SetCounterBound) (effect *Effec
 }
 
 // TODO: Em vez de recusar o pedido, simplesmente transferir menos permissoes.
-func (crdt *BoundedCounterCrdt) transfer(op TransferCounter) (effect *Effect) {
+func (crdt *BoundedCounterCrdt) transfer(op TransferCounter) (effect Effect) {
 	if op.FromID == shared.ReplicaID && op.ToTransfer > crdt.permissions[op.FromID]/2 { //If the transfer comes from ourselves, ensure enough permissions will be left
 		*op.ToReplicate = false
 	} else {
@@ -274,15 +274,15 @@ func (crdt *BoundedCounterCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp)
 	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
-func (crdt *BoundedCounterCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *BoundedCounterCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	return crdt.applyDownstream(updArgs)
 }
 
-func (crdt *BoundedCounterCrdt) undoEffect(effect *Effect) {
+func (crdt *BoundedCounterCrdt) undoEffect(effect Effect) {
 	//TODO
 }
 
-func (crdt *BoundedCounterCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+func (crdt *BoundedCounterCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {}
 
 // Protobuf functions
 func (crdtOp SetCounterBound) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -362,7 +362,7 @@ func (crdt *BoundedCounterCrdt) ToProtoState() (protobuf *proto.ProtoState) {
 	}}}
 }
 
-func (crdt *BoundedCounterCrdt) FromProtoState(protobuf *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
+func (crdt *BoundedCounterCrdt) FromProtoState(protobuf *proto.ProtoState, ts clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	pbCounter := protobuf.GetBcounter()
 	perms, decs, permsPb, decsPb := make(map[uint16]int32), make(map[uint16]int32), pbCounter.GetPermissions(), pbCounter.GetDecs()
 	for key, value := range permsPb {

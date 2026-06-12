@@ -91,7 +91,7 @@ func (args RegisterState) ToFloat64() (value float64) {
 }
 
 // Note: crdt can (and most often will be) nil
-func (crdt *LwwRegisterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *LwwRegisterCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	//crdt = &LwwRegisterCrdt{value: "", ts: 0, replicaID: replicaID, localReplicaID: replicaID}
 	crdt = &LwwRegisterCrdt{value: "", tsId: 0}
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
@@ -99,7 +99,7 @@ func (crdt *LwwRegisterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID ui
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *LwwRegisterCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *LwwRegisterCrdt) {
+func (crdt *LwwRegisterCrdt) initializeFromSnapshot(startTs clocksi.Timestamp, replicaID uint16) (sameCRDT *LwwRegisterCrdt) {
 	//crdt.CRDTVM, crdt.localReplicaID = (&genericInversibleCRDT{}).initialize(crdt), replicaID
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
@@ -137,24 +137,23 @@ func (crdt *LwwRegisterCrdt) Update(args UpdateArguments) (downStreamArgs Downst
 }
 
 func (crdt *LwwRegisterCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs DownstreamArguments) (otherDownstreamArgs DownstreamArguments) {
-	crdt.addToHistory(&updTs, &downstreamArgs, crdt.applyDownstream(downstreamArgs))
+	crdt.addToHistory(updTs, downstreamArgs, crdt.applyDownstream(downstreamArgs))
 	return nil
 }
 
-func (crdt *LwwRegisterCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect *Effect) {
+func (crdt *LwwRegisterCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect Effect) {
 	setValue := downstreamArgs.(DownstreamSetValue)
-	var effectValue Effect
 	/*if setValue.Ts > crdt.ts || (setValue.Ts == crdt.ts && setValue.ReplicaID >= crdt.replicaID) {
 		effectValue = SetValueEffect{Ts: crdt.ts, NewValue: crdt.value, ReplicaID: crdt.replicaID}
 		crdt.ts, crdt.replicaID, crdt.value = setValue.Ts, setValue.ReplicaID, setValue.NewValue
 	} */
 	if setValue.TsId > crdt.tsId { //This already handles replicaID in case of equal ts.
-		effectValue = SetValueEffect{TsId: crdt.tsId, NewValue: crdt.value}
+		effect = SetValueEffect{TsId: crdt.tsId, NewValue: crdt.value}
 		crdt.tsId, crdt.value = setValue.TsId, setValue.NewValue
 	} else {
-		effectValue = NoEffect{}
+		effect = NoEffect{}
 	}
-	return &effectValue
+	return
 }
 
 func (crdt *LwwRegisterCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err error) {
@@ -178,20 +177,20 @@ func (crdt *LwwRegisterCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
-func (crdt *LwwRegisterCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *LwwRegisterCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	return crdt.applyDownstream(updArgs)
 }
 
-func (crdt *LwwRegisterCrdt) undoEffect(effect *Effect) {
+func (crdt *LwwRegisterCrdt) undoEffect(effect Effect) {
 	//Ignore if it is noEffect
-	switch typedEffect := (*effect).(type) {
+	switch typedEffect := (effect).(type) {
 	case SetValueEffect:
 		//crdt.value, crdt.ts, crdt.replicaID = typedEffect.NewValue, typedEffect.Ts, typedEffect.ReplicaID
 		crdt.value, crdt.tsId = typedEffect.NewValue, typedEffect.TsId
 	}
 }
 
-func (crdt *LwwRegisterCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+func (crdt *LwwRegisterCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {}
 
 //Protobuf functions
 
@@ -215,7 +214,7 @@ func (crdtState RegisterState) FromReadResp(protobuf *proto.ApbReadObjectResp) (
 	return crdtState
 }
 
-func (crdtState RegisterState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState RegisterState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Reg{Reg: &proto.ApbGetRegResp{Value: []byte((crdtState.Value).(string))}}}
 }
 
@@ -245,7 +244,7 @@ func (crdt *LwwRegisterCrdt) ToProtoState() (protobuf *proto.ProtoState) {
 	return &proto.ProtoState{State: &proto.ProtoState_Lwwreg{Lwwreg: &proto.ProtoLWWRegState{Value: []byte((crdt.value).(string)), TsId: pb.Uint64(uint64(crdt.tsId))}}}
 }
 
-func (crdt *LwwRegisterCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
+func (crdt *LwwRegisterCrdt) FromProtoState(proto *proto.ProtoState, ts clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	lwwRegProto := proto.GetLwwreg()
 	/*return (&LwwRegisterCrdt{value: string(lwwRegProto.GetValue()), ts: lwwRegProto.GetTs(),
 	replicaID: int16(lwwRegProto.GetReplicaID()), localReplicaID: crdt.replicaID}).initializeFromSnapshot(ts, replicaID)*/

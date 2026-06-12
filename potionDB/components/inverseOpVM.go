@@ -53,7 +53,7 @@ func (vm *InverseOpVM) Downstream(updTs clocksi.Timestamp, downstreamArgs crdt.D
 	return vm.CRDT.Downstream(updTs, downstreamArgs)
 }
 
-func (vm *InverseOpVM) GC(safeClk clocksi.Timestamp, safeClkKey clocksi.TimestampKey) {
+func (vm *InverseOpVM) GC(safeClk clocksi.Timestamp, safeClkKey clocksi.TimestampKey, fastGC bool) {
 	if !vm.updatedSinceGC {
 		return
 	}
@@ -78,7 +78,7 @@ func (vm *InverseOpVM) GC(safeClk clocksi.Timestamp, safeClkKey clocksi.Timestam
 		//Do not set updatedSinceGC to false as there is still past versions to be cleaned by a future GC.
 		//Do not delete highestSafe - This contains the version that is correct at the time of safeClk
 	}
-	vm.CRDT.(crdt.CRDTVM).GC(safeClk)
+	vm.CRDT.(crdt.CRDTVM).GC(safeClk, fastGC)
 }
 
 //PRIVATE METHODS

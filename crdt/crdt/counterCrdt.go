@@ -56,14 +56,14 @@ func (args CounterState) GetAggregateResult(aggrType AggregateType, aggrKey stri
 }
 
 // Note: crdt can (and most often will be) nil
-func (crdt *CounterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *CounterCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	crdt = &CounterCrdt{value: 0}
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *CounterCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *CounterCrdt) {
+func (crdt *CounterCrdt) initializeFromSnapshot(startTs clocksi.Timestamp, replicaID uint16) (sameCRDT *CounterCrdt) {
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
@@ -115,20 +115,19 @@ func (crdt *CounterCrdt) Update(args UpdateArguments) (downstreamArgs Downstream
 func (crdt *CounterCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs DownstreamArguments) (otherDownstreamArgs DownstreamArguments) {
 	effect := crdt.applyDownstream(downstreamArgs)
 	//Necessary for inversibleCrdt
-	crdt.addToHistory(&updTs, &downstreamArgs, effect)
+	crdt.addToHistory(updTs, downstreamArgs, effect)
 
 	return nil
 }
 
-func (crdt *CounterCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect *Effect) {
-	var effectValue Effect
+func (crdt *CounterCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect Effect) {
 	switch incOrDec := downstreamArgs.(type) {
 	case Increment:
 		crdt.value += incOrDec.Change
-		effectValue = IncrementEffect{Change: incOrDec.Change}
+		effect = IncrementEffect{Change: incOrDec.Change}
 	case Decrement:
 		crdt.value -= incOrDec.Change
-		effectValue = DecrementEffect{Change: incOrDec.Change}
+		effect = DecrementEffect{Change: incOrDec.Change}
 	case MultiUpd:
 		totalDiff := int32(0)
 		for _, innerUpd := range incOrDec {
@@ -140,11 +139,11 @@ func (crdt *CounterCrdt) applyDownstream(downstreamArgs DownstreamArguments) (ef
 			}
 		}
 		crdt.value += int32(totalDiff)
-		effectValue = IncrementEffect{Change: totalDiff}
+		effect = IncrementEffect{Change: totalDiff}
 	default:
 		fmt.Printf("[CounterCrdt][Downstream]Unsupported downstream type: %v (%T)\n", downstreamArgs, downstreamArgs)
 	}
-	return &effectValue
+	return
 }
 
 func (crdt *CounterCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err error) {
@@ -164,12 +163,12 @@ func (crdt *CounterCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
-func (crdt *CounterCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *CounterCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	return crdt.applyDownstream(updArgs)
 }
 
-func (crdt *CounterCrdt) undoEffect(effect *Effect) {
-	switch typedEffect := (*effect).(type) {
+func (crdt *CounterCrdt) undoEffect(effect Effect) {
+	switch typedEffect := (effect).(type) {
 	case IncrementEffect:
 		crdt.value -= typedEffect.Change
 	case DecrementEffect:
@@ -177,7 +176,7 @@ func (crdt *CounterCrdt) undoEffect(effect *Effect) {
 	}
 }
 
-func (crdt *CounterCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+func (crdt *CounterCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {}
 
 //Protobuf functions
 
@@ -205,7 +204,7 @@ func (crdtState CounterState) FromReadResp(protobuf *proto.ApbReadObjectResp) (s
 	return crdtState
 }
 
-func (crdtState CounterState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState CounterState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Counter{Counter: &proto.ApbGetCounterResp{Value: pb.Int32(int32(crdtState))}}}
 	//return &proto.ApbReadObjectResp{Counter: &proto.ApbGetCounterResp{Value: pb.Int32(crdtState.Value)}}
 }
@@ -233,7 +232,7 @@ func (crdt *CounterCrdt) ToProtoState() (protobuf *proto.ProtoState) {
 	return &proto.ProtoState{State: &proto.ProtoState_Counter{Counter: &proto.ProtoCounterState{Value: &value}}}
 }
 
-func (crdt *CounterCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
+func (crdt *CounterCrdt) FromProtoState(proto *proto.ProtoState, ts clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	return (&CounterCrdt{value: proto.GetCounter().GetValue()}).initializeFromSnapshot(ts, replicaID)
 }
 

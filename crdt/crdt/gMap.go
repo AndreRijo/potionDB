@@ -47,7 +47,7 @@ func (args DownstreamGMapAddAll) GetDATAType() proto.DATAType { return proto.DAT
 func (args DownstreamGMapAddAll) MustReplicate() bool { return true }
 
 // Note: crdt can (and most often will be) nil
-func (crdt *GMapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *GMapCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	crdt = &GMapCrdt{values: make(map[string]Element), ts: 0, replicaID: replicaID, localReplicaID: replicaID}
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
@@ -202,12 +202,12 @@ func (crdt *GMapCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs Downstr
 	}
 	effect := crdt.applyDownstream(downstreamArgs)
 	//Necessary for inversibleCrdt
-	crdt.addToHistory(&updTs, &downstreamArgs, effect)
+	crdt.addToHistory(updTs, downstreamArgs, effect)
 
 	return nil
 }
 
-func (crdt *GMapCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect *Effect) {
+func (crdt *GMapCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect Effect) {
 	/*
 		switch opType := downstreamArgs.(type) {
 		case DownstreamGMapAddAll:
@@ -223,7 +223,7 @@ func (crdt *GMapCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effec
 }
 
 /*
-	func (crdt *GMapCrdt) applyAddAll(toAdd map[Element]Unique) (effect *Effect) {
+	func (crdt *GMapCrdt) applyAddAll(toAdd map[Element]Unique) (effect Effect) {
 		for key, newUnique := range toAdd {
 			//Checks if the key is already in the map. If it is, adds a unique
 			if existingUniques, ok := crdt.elems[key]; ok {
@@ -264,11 +264,11 @@ func (crdt *GMapCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
-func (crdt *GMapCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *GMapCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	return crdt.applyDownstream(updArgs)
 }
 
-func (crdt *GMapCrdt) undoEffect(effect *Effect) {
+func (crdt *GMapCrdt) undoEffect(effect Effect) {
 	/*
 		switch typedEffect := (*effect).(type) {
 		case AddAllEffect:
@@ -292,6 +292,6 @@ func (crdt *GMapCrdt) undoAddAllEffect(effect *AddAllEffect) {
 }
 */
 
-func (crdt *GMapCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+func (crdt *GMapCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {}
 
 func (crdt *GMapCrdt) GetCRDT() CRDT { return crdt }

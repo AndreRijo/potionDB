@@ -54,6 +54,10 @@ type LogBufferReturnArgs struct {
 	Buf []PairClockUpdates
 }
 
+// Note: This GC is never a "fastGC", i.e., it is when PotionDB is in an idle state.
+// Note2: Currently this is a no-op, as logger never has data to clean (it is automatically clean whenever replication happens.)
+type LogGCArgs struct{}
+
 type StableClkUpdatesPair struct {
 	upds        []PairClockUpdates
 	stableClock clocksi.Timestamp
@@ -74,6 +78,7 @@ const (
 	ClkLogRequest        LogRequestType = 2
 	LogClkTimeoutRequest LogRequestType = 3
 	ReturnBufLogRequest  LogRequestType = 4
+	GCLogRequest         LogRequestType = 5
 )
 
 func (args LogCommitArgs) GetRequestType() (requestType LogRequestType) {
@@ -96,10 +101,15 @@ func (args LogBufferReturnArgs) GetRequestType() (requestType LogRequestType) {
 	return ReturnBufLogRequest
 }
 
+func (args LogGCArgs) GetRequestType() (requestType LogRequestType) {
+	return GCLogRequest
+}
+
 /*****In-Memory Logger implementation*****/
 
 type MemLogger struct {
-	started bool
+	started      bool
+	gcOnNextRepl bool //If last GC request was before Replicator asked for our latest operations, we postpone the GC until Replicator asks for the next operations.
 	//log           []PairClockUpdates //TODO: Should use SliceWithCounter.
 	//nextLogBuf    []PairClockUpdates //Idea: we recycle log buffers to avoid allocation/GC overload. This variable keeps a log buffer returned from Replicator that is safe to be re-used.
 	log        tools.SliceWithCounter[PairClockUpdates]
@@ -170,6 +180,8 @@ func (logger *MemLogger) handleRequests() {
 			logger.handleClkTimeoutRequest()
 		case ReturnBufLogRequest:
 			logger.handleBufferReturnRequest(req.LogRequestArgs.(LogBufferReturnArgs))
+		case GCLogRequest:
+			logger.gc()
 		default:
 			fmt.Printf("[LOG%d]Unexpected request: %+v\n", logger.partId, req)
 		}
@@ -181,6 +193,9 @@ func (logger *MemLogger) handleCommitLogRequest(request LogCommitArgs) {
 		return
 	}
 	//fmt.Printf("[LOG%d]Appending txn to log with clk %s and %d upds.\n", logger.partId, request.TxnClk.ToString(), len(request.Upds))
+	if logger.log.Len() < logger.log.Cap() && logger.log.Get(logger.log.Len()).upds != nil {
+		panic(fmt.Sprintf("[LOG%d]Unexpectedly trying to write in a log position that is not empty! Len: %d. Cap: %d.\n", logger.partId, logger.log.Len(), logger.log.Cap()))
+	}
 	logger.log.Append(PairClockUpdates{clk: request.TxnClk, upds: request.Upds})
 	/*if logger.currentTxnPos == cap(logger.log) {
 		logger.log = append(logger.log, PairClockUpdates{clk: request.TxnClk, upds: request.Upds})
@@ -242,6 +257,7 @@ func (logger *MemLogger) handleClkTimeoutRequest() {
 		return //If the former, we already received the reply from MAT and replied to Repl. If the later, we have to keep waiting for MAT :( (as there are no txns, so we need mat to give us a clk to know what's safe))
 	}
 
+	fmt.Printf("[LOG%d]WARNING - got a mat safe clk timeout, using last clk in log. Clk in log: %v.\n", logger.partId, logger.log.Get(logger.log.Len()-1).clk.ToString())
 	logger.replyReplHelper(logger.log.Get(logger.log.Len() - 1).clk.Copy())
 
 	/*txns := logger.log[logger.lastSharedPos:logger.currentTxnPos]
@@ -255,14 +271,31 @@ func (logger *MemLogger) handleClkTimeoutRequest() {
 
 func (logger *MemLogger) replyReplHelper(stableClk clocksi.Timestamp) {
 	txns := logger.log.ToSlice()
+	//TODO: Remove this.
+	prevTs := int64(0)
+	var prevClk clocksi.Timestamp
+	ourReplicaID := shared.SortedReplicaID
+	for i, txn := range txns {
+		if txn.clk.GetPos(ourReplicaID) < prevTs {
+			panic(fmt.Sprintf("[LOG%d]Txns in log are not ordered according to local ts! Txn %d has ts %d, while previous ts is %d. Current clk, prev clk: %s, %s. Current time: %v.\n",
+				logger.partId, i, txn.clk.GetPos(ourReplicaID), prevTs, txn.clk.ToString(), prevClk.ToString(), time.Now().Format("15:04:05.000")))
+		}
+		prevTs, prevClk = txn.clk.GetPos(ourReplicaID), txn.clk
+	}
+
 	//fmt.Printf("[LOG%d]Replying to repl with stable clock %s and %d txns.\n", logger.partId, stableClk.ToString(), len(txns))
-	logger.replReplyChan <- StableClkUpdatesPair{stableClock: stableClk, upds: txns, partID: logger.partId}
-	logger.replReplyChan = nil
-	if logger.nextLogBuf.Cap() > 0 { //We can re-use this buffer
-		logger.log = logger.nextLogBuf
-		logger.nextLogBuf = tools.SliceWithCounter[PairClockUpdates]{}
+	if len(txns) == 0 {
+		logger.replReplyChan <- StableClkUpdatesPair{stableClock: stableClk, upds: nil, partID: logger.partId}
+		logger.replReplyChan = nil
 	} else {
-		logger.log = tools.NewSliceWithCounter[PairClockUpdates](tools.Max(len(txns), initLogCapacity))
+		logger.replReplyChan <- StableClkUpdatesPair{stableClock: stableClk, upds: txns, partID: logger.partId}
+		logger.replReplyChan = nil
+		if logger.nextLogBuf.Cap() > 0 { //We can re-use this buffer
+			logger.log = logger.nextLogBuf
+			logger.nextLogBuf = tools.SliceWithCounter[PairClockUpdates]{}
+		} else {
+			logger.log = tools.NewSliceWithCounter[PairClockUpdates](tools.Max(len(txns), initLogCapacity))
+		}
 	}
 }
 
@@ -280,21 +313,25 @@ func (logger *MemLogger) matTimeoutHelper() {
 
 func (logger *MemLogger) handleBufferReturnRequest(request LogBufferReturnArgs) {
 	if logger.nextLogBuf.Cap() > cap(request.Buf) { //In case we already have a buffer, we keep the longest one.
-		logger.nextLogBuf = tools.ToSliceWithCounter(request.Buf[:cap(request.Buf)]) //Unlock full capacity.
+		logger.nextLogBuf = tools.ToSliceWithCounter(request.Buf[:0]) //Idea: set the len to 0 (so re-use the full buffer). Internally, ToSliceWithCounter will use the full capacity of request.Buf
 	} //else: just ignore. Later GC will get rid of it.
 }
 
+// Logger's GC is requested by the Replicator, when it is idle. If PotionDB stays idle, no further GCs will be requested.
+func (logger *MemLogger) gc() {
+	//With the current working of MemLogger, no GC is ever needed, as log never holds unecessary data:
+	//- nextLogBufs are always deeply cleaned by the Replicator before being sent to the Logger, thus they are always clean;
+	//- after replicating, log is always empty. If it isn't empty, it means PotionDB became active again, so we don't want to clean log anyway.
+}
+
 // NOTE: THIS IS TEMPORARY. THIS WILL LEAD TO TROUBLE, AS IT MAY REMOVE ENTRIES THAT REPL MAY STILL REQUEST OR IS STILL USING.
-func (logger *MemLogger) forceClean() {
+/*func (logger *MemLogger) forceClean() {
 	for {
 		time.Sleep(140 * time.Second)
-		/*for i := range logger.log {
-			logger.log[i] = PairClockUpdates{}
-		}*/
 		logger.log.DeepClear()
 		fmt.Printf("[LOG %d]Forced log clear.\n", logger.partId)
 	}
-}
+}*/
 
 /*
 func (logger *MemLogger) handleTxnLogRequest(request LogTxnArgs) {

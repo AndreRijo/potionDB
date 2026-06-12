@@ -14,12 +14,6 @@ type CounterFloatCrdt struct {
 	CRDTVM
 	value float64
 }
-
-/*
-	type CounterFloatState struct {
-		Value float64
-	}
-*/
 type CounterFloatState float64
 
 type IncrementFloat struct {
@@ -55,14 +49,14 @@ func (args CounterFloatState) GetAggregateResult(aggrType AggregateType, aggrKey
 }
 
 // Note: crdt can (and most often will be) nil
-func (crdt *CounterFloatCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *CounterFloatCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	crdt = &CounterFloatCrdt{value: 0}
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *CounterFloatCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *CounterFloatCrdt) {
+func (crdt *CounterFloatCrdt) initializeFromSnapshot(startTs clocksi.Timestamp, replicaID uint16) (sameCRDT *CounterFloatCrdt) {
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
@@ -112,20 +106,19 @@ func (crdt *CounterFloatCrdt) Update(args UpdateArguments) (downstreamArgs Downs
 func (crdt *CounterFloatCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs DownstreamArguments) (otherDownstreamArgs DownstreamArguments) {
 	effect := crdt.applyDownstream(downstreamArgs)
 	//Necessary for inversibleCrdt
-	crdt.addToHistory(&updTs, &downstreamArgs, effect)
+	crdt.addToHistory(updTs, downstreamArgs, effect)
 
 	return nil
 }
 
-func (crdt *CounterFloatCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect *Effect) {
-	var effectValue Effect
+func (crdt *CounterFloatCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect Effect) {
 	switch incOrDec := downstreamArgs.(type) {
 	case IncrementFloat:
 		crdt.value += incOrDec.Change
-		effectValue = IncrementFloatEffect{Change: incOrDec.Change}
+		effect = IncrementFloatEffect{Change: incOrDec.Change}
 	case DecrementFloat:
 		crdt.value -= incOrDec.Change
-		effectValue = DecrementFloatEffect{Change: incOrDec.Change}
+		effect = DecrementFloatEffect{Change: incOrDec.Change}
 	case MultiUpd:
 		totalDiff := 0.0
 		for _, singleOp := range incOrDec {
@@ -137,11 +130,11 @@ func (crdt *CounterFloatCrdt) applyDownstream(downstreamArgs DownstreamArguments
 			}
 		}
 		crdt.value += totalDiff
-		effectValue = IncrementFloatEffect{Change: totalDiff}
+		effect = IncrementFloatEffect{Change: totalDiff}
 	default:
 		fmt.Printf("[CounterFloat][Downstream]Unsupported downstream type: %v (%T)\n", downstreamArgs, downstreamArgs)
 	}
-	return &effectValue
+	return
 }
 
 func (crdt *CounterFloatCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err error) {
@@ -161,12 +154,12 @@ func (crdt *CounterFloatCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
-func (crdt *CounterFloatCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *CounterFloatCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	return crdt.applyDownstream(updArgs)
 }
 
-func (crdt *CounterFloatCrdt) undoEffect(effect *Effect) {
-	switch typedEffect := (*effect).(type) {
+func (crdt *CounterFloatCrdt) undoEffect(effect Effect) {
+	switch typedEffect := (effect).(type) {
 	case IncrementFloatEffect:
 		crdt.value -= typedEffect.Change
 	case DecrementFloatEffect:
@@ -174,7 +167,7 @@ func (crdt *CounterFloatCrdt) undoEffect(effect *Effect) {
 	}
 }
 
-func (crdt *CounterFloatCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+func (crdt *CounterFloatCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {}
 
 //Protobuf functions
 
@@ -202,7 +195,7 @@ func (crdtState CounterFloatState) FromReadResp(protobuf *proto.ApbReadObjectRes
 	return crdtState
 }
 
-func (crdtState CounterFloatState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState CounterFloatState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Counterfloat{Counterfloat: &proto.ApbGetCounterFloatResp{Value: pb.Float64(float64(crdtState))}}}
 	//return &proto.ApbReadObjectResp{Counterfloat: &proto.ApbGetCounterFloatResp{Value: pb.Float64(crdtState.Value)}}
 }
@@ -230,7 +223,7 @@ func (crdt *CounterFloatCrdt) ToProtoState() (protobuf *proto.ProtoState) {
 	return &proto.ProtoState{State: &proto.ProtoState_Counterfloat{Counterfloat: &proto.ProtoCounterFloatState{Value: &value}}}
 }
 
-func (crdt *CounterFloatCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
+func (crdt *CounterFloatCrdt) FromProtoState(proto *proto.ProtoState, ts clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	return (&CounterFloatCrdt{value: proto.GetCounterfloat().GetValue()}).initializeFromSnapshot(ts, replicaID)
 }
 

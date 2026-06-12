@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"potionDB/crdt/crdt"
@@ -34,16 +35,19 @@ const (
 )
 
 var (
-	data        *tpch.TpchData
-	dp          DataloadParameters
-	regionFuncs [8]func([]string) int8
-	updChan     chan crdt.UpdateObjectParams
-	iCfg        tpch.IndexConfigs
-	ic          InternalClient //Used by SF=1.
-	startTime   int64
-	cleanChan   chan int
-	gcChan      chan int
-	icChans     []chan crdt.UpdateObjectParams
+	data           *tpch.TpchData
+	dp             DataloadParameters
+	regionFuncs    [8]func([]string) int8
+	updChan        chan crdt.UpdateObjectParams
+	iCfg           tpch.IndexConfigs
+	ic             InternalClient //Used by SF=1.
+	startTime      int64
+	cleanChan      chan int
+	gcChan         chan int
+	icChans        []chan crdt.UpdateObjectParams
+	rdyToSendIndex chan struct{} //Used for the index routine to know when TM is ready to receive requests.
+
+	doesIndexLoad atomic.Bool
 )
 
 /*
@@ -56,12 +60,31 @@ Maybe can just do this "easily" with go mod? Make the repository public so that 
 
 //TODO: CRDT_PER_OBJ option
 
+// Entry point.
 func LoadData(dataP DataloadParameters) {
+	rdyToSendIndex = make(chan struct{}, 1)
 	start := time.Now()
 	startTime = start.UnixNano() / 1000000
 	shared.TmpHistoryDisable = true
 	fmt.Println("[TPCH-DL]Start time of dataload: ", start.Format("2006-01-02 15:04:05.000"))
+	checkDoesIndexLoad(dataP)
 	LoadBaseData(dataP)
+}
+
+func checkDoesIndexLoad(dataP DataloadParameters) {
+	//If global, then indexload is only done on the region 0 server.
+	if !dataP.IndexConfigs.DoesIndexLoad || len(dataP.QueryNumbers) == 0 || (dataP.IndexConfigs.IsGlobal && dataP.Region > 0) {
+		if !dataP.IndexConfigs.DoesIndexLoad {
+			fmt.Printf("[TPCH-DL]Not doing index load as --doIndexload is set to false.\n")
+		} else if len(dataP.QueryNumbers) == 0 {
+			fmt.Printf("[TPCH-DL]Will not do index load, as query numbers is not set.\n")
+		} else {
+			fmt.Printf("[TPCH-DL]Will not do index load, as PotionDB is in global mode and the region is not 0 (region: %d).\n", dataP.Region)
+		}
+		doesIndexLoad.Store(false)
+	} else {
+		doesIndexLoad.Store(true)
+	}
 }
 
 func initCleaning() {
@@ -70,7 +93,7 @@ func initCleaning() {
 }
 
 func LoadBaseData(dataP DataloadParameters) {
-	data, dp = &tpch.TpchData{TpchConfigs: tpch.TpchConfigs{Sf: dataP.Sf, DataLoc: dataP.DataLoc, IsSingleServer: false}, Tables: &tpch.Tables{NOrders: int(float64(tpch.TableEntries[tpch.ORDERS]) * dp.Sf)}}, dataP
+	data, dp = &tpch.TpchData{TpchConfigs: tpch.TpchConfigs{Sf: dataP.Sf, DataLoc: dataP.DataLoc, IsSingleServer: false}, Tables: &tpch.Tables{NOrders: int(float64(tpch.TableEntries[tpch.ORDERS]) * dataP.Sf)}}, dataP
 	//Part and lineitem are nil
 	regionFuncs = [8]func([]string) int8{data.Tables.CustSliceToRegion, nil, data.Tables.NationSliceToRegion, data.Tables.OrdersSliceToRegion, nil,
 		data.Tables.PartSuppSliceToRegion, data.Tables.RegionSliceToRegion, data.Tables.SupplierSliceToRegion}
@@ -90,7 +113,7 @@ func LoadBaseData(dataP DataloadParameters) {
 }
 
 func LoadIndexData() {
-	if dp.IndexConfigs.IsGlobal && dp.Region > 0 {
+	if !doesIndexLoad.Load() {
 		//Do not do index loading
 		return
 	}
@@ -106,18 +129,24 @@ func LoadIndexData() {
 		len(data.Tables.Regions), len(data.Tables.Nations), len(data.Tables.Suppliers), len(data.Tables.Customers), len(data.Tables.Parts), len(data.Tables.PartSupps), len(data.Tables.Orders), len(data.Tables.LineItems))
 	tpch.InitializeIndexInfo(iCfg, data.Tables)
 	fmt.Printf("[TpchIndex]Finished initializing index info @ LoadIndexData. IsGlobal: %v.\n", dp.IndexConfigs.IsGlobal)
-	if dp.IndexConfigs.IsGlobal {
-		go SendIndexData()
-	} else {
-		go SendLocalIndexData()
-	}
-	tpch.PrepareIndexes() //TODO: Uncomment.
+	go StartIndexDataSender()
+	tpch.PrepareIndexes()
 	fmt.Printf("[TPCH-DL]Finished loading and preparing index. My Region: %d. Current time: %v.\n", dp.Region, time.Now().Format("2006-01-02 15:04:05.000"))
 }
 
+// Awaits until TM is ready before starting SendIndexData() or SendLocalIndexData().
+func StartIndexDataSender() {
+	<-rdyToSendIndex
+	if dp.IndexConfigs.IsGlobal {
+		SendIndexData()
+	} else {
+		SendLocalIndexData()
+	}
+}
+
 func SendIndexData() {
-	if dp.IndexConfigs.IsGlobal && dp.Region > 0 {
-		fmt.Printf("[TPCH-DL]SendIndexData - not doing index loading (isGlobal: %v, region: %d)\n", dp.IndexConfigs.IsGlobal, dp.Region)
+	if !doesIndexLoad.Load() {
+		fmt.Printf("[TPCH-DL]SendIndexData - not doing index loading (doesIndexLoad: %v)\n", doesIndexLoad.Load())
 		//Do not do index loading
 		return
 	}
@@ -131,7 +160,7 @@ func SendIndexData() {
 		if len(iCfg.GlobalUpdsChan) == len(iCfg.QueryNumbers)-i { //All updates are prepared. Ask to clean metadata early.
 			fmt.Printf("[TPCH-DL]All protobufs have been prepared, but still need to send to TM %d out of %d queries data. Cleaning metadata regardless at %s.\n", len(iCfg.QueryNumbers)-i, len(iCfg.QueryNumbers), time.Now().Format("2006-01-02 15:04:05.000"))
 			requestedDataClean = true
-			go data.CleanAll()
+			data.CleanAll()
 		}
 		/*fmt.Println("[TPCH-DL]Sent protobuf to TM for query index Q", i)
 		fmt.Println("[TPCH-DL]Index configs")
@@ -152,17 +181,37 @@ func SendIndexData() {
 		fmt.Printf("[TPCH-DL]All index updates sent (and applied) by TM. Requesting metadata cleaning now.\n")
 		data.CleanAll()
 	}
-	shared.TmpHistoryDisable = false
 	fmt.Println("[TPCH-DL]Time at which all index updates were applied: ", time.Now().Format("2006-01-02 15:04:05.000"))
+	Finalize()
+}
+
+// Handles the following:
+// Re-enable history setting in PotionDB
+// Disable replicator fast data load mode.
+// Call GC and reset GC behaviour.
+func Finalize() {
+	dp.Tm.gc.StartGCTimer()
 	fmt.Printf("[TPCH-DL]Forcing GC call as all updates have been applied, at %s.\n", time.Now().Format("2006-01-02 15:04:05.000"))
 	runtime.GC()
-	fmt.Printf("[TPCH-DL]Returned from GC call at %s.\n", time.Now().Format("2006-01-02 15:04:05.000"))
+	fmt.Printf("[TPCH-DL]Returned from first GC call at %s.\n", time.Now().Format("2006-01-02 15:04:05.000"))
+	//Now it should be safe to put Replicator in non-fast mode.
+	shared.TmpHistoryDisable = false
+	dp.Tm.replicator.DisableInitialDataloadMode()
 	runtime.GC()
 	runtime.GC()
 	fmt.Printf("[TPCH-DL]Returned from 3x GC calls at %s.\n", time.Now().Format("2006-01-02 15:04:05.000"))
+	debug.SetGCPercent(100)
+	//TODO: Remove this
+	//debug.SetGCPercent(1000)
+	//debug.SetMemoryLimit(int64(float64(tpch.GetRAMSize()) * 2)) //Effectively disabling GC.
+	//debug.SetGCPercent(-1)
+	//fmt.Printf("[TPCH-DL]WARNING - GC DISABLED!\n")
+	//debug.SetMemoryLimit(int64(float64(tpch.GetRAMSize()) * 0.9))
+	//debug.SetGCPercent(200)
 }
 
 func SendLocalIndexData() {
+	fmt.Printf("[TPCH-DL]SendLocalIndexData.\n")
 	confirmChan := make(chan bool, len(iCfg.QueryNumbers)*len(iCfg.RegionsToLoad))
 	for i := 0; i < len(iCfg.QueryNumbers); i++ {
 		upds := <-iCfg.LocalUpdsChan
@@ -191,15 +240,11 @@ func PrepareBaseDataUpdsAndSend() {
 	go PrepareCrdtUpdatesProcVersion()
 	//go AckProcTables() //Temporary method that does not generate CRDT updates for base data.
 	fmt.Println("[TPCH-DL]Waiting for TM to be ready...")
-	<-dp.IsTMReady //Wait until TM is ready
+	<-dp.IsTMReady               //Wait until TM is ready
+	rdyToSendIndex <- struct{}{} //Notify index sender that TM is ready, so it can start sending index updates as they get prepared.
 	//time.Sleep(5 * time.Second)
 	start := time.Now()
 	fmt.Println("[TPCH-DL]TM ready at: ", start.Format("15:04:05.000"), "Starting to collect and send updates to TM.")
-	/*if dp.IndexConfigs.IsGlobal {
-		go SendIndexData()
-	} else {
-		go SendLocalIndexData()
-	}*/
 	sendInitializers()
 	forwardUpdsAndGetConfirms(confirmChan)
 }
@@ -235,6 +280,7 @@ func clientPerTable(tableI int, confirmChan chan int) {
 			go mergeUpdBufs(toMerge, myUpdChan)
 		}
 		client.DoSingleInitialDataUpdate(upd.KeyParams, upd.UpdateArgs)
+		//ignore(upd)
 		fmt.Printf("[TPCH-DL][Client %d]TM has applied the update. Updates currently in queue: %d. Estimated left: %d\n", tableI, len(myUpdChan), nWait-i-1)
 		confirmChan <- tableI
 	}
@@ -270,7 +316,7 @@ func forwardUpdsAndGetConfirms(confirmChan chan int) {
 			updTable := getUpdTable(upd.KeyParams)
 			//fmt.Printf("[TPCH-DL][Forward]Forwarding update for table %s.\n", tpch.TableNames[updTable])
 			icChans[updTable] <- upd
-		case tableI := <-confirmChan: //Note: TPC-DL uses a blocking method for applying updates in PotionDB. Thus, at this point, we know it has been fully applied.
+		case tableI := <-confirmChan: //Note: TPCH-DL uses a blocking method for applying updates in PotionDB. Thus, at this point, we know it has been fully applied.
 			if tableI < CHANNEL_END {
 				//fmt.Printf("[TPCH-DL][Forward]Got confirmation from TM for table %s.\n", tpch.GetTableName(tableI))
 			} else if tableI <= CHANNEL_END+tpch.N_TABLES {
@@ -302,7 +348,11 @@ func forwardUpdsAndGetConfirms(confirmChan chan int) {
 	}
 	//All tables fully processed by PotionDB. Call GC of PotionDB, wait, and then send a special notification to GC routine.
 	currTime := time.Now()
-	fmt.Printf("[TPCH-DL]All updates sent and confirmed by TM. Time: %s. Time since start (ms): %d.\n", currTime.Format("15:04:05.000"), currTime.UnixNano()/1000000-startTime)
+	fmt.Printf("[TPCH-DL]Finished base data loading - TM has confirmed all partitions have applied all updates related to base data. Time: %s. Time since start (ms): %d.\n", currTime.Format("15:04:05.000"), currTime.UnixNano()/1000000-startTime)
+	if !doesIndexLoad.Load() { //If there's no indexes to load, this is the last step of dataload. So we can call GC and re-enable history.
+		data.CleanAll()
+		Finalize()
+	}
 	//data.CleanProcTables()
 	//fmt.Printf("[TPCH-DL]Processed tables cleaned.\n")
 	//requestPotionDBGC()     //Blocks until complete. No longer needed as RWEmbMapCRDTs will clean themselves and their embedded CRDTs as localFirstUpdates are applied.
@@ -690,15 +740,13 @@ func PrepareCrdtUpdatesProcVersion() {
 	close(data.Read2Chan)
 	data.Read2Chan = nil
 	//Only at this point we know that we have all the tables created
-	if dp.QueryNumbers != nil {
-		fmt.Printf("[TPCH-DL]Query numbers is not nil (%v), starting goroutine to load index data.\n", dp.QueryNumbers)
+	indexLoad := doesIndexLoad.Load()
+	if indexLoad {
+		fmt.Printf("[TPCH-DL]Starting goroutine to load index data for queries %s.\n", dp.QueryNumbers)
 		go LoadIndexData() //TODO: Start loading some views earlier? (i.e., views that do not need all tables)
 	} else {
-		fmt.Printf("[TPCH-DL][WARNING]Query numbers are nil (%v)! Not starting to load index data.\n", dp.QueryNumbers)
+		fmt.Printf("[TPCH-DL]Will not do index load, as this server is not supposed to load index data.\n")
 	}
-	//Request GC to clean raw data.
-	debug.SetGCPercent(100) //Restoring normal GC behaviour.
-	runtime.GC()
 	ignore(procFullOrders)
 }
 
@@ -1043,6 +1091,7 @@ func initDataHelperNoConfirmation(upds []crdt.UpdateObjectParams) {
 	newC.CloseClient()
 }
 
+// Intended to be used by a separate goroutine. This will still wait for TM to confirm the update has been fully executed and send that confirmation to confirmChan.
 func initDataNonBlockingHelper(upds []crdt.UpdateObjectParams, confirmChan chan bool) {
 	newC := InternalClient{}.Initialize(dp.Tm)
 	newC.DoInitialDataUpdate(upds)

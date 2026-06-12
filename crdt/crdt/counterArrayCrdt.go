@@ -216,14 +216,14 @@ func (args CounterArrayRangeArguments) HasVariables() bool        { return false
 func (args CounterArrayExceptArguments) HasVariables() bool       { return false }
 func (args CounterArrayExceptRangeArguments) HasVariables() bool  { return false }
 
-func (crdt *CounterArrayCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *CounterArrayCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	crdt = &CounterArrayCrdt{counts: make([]int64, 1)}
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *CounterArrayCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *CounterArrayCrdt) {
+func (crdt *CounterArrayCrdt) initializeFromSnapshot(startTs clocksi.Timestamp, replicaID uint16) (sameCRDT *CounterArrayCrdt) {
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
@@ -255,7 +255,8 @@ func (crdt *CounterArrayCrdt) Read(args ReadArguments, updsNotYetApplied []Updat
 
 // TODO: Code repetition on CounterArrayIncrementAll, CounterArrayIncrementSub, etc.
 func (crdt *CounterArrayCrdt) getState(updsNotYetApplied []UpdateArguments) (state CounterArrayState) {
-	tmpCopy := copyToNewInt64Slice(crdt.counts)
+	//tmpCopy := copyToNewInt64Slice(crdt.counts)
+	tmpCopy := copyToPoolInt64Slice(crdt.counts)
 	if len(updsNotYetApplied) == 0 {
 		return CounterArrayState(tmpCopy)
 	}
@@ -321,7 +322,8 @@ func (crdt *CounterArrayCrdt) getState(updsNotYetApplied []UpdateArguments) (sta
 }
 
 func (crdt *CounterArrayCrdt) getRangeState(updsNotYetApplied []UpdateArguments, from int32, to int32) (state State) {
-	result := getRangeOfSlice(crdt.counts, int(from), int(to))
+	//result := copyToNewInt64Slice(getRangeOfSlice(crdt.counts, int(from), int(to)))
+	result := copyToPoolInt64Slice(getRangeOfSlice(crdt.counts, int(from), int(to)))
 	if len(updsNotYetApplied) == 0 {
 		return CounterArrayState(result)
 	}
@@ -408,7 +410,8 @@ func (crdt *CounterArrayCrdt) getExceptRangeState(updsNotYetApplied []UpdateArgu
 		//First, copy the whole slice (sigh). Then, apply updates and finally filter.
 		sourceSlice = crdt.getState(updsNotYetApplied) //Copies and applies updates
 	}
-	result := make([]int64, len(sourceSlice)-int(nPosSkip))
+	//result := make([]int64, len(sourceSlice)-int(nPosSkip))
+	result := int64SlicePool.Get(len(sourceSlice) - int(nPosSkip))
 	//First copy the state, then apply any pending updates.
 	currStop, nextStart, resultI := int32(0), int32(0), 0
 	//exceptRange: Evens: start. Odds: end. So we read until "start" (except), and then we start one position in front of "end".
@@ -432,7 +435,8 @@ func (crdt *CounterArrayCrdt) getExceptRangeState(updsNotYetApplied []UpdateArgu
 }
 
 func (crdt *CounterArrayCrdt) getExceptState(updsNotYetApplied []UpdateArguments, exceptPos int32) (state State) {
-	result := make([]int64, len(crdt.counts)-1)
+	//result := make([]int64, len(crdt.counts)-1)
+	result := int64SlicePool.Get(len(crdt.counts) - 1)
 	copy(result[:exceptPos], crdt.counts[:exceptPos])
 	copy(result[exceptPos:], crdt.counts[exceptPos+1:])
 	if len(updsNotYetApplied) == 0 {
@@ -591,7 +595,8 @@ func (crdt *CounterArrayCrdt) getSingleState(updsNotYetApplied []UpdateArguments
 }
 
 func (crdt *CounterArrayCrdt) getSubState(updsNotYetApplied []UpdateArguments, positions []int32) (state State) {
-	result := make([]int64, len(positions))
+	//result := make([]int64, len(positions))
+	result := int64SlicePool.Get(len(positions))
 	if len(updsNotYetApplied) == 0 {
 		for i, pos := range positions {
 			if pos >= int32(len(crdt.counts)) {
@@ -696,6 +701,11 @@ func (crdt *CounterArrayCrdt) Update(args UpdateArguments) (downstreamArgs Downs
 			return NoOp{} //New set size is smaller than the current size... so useless operation.
 		}
 	}
+	//TODO: Remove, for debugging
+	if args.GetCRDTType() != proto.CRDTType_ARRAY_COUNTER {
+		fmt.Printf("[CounterArrayCRDT][Update]Unknown update type: %v (%T)\n", args, args)
+		return WrongOp{RecOp: args, RecOpCrdtType: args.GetCRDTType(), CrdtType: crdt.GetCRDTType(), DataType: crdt.GetDATAType()}
+	}
 	return args.(DownstreamArguments)
 }
 
@@ -708,7 +718,7 @@ func (crdt *CounterArrayCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs
 
 	effect := crdt.applyDownstream(downstreamArgs)
 	//Necessary for inversibleCrdt
-	crdt.addToHistory(&updTs, &downstreamArgs, effect)
+	crdt.addToHistory(updTs, downstreamArgs, effect)
 
 	return nil
 }
@@ -720,53 +730,52 @@ func (crdt *CounterArrayCrdt) expandArray(newSize int32) {
 	crdt.counts = newCounts
 }
 
-func (crdt *CounterArrayCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect *Effect) {
-	var effectValue Effect
+func (crdt *CounterArrayCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect Effect) {
 	switch typedUpd := downstreamArgs.(type) {
 	case CounterArrayIncrement:
 		if int(typedUpd.Position) >= len(crdt.counts) {
-			effectValue = CounterArraySetSizeEffect(len(crdt.counts)) //The value of this position before was "0" as it did not belong to the array
+			effect = CounterArraySetSizeEffect(len(crdt.counts)) //The value of this position before was "0" as it did not belong to the array
 			crdt.expandArray(typedUpd.Position + 1)
 		} else {
-			effectValue = CounterArrayIncrementEffect(typedUpd)
+			effect = CounterArrayIncrementEffect(typedUpd)
 		}
 		crdt.counts[typedUpd.Position] += typedUpd.Change
 	case CounterArrayDecrement:
 		if int(typedUpd.Position) >= len(crdt.counts) {
-			effectValue = CounterArraySetSizeEffect(len(crdt.counts))
+			effect = CounterArraySetSizeEffect(len(crdt.counts))
 			crdt.expandArray(typedUpd.Position + 1)
 		} else {
-			effectValue = CounterArrayDecrementEffect(typedUpd)
+			effect = CounterArrayDecrementEffect(typedUpd)
 		}
 		crdt.counts[typedUpd.Position] -= typedUpd.Change
 	case CounterArrayIncrementAll:
-		effectValue = CounterArrayIncrementAllEffect(typedUpd)
+		effect = CounterArrayIncrementAllEffect(typedUpd)
 		typedChange := int64(typedUpd)
 		for i := range crdt.counts {
 			crdt.counts[i] += typedChange
 		}
 	case CounterArrayDecrementAll:
-		effectValue = CounterArrayDecrementAllEffect(typedUpd)
+		effect = CounterArrayDecrementAllEffect(typedUpd)
 		typedChange := int64(typedUpd)
 		for i := range crdt.counts {
 			crdt.counts[i] -= typedChange
 		}
 	case CounterArrayIncrementMulti:
 		if len(typedUpd) > len(crdt.counts) {
-			effectValue = CounterArrayIncMultiWithSizeEffect{IncEff: CounterArrayIncrementMultiEffect(typedUpd), OldSize: len(crdt.counts)}
+			effect = CounterArrayIncMultiWithSizeEffect{IncEff: CounterArrayIncrementMultiEffect(typedUpd), OldSize: len(crdt.counts)}
 			crdt.expandArray(int32(len(typedUpd)))
 		} else {
-			effectValue = CounterArrayIncrementMultiEffect(typedUpd)
+			effect = CounterArrayIncrementMultiEffect(typedUpd)
 		}
 		for i, change := range typedUpd {
 			crdt.counts[i] += change
 		}
 	case CounterArrayDecrementMulti:
 		if len(typedUpd) > len(crdt.counts) {
-			effectValue = CounterArrayDecMultiWithSizeEffect{DecEff: CounterArrayDecrementMultiEffect(typedUpd), OldSize: len(crdt.counts)}
+			effect = CounterArrayDecMultiWithSizeEffect{DecEff: CounterArrayDecrementMultiEffect(typedUpd), OldSize: len(crdt.counts)}
 			crdt.expandArray(int32(len(typedUpd)))
 		} else {
-			effectValue = CounterArrayIncrementMultiEffect(typedUpd)
+			effect = CounterArrayIncrementMultiEffect(typedUpd)
 		}
 		for i, change := range typedUpd {
 			crdt.counts[i] += change
@@ -794,9 +803,9 @@ func (crdt *CounterArrayCrdt) applyDownstream(downstreamArgs DownstreamArguments
 			}
 		}
 		if oldSize != len(crdt.counts) {
-			effectValue = CounterArrayIncSubWithSizeEffect{IncEff: CounterArrayIncrementSubEffect(typedUpd), OldSize: oldSize}
+			effect = CounterArrayIncSubWithSizeEffect{IncEff: CounterArrayIncrementSubEffect(typedUpd), OldSize: oldSize}
 		} else {
-			effectValue = CounterArrayIncrementSubEffect(typedUpd)
+			effect = CounterArrayIncrementSubEffect(typedUpd)
 		}
 	case CounterArrayDecrementSub:
 		oldSize := len(crdt.counts)
@@ -817,21 +826,21 @@ func (crdt *CounterArrayCrdt) applyDownstream(downstreamArgs DownstreamArguments
 			}
 		}
 		if oldSize != len(crdt.counts) {
-			effectValue = CounterArrayDecSubWithSizeEffect{DecEff: CounterArrayDecrementSubEffect(typedUpd), OldSize: oldSize}
+			effect = CounterArrayDecSubWithSizeEffect{DecEff: CounterArrayDecrementSubEffect(typedUpd), OldSize: oldSize}
 		} else {
-			effectValue = CounterArrayDecrementSubEffect(typedUpd)
+			effect = CounterArrayDecrementSubEffect(typedUpd)
 		}
 	case CounterArraySetSize:
 		if int(typedUpd) > len(crdt.counts) {
-			effectValue = CounterArraySetSizeEffect(len(crdt.counts))
+			effect = CounterArraySetSizeEffect(len(crdt.counts))
 			crdt.expandArray(int32(typedUpd))
 		} else { //Can still happen (e.g., two concurrent set sizes)
-			effectValue = NoEffect{}
+			effect = NoEffect{}
 		}
 	default:
 		fmt.Printf("[CounterArrayCrdt][Downstream]Unsupported downstream type: %v (%T)\n", downstreamArgs, downstreamArgs)
 	}
-	return &effectValue
+	return
 }
 
 func (crdt *CounterArrayCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err error) {
@@ -848,12 +857,12 @@ func (crdt *CounterArrayCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
-func (crdt *CounterArrayCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *CounterArrayCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	return crdt.applyDownstream(updArgs)
 }
 
-func (crdt *CounterArrayCrdt) undoEffect(effect *Effect) {
-	switch typedEffect := (*effect).(type) {
+func (crdt *CounterArrayCrdt) undoEffect(effect Effect) {
+	switch typedEffect := (effect).(type) {
 	case CounterArrayIncrementEffect:
 		crdt.counts[typedEffect.Position] -= typedEffect.Change
 	case CounterArrayDecrementEffect:
@@ -937,7 +946,7 @@ func (crdt *CounterArrayCrdt) undoEffect(effect *Effect) {
 	}
 }
 
-func (crdt *CounterArrayCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+func (crdt *CounterArrayCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {}
 
 func copyToNewInt64Slice(slice []int64) []int64 {
 	newSlice := make([]int64, len(slice))
@@ -951,6 +960,16 @@ func copyToNewInt64SliceWithSize(slice []int64, sizeOfNewSlice int) []int64 {
 	return newSlice
 }
 
+func copyToPoolInt64Slice(slice []int64) (newSlice []int64) {
+	if len(slice) < 100 {
+		newSlice = make([]int64, len(slice))
+	} else {
+		newSlice = int64SlicePool.Get(len(slice))
+	}
+	copy(newSlice, slice)
+	return newSlice
+}
+
 //Protobuf functions
 
 func (crdtOp CounterArrayIncrement) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -960,7 +979,8 @@ func (crdtOp CounterArrayIncrement) FromUpdateObject(protobuf *proto.ApbUpdateOp
 
 func (crdtOp CounterArrayIncrement) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
 	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Arraycounterop{Arraycounterop: &proto.ApbArrayCounterUpdate{
-		Upd: &proto.ApbArrayCounterUpdate_Inc{Inc: &proto.ApbArrayCounterIncrement{Index: pb.Int32(crdtOp.Position), Inc: pb.Int64(crdtOp.Change)}}}}}
+		UpdType: proto.NumberArrayUpdType_INC.Enum(), Inc: &proto.ApbArrayCounterIncrement{Index: pb.Int32(crdtOp.Position), Inc: pb.Int64(crdtOp.Change)}}}}
+	//Upd: &proto.ApbArrayCounterUpdate_Inc{Inc: &proto.ApbArrayCounterIncrement{Index: pb.Int32(crdtOp.Position), Inc: pb.Int64(crdtOp.Change)}}}}}
 }
 
 func (crdtOp CounterArrayDecrement) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -970,7 +990,8 @@ func (crdtOp CounterArrayDecrement) FromUpdateObject(protobuf *proto.ApbUpdateOp
 
 func (crdtOp CounterArrayDecrement) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
 	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Arraycounterop{Arraycounterop: &proto.ApbArrayCounterUpdate{
-		Upd: &proto.ApbArrayCounterUpdate_Inc{Inc: &proto.ApbArrayCounterIncrement{Index: pb.Int32(crdtOp.Position), Inc: pb.Int64(-crdtOp.Change)}}}}}
+		UpdType: proto.NumberArrayUpdType_INC.Enum(), Inc: &proto.ApbArrayCounterIncrement{Index: pb.Int32(crdtOp.Position), Inc: pb.Int64(-crdtOp.Change)}}}}
+	//Upd: &proto.ApbArrayCounterUpdate_Inc{Inc: &proto.ApbArrayCounterIncrement{Index: pb.Int32(crdtOp.Position), Inc: pb.Int64(-crdtOp.Change)}}}}}
 }
 
 func (crdtOp CounterArrayIncrementAll) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -979,7 +1000,8 @@ func (crdtOp CounterArrayIncrementAll) FromUpdateObject(protobuf *proto.ApbUpdat
 
 func (crdtOp CounterArrayIncrementAll) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
 	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Arraycounterop{Arraycounterop: &proto.ApbArrayCounterUpdate{
-		Upd: &proto.ApbArrayCounterUpdate_IncAll{IncAll: &proto.ApbArrayCounterIncrementAll{Inc: pb.Int64(int64(crdtOp))}}}}}
+		UpdType: proto.NumberArrayUpdType_INC_ALL.Enum(), IncAll: &proto.ApbArrayCounterIncrementAll{Inc: pb.Int64(int64(crdtOp))}}}}
+	//Upd: &proto.ApbArrayCounterUpdate_IncAll{IncAll: &proto.ApbArrayCounterIncrementAll{Inc: pb.Int64(int64(crdtOp))}}}}}
 }
 
 func (crdtOp CounterArrayDecrementAll) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -988,7 +1010,8 @@ func (crdtOp CounterArrayDecrementAll) FromUpdateObject(protobuf *proto.ApbUpdat
 
 func (crdtOp CounterArrayDecrementAll) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
 	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Arraycounterop{Arraycounterop: &proto.ApbArrayCounterUpdate{
-		Upd: &proto.ApbArrayCounterUpdate_IncAll{IncAll: &proto.ApbArrayCounterIncrementAll{Inc: pb.Int64(int64(-crdtOp))}}}}}
+		UpdType: proto.NumberArrayUpdType_INC_ALL.Enum(), IncAll: &proto.ApbArrayCounterIncrementAll{Inc: pb.Int64(int64(-crdtOp))}}}}
+	//Upd: &proto.ApbArrayCounterUpdate_IncAll{IncAll: &proto.ApbArrayCounterIncrementAll{Inc: pb.Int64(int64(-crdtOp))}}}}}
 }
 
 func (crdtOp CounterArrayIncrementMulti) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -997,7 +1020,8 @@ func (crdtOp CounterArrayIncrementMulti) FromUpdateObject(protobuf *proto.ApbUpd
 
 func (crdtOp CounterArrayIncrementMulti) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
 	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Arraycounterop{Arraycounterop: &proto.ApbArrayCounterUpdate{
-		Upd: &proto.ApbArrayCounterUpdate_IncMulti{IncMulti: &proto.ApbArrayCounterIncrementMulti{Incs: crdtOp}}}}}
+		UpdType: proto.NumberArrayUpdType_INC_MULTI.Enum(), IncMulti: &proto.ApbArrayCounterIncrementMulti{Incs: crdtOp}}}}
+	//Upd: &proto.ApbArrayCounterUpdate_IncMulti{IncMulti: &proto.ApbArrayCounterIncrementMulti{Incs: crdtOp}}}}}
 }
 
 func (crdtOp CounterArrayDecrementMulti) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -1015,7 +1039,8 @@ func (crdtOp CounterArrayDecrementMulti) ToUpdateObject() (protobuf *proto.ApbUp
 		protoIncs[i] = -inc
 	}
 	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Arraycounterop{Arraycounterop: &proto.ApbArrayCounterUpdate{
-		Upd: &proto.ApbArrayCounterUpdate_IncMulti{IncMulti: &proto.ApbArrayCounterIncrementMulti{Incs: protoIncs}}}}}
+		UpdType: proto.NumberArrayUpdType_INC_MULTI.Enum(), IncMulti: &proto.ApbArrayCounterIncrementMulti{Incs: protoIncs}}}}
+	//Upd: &proto.ApbArrayCounterUpdate_IncMulti{IncMulti: &proto.ApbArrayCounterIncrementMulti{Incs: protoIncs}}}}}
 }
 
 func (crdtOp CounterArrayIncrementSub) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -1025,7 +1050,8 @@ func (crdtOp CounterArrayIncrementSub) FromUpdateObject(protobuf *proto.ApbUpdat
 
 func (crdtOp CounterArrayIncrementSub) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
 	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Arraycounterop{Arraycounterop: &proto.ApbArrayCounterUpdate{
-		Upd: &proto.ApbArrayCounterUpdate_IncSub{IncSub: &proto.ApbArrayCounterIncrementSub{Indexes: crdtOp.Positions, Incs: crdtOp.Changes}}}}}
+		UpdType: proto.NumberArrayUpdType_INC_SUB.Enum(), IncSub: &proto.ApbArrayCounterIncrementSub{Indexes: crdtOp.Positions, Incs: crdtOp.Changes}}}}
+	//Upd: &proto.ApbArrayCounterUpdate_IncSub{IncSub: &proto.ApbArrayCounterIncrementSub{Indexes: crdtOp.Positions, Incs: crdtOp.Changes}}}}}
 }
 
 func (crdtOp CounterArrayDecrementSub) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -1044,7 +1070,8 @@ func (crdtOp CounterArrayDecrementSub) ToUpdateObject() (protobuf *proto.ApbUpda
 		protoIncs[i] = -inc
 	}
 	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Arraycounterop{Arraycounterop: &proto.ApbArrayCounterUpdate{
-		Upd: &proto.ApbArrayCounterUpdate_IncSub{IncSub: &proto.ApbArrayCounterIncrementSub{Indexes: crdtOp.Positions, Incs: protoIncs}}}}}
+		UpdType: proto.NumberArrayUpdType_INC_SUB.Enum(), IncSub: &proto.ApbArrayCounterIncrementSub{Indexes: crdtOp.Positions, Incs: protoIncs}}}}
+	//Upd: &proto.ApbArrayCounterUpdate_IncSub{IncSub: &proto.ApbArrayCounterIncrementSub{Indexes: crdtOp.Positions, Incs: protoIncs}}}}}
 }
 
 func (crdtOp CounterArraySetSize) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -1052,14 +1079,18 @@ func (crdtOp CounterArraySetSize) FromUpdateObject(protobuf *proto.ApbUpdateOper
 }
 
 func (crdtOp CounterArraySetSize) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Arraycounterop{Arraycounterop: &proto.ApbArrayCounterUpdate{Upd: &proto.ApbArrayCounterUpdate_Size{Size: &proto.ApbArrayCounterSetSize{Size: pb.Int32(int32(crdtOp))}}}}}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Arraycounterop{Arraycounterop: &proto.ApbArrayCounterUpdate{UpdType: proto.NumberArrayUpdType_SIZE.Enum(), Size: &proto.ApbArrayCounterSetSize{Size: pb.Int32(int32(crdtOp))}}}}
+	//return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Arraycounterop{Arraycounterop: &proto.ApbArrayCounterUpdate{Upd: &proto.ApbArrayCounterUpdate_Size{Size: &proto.ApbArrayCounterSetSize{Size: pb.Int32(int32(crdtOp))}}}}}
 }
 
 func (crdtState CounterArrayState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
 	return CounterArrayState(protobuf.GetArraycounter().GetValues())
 }
 
-func (crdtState CounterArrayState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState CounterArrayState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
+	if len(crdtState) >= shared.MIN_SLICE_POOL_SIZE && buf != nil {
+		buf.Bufs.Append(BufToReturn{CRDTType: crdtState.GetCRDTType(), Buf: []int64(crdtState)})
+	}
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Arraycounter{Arraycounter: &proto.ApbGetArrayCounterResp{Values: crdtState}}}
 }
 
@@ -1067,7 +1098,7 @@ func (crdtState CounterArraySingleState) FromReadResp(protobuf *proto.ApbReadObj
 	return CounterArraySingleState(protobuf.GetPartread().GetArraycounter().GetValue())
 }
 
-func (crdtState CounterArraySingleState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState CounterArraySingleState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Arraycounter{Arraycounter: &proto.ApbArrayCounterPartialReadResp{Value: pb.Int64(int64(crdtState))}}}}}
 }
 
@@ -1222,7 +1253,7 @@ func (crdt *CounterArrayCrdt) ToProtoState() (protobuf *proto.ProtoState) {
 	return &proto.ProtoState{State: &proto.ProtoState_ArrayCounter{ArrayCounter: &proto.ProtoArrayCounterState{Counts: crdt.counts}}}
 }
 
-func (crdt *CounterArrayCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
+func (crdt *CounterArrayCrdt) FromProtoState(proto *proto.ProtoState, ts clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	return (&CounterArrayCrdt{counts: proto.GetArrayCounter().GetCounts()}).initializeFromSnapshot(ts, replicaID)
 }
 

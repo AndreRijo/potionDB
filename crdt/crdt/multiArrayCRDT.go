@@ -30,14 +30,15 @@ import (
 
 type MultiArrayCrdt struct {
 	CRDTVM
+	replicaID                 int64 //ID of this replica. Stored as 64 bits to avoid extra conversions.
+	totalLen                  int   //Measuring the len of 4 slices is slow somehow... likely due to cache misses. So we keep the total len here to answer IsBigCRDT() fast.//Note: Even with "totalLen", it's still slow. 81s of CPU time burned in checking if totalLen > 500??? And somehow taking longer than aggregateSlice. Smh.
 	intCounters, sums, counts []int64
 	floatCounters             []float64
 	dataCounters              [][]byte
 	//LWW implementation for dataCounters. The first 48 bits are the ts, the next 16 bits are the replicaID.
 	//The lowest 48 bits of a 64bit timestamp are used, as what is relevant is not the absolute time, but just uniqueness and relative time.
 	//Uint64 is used in order to facilitate direct comparison with < and >. (as in practice, timestamps are always positive)
-	dataTsId  []uint64
-	replicaID int64 //ID of this replica. Stored as 64 bits to avoid extra conversions.
+	dataTsId []uint64
 }
 
 // Helps hold temporary arrays. Useful during reads for applying pending updates.
@@ -722,19 +723,20 @@ func (args DownstreamMultiArrayUpdateAll) GetDataType() MULTI_ARRAY_TYPE        
 
 //CRDT Code.
 
-func (crdt *MultiArrayCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *MultiArrayCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	return &MultiArrayCrdt{replicaID: int64(replicaID), CRDTVM: (&genericInversibleCRDT{}).initialize(crdt)}
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *MultiArrayCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *MultiArrayCrdt) {
+func (crdt *MultiArrayCrdt) initializeFromSnapshot(startTs clocksi.Timestamp, replicaID uint16) (sameCRDT *MultiArrayCrdt) {
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	crdt.replicaID = int64(replicaID)
 	return crdt
 }
 
 func (crdt *MultiArrayCrdt) IsBigCRDT() bool {
-	return len(crdt.intCounters)+len(crdt.floatCounters)+len(crdt.dataCounters)+len(crdt.counts) >= 500
+	//return len(crdt.intCounters)+len(crdt.floatCounters)+len(crdt.dataCounters)+len(crdt.counts) >= 500
+	return crdt.totalLen >= 500
 }
 
 func (crdt *MultiArrayCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State) {
@@ -760,7 +762,7 @@ func (crdt *MultiArrayCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateA
 	case MultiArrayCustomArguments:
 		return crdt.getCustomState(updsNotYetApplied, typedArgs)
 	case MultiArrayPosArguments:
-		return crdt.getPosStateOfType(updsNotYetApplied, int(typedArgs.Pos), typedArgs.ArrayType)
+		return crdt.getPosStateOfType(updsNotYetApplied, typedArgs.Pos, typedArgs.ArrayType)
 	case MultiArrayPosTypesArguments:
 		return crdt.getPosStateOfMultipleTypes(updsNotYetApplied, typedArgs.Positions, typedArgs.Types)
 	case MultiArrayRangeArguments:
@@ -824,7 +826,7 @@ func (crdt *MultiArrayCrdt) getCustomState(updsNotYetApplied []UpdateArguments, 
 		case CustomFull:
 			returnState.Sums, returnState.Counts = copySlice(crdt.sums), copySlice(crdt.counts)
 		case CustomSingle:
-			sum, count := getPositionOfAvgSlice(int(args.AvgPos[0]), crdt.sums, crdt.counts)
+			sum, count := getPositionOfAvgSlice(args.AvgPos[0], crdt.sums, crdt.counts)
 			returnState.Sums, returnState.Counts = []int64{sum}, []int64{count}
 		case CustomRange:
 			returnState.Sums, returnState.Counts = getRangeOfAvgSlice(crdt.sums, crdt.counts, int(args.FloatPos[0]), int(args.FloatPos[1]))
@@ -1235,11 +1237,11 @@ func (crdt *MultiArrayCrdt) getAggregateStateByIndex(updsNotYetApplied []UpdateA
 		var compValue int
 		switch args.CompArrayType {
 		case MultiInts:
-			compValue = int(getPositionOfSlice(int(args.CompPos), crdt.intCounters))
+			compValue = int(getPositionOfSlice(args.CompPos, crdt.intCounters))
 		case MultiFloats:
-			compValue = int(getPositionOfSlice(int(args.CompPos), crdt.floatCounters))
+			compValue = int(getPositionOfSlice(args.CompPos, crdt.floatCounters))
 		case MultiAvg:
-			sum, count := getPositionOfAvgSlice(int(args.CompPos), crdt.sums, crdt.counts)
+			sum, count := getPositionOfAvgSlice(args.CompPos, crdt.sums, crdt.counts)
 			if count == 0 {
 				count = 1
 			}
@@ -1308,11 +1310,11 @@ func (crdt *MultiArrayCrdt) getAggregateStateByValue(updsNotYetApplied []UpdateA
 		var compValue float64
 		switch args.CompArrayType {
 		case MultiInts:
-			compValue = float64(getPositionOfSlice(int(args.CompPos), crdt.intCounters))
+			compValue = float64(getPositionOfSlice(args.CompPos, crdt.intCounters))
 		case MultiFloats:
-			compValue = getPositionOfSlice(int(args.CompPos), crdt.floatCounters)
+			compValue = getPositionOfSlice(args.CompPos, crdt.floatCounters)
 		case MultiAvg:
-			sum, count := getPositionOfAvgSlice(int(args.CompPos), crdt.sums, crdt.counts)
+			sum, count := getPositionOfAvgSlice(args.CompPos, crdt.sums, crdt.counts)
 			if count == 0 {
 				count = 1
 			}
@@ -1923,13 +1925,13 @@ func (crdt *MultiArrayCrdt) getPosStateOfMultipleTypes(updsNotYetApplied []Updat
 	for i, arrayType := range arrayTypes {
 		switch arrayType {
 		case MultiInts:
-			returnState.IntValue = getPositionOfSlice(int(positions[i]), crdt.intCounters)
+			returnState.IntValue = getPositionOfSlice(positions[i], crdt.intCounters)
 		case MultiFloats:
-			returnState.FloatValue = getPositionOfSlice(int(positions[i]), crdt.floatCounters)
+			returnState.FloatValue = getPositionOfSlice(positions[i], crdt.floatCounters)
 		case MultiData:
-			returnState.DataValue = getPositionOfSlice(int(positions[i]), crdt.dataCounters)
+			returnState.DataValue = getPositionOfSlice(positions[i], crdt.dataCounters)
 		case MultiAvg:
-			returnState.Sum, returnState.Count = getPositionOfAvgSlice(int(positions[i]), crdt.sums, crdt.counts)
+			returnState.Sum, returnState.Count = getPositionOfAvgSlice(positions[i], crdt.sums, crdt.counts)
 		}
 	}
 
@@ -1964,7 +1966,7 @@ func (crdt *MultiArrayCrdt) getPosStateOfMultipleTypes(updsNotYetApplied []Updat
 	return returnState
 }
 
-func (crdt *MultiArrayCrdt) getPosStateOfType(updsNotYetApplied []UpdateArguments, pos int, arrayType MULTI_ARRAY_TYPE) (state State) {
+func (crdt *MultiArrayCrdt) getPosStateOfType(updsNotYetApplied []UpdateArguments, pos int32, arrayType MULTI_ARRAY_TYPE) (state State) {
 	//fmt.Printf("[MultiArray][PosRead]Sums: %v. Count: %v\n", crdt.sums, crdt.counts)
 	if len(updsNotYetApplied) == 0 {
 		switch arrayType {
@@ -2564,11 +2566,11 @@ func (crdt *MultiArrayCrdt) applyPendingUpdsToPosAndSlice(updsNotYetApplied []Up
 	//Copy the relevant position (for compare)
 	switch posType {
 	case MultiInts:
-		intV = getPositionOfSlice(int(pos), crdt.intCounters)
+		intV = getPositionOfSlice(pos, crdt.intCounters)
 	case MultiFloats:
-		floatV = getPositionOfSlice(int(pos), crdt.floatCounters)
+		floatV = getPositionOfSlice(pos, crdt.floatCounters)
 	case MultiAvg:
-		sum, count = getPositionOfAvgSlice(int(pos), crdt.sums, crdt.counts)
+		sum, count = getPositionOfAvgSlice(pos, crdt.sums, crdt.counts)
 	}
 
 	var typedUpd MultiArrayUpd
@@ -2688,15 +2690,15 @@ func getSubAvgSlice(sums, counts []int64, positions []int32) (resultSums, result
 }
 
 // Returns the default value if the position is out of bounds.
-func getPositionOfSlice[V any](pos int, slice []V) (value V) {
-	if pos < len(slice) {
+func getPositionOfSlice[V any](pos int32, slice []V) (value V) {
+	if pos < int32(len(slice)) {
 		return slice[pos]
 	}
 	return value
 }
 
-func getPositionOfAvgSlice(pos int, sums, counts []int64) (sum, count int64) {
-	if pos < len(sums) {
+func getPositionOfAvgSlice(pos int32, sums, counts []int64) (sum, count int64) {
+	if pos < int32(len(sums)) {
 		sum, count = sums[pos], counts[pos]
 	}
 	return
@@ -2747,12 +2749,14 @@ func copySliceWithSize[V any](slice []V, size int32) (copySlice []V) {
 func (crdt *MultiArrayCrdt) expandIntArray(newSize int32) {
 	newInts := make([]int64, newSize)
 	copy(newInts, crdt.intCounters)
+	crdt.totalLen += int(newSize - int32(len(crdt.intCounters)))
 	crdt.intCounters = newInts
 }
 
 func (crdt *MultiArrayCrdt) expandFloatArray(newSize int32) {
 	newFloats := make([]float64, newSize)
 	copy(newFloats, crdt.floatCounters)
+	crdt.totalLen += int(newSize - int32(len(crdt.floatCounters)))
 	crdt.floatCounters = newFloats
 }
 
@@ -2760,6 +2764,7 @@ func (crdt *MultiArrayCrdt) expandDataArray(newSize int32) {
 	newData, newDataTsId := make([][]byte, newSize), make([]uint64, newSize)
 	copy(newData, crdt.dataCounters)
 	copy(newDataTsId, crdt.dataTsId)
+	crdt.totalLen += int(newSize - int32(len(crdt.dataCounters)))
 	crdt.dataCounters, crdt.dataTsId = newData, newDataTsId
 }
 
@@ -2767,6 +2772,7 @@ func (crdt *MultiArrayCrdt) expandAvgArray(newSize int32) {
 	newSums, newCounts := make([]int64, newSize), make([]int64, newSize)
 	copy(newSums, crdt.sums)
 	copy(newCounts, crdt.counts)
+	crdt.totalLen += int(newSize - int32(len(crdt.sums)))
 	crdt.sums, crdt.counts = newSums, newCounts
 }
 
@@ -2829,12 +2835,12 @@ func (crdt *MultiArrayCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs D
 	}
 	effect := crdt.applyDownstream(downstreamArgs)
 	//Necessary for inversibleCrdt
-	crdt.addToHistory(&updTs, &downstreamArgs, effect)
+	crdt.addToHistory(updTs, downstreamArgs, effect)
 
 	return nil
 }
 
-func (crdt *MultiArrayCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect *Effect) {
+func (crdt *MultiArrayCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect Effect) {
 	typedUpd, ok := downstreamArgs.(MultiArrayUpd)
 	if !ok {
 		fmt.Printf("[MultiArrayCrdt][Downstream]Unsupported downstream type: %v (%T)\n", downstreamArgs, downstreamArgs)
@@ -2856,23 +2862,22 @@ func (crdt *MultiArrayCrdt) applyDownstream(downstreamArgs DownstreamArguments) 
 	}
 }
 
-func (crdt *MultiArrayCrdt) applyDownstreamInt(downstreamArgs MultiArrayUpd) (effect *Effect) {
-	var effectValue Effect
+func (crdt *MultiArrayCrdt) applyDownstreamInt(downstreamArgs MultiArrayUpd) (effect Effect) {
 	switch intUpd := downstreamArgs.(type) {
 	case MultiArrayIncIntSingle:
 		if int(intUpd.Pos) >= len(crdt.intCounters) {
-			effectValue = MultiArraySetSizesEffect{IntSize: int32(len(crdt.intCounters))} //The value of this position before was "0" as it did not belong to the array
+			effect = MultiArraySetSizesEffect{IntSize: int32(len(crdt.intCounters))} //The value of this position before was "0" as it did not belong to the array
 			crdt.expandIntArray(intUpd.Pos + 1)
 		} else {
-			effectValue = MultiArrayIncIntSingleEffect(intUpd)
+			effect = MultiArrayIncIntSingleEffect(intUpd)
 		}
 		crdt.intCounters[intUpd.Pos] += intUpd.Change
 	case MultiArrayIncInt:
 		if len(intUpd) > len(crdt.intCounters) {
-			effectValue = CounterArrayIncMultiWithSizeEffect{IncEff: CounterArrayIncrementMultiEffect(intUpd), OldSize: len(crdt.intCounters)}
+			effect = CounterArrayIncMultiWithSizeEffect{IncEff: CounterArrayIncrementMultiEffect(intUpd), OldSize: len(crdt.intCounters)}
 			crdt.expandIntArray(int32(len(intUpd)))
 		} else {
-			effectValue = MultiArrayIncIntEffect(intUpd)
+			effect = MultiArrayIncIntEffect(intUpd)
 		}
 		for i, change := range intUpd {
 			crdt.intCounters[i] += change
@@ -2896,9 +2901,9 @@ func (crdt *MultiArrayCrdt) applyDownstreamInt(downstreamArgs MultiArrayUpd) (ef
 			}
 		}
 		if oldSize != len(crdt.intCounters) {
-			effectValue = MultiArrayIncIntPositionsWithSizeEffect{IncEff: MultiArrayIncIntPositionsEffect(intUpd), OldSize: oldSize}
+			effect = MultiArrayIncIntPositionsWithSizeEffect{IncEff: MultiArrayIncIntPositionsEffect(intUpd), OldSize: oldSize}
 		} else {
-			effectValue = MultiArrayIncIntPositionsEffect(intUpd)
+			effect = MultiArrayIncIntPositionsEffect(intUpd)
 		}
 	case MultiArrayIncIntRange:
 		oldSize := len(crdt.intCounters)
@@ -2909,31 +2914,31 @@ func (crdt *MultiArrayCrdt) applyDownstreamInt(downstreamArgs MultiArrayUpd) (ef
 			crdt.intCounters[i] += intUpd.Change
 		}
 		if oldSize != len(crdt.intCounters) {
-			effectValue = MultiArrayIncIntRangeWithSizeEffect{IncEff: MultiArrayIncIntRangeEffect(intUpd), OldSize: oldSize}
+			effect = MultiArrayIncIntRangeWithSizeEffect{IncEff: MultiArrayIncIntRangeEffect(intUpd), OldSize: oldSize}
 		} else {
-			effectValue = MultiArrayIncIntRangeEffect(intUpd)
+			effect = MultiArrayIncIntRangeEffect(intUpd)
 		}
 	}
-	return &effectValue
+	return
 }
 
-func (crdt *MultiArrayCrdt) applyDownstreamFloat(downstreamArgs MultiArrayUpd) (effect *Effect) {
-	var effectValue Effect
+func (crdt *MultiArrayCrdt) applyDownstreamFloat(downstreamArgs MultiArrayUpd) (effect Effect) {
+	effect = NoEffect{}
 	switch floatUpd := downstreamArgs.(type) {
 	case MultiArrayIncFloatSingle:
 		if int(floatUpd.Pos) >= len(crdt.floatCounters) {
-			effectValue = MultiArraySetSizesEffect{FloatSize: int32(len(crdt.floatCounters))} //The value of this position before was "0" as it did not belong to the array
+			effect = MultiArraySetSizesEffect{FloatSize: int32(len(crdt.floatCounters))} //The value of this position before was "0" as it did not belong to the array
 			crdt.expandFloatArray(floatUpd.Pos + 1)
 		} else {
-			effectValue = MultiArrayIncFloatSingleEffect(floatUpd)
+			effect = MultiArrayIncFloatSingleEffect(floatUpd)
 		}
 		crdt.floatCounters[floatUpd.Pos] += floatUpd.Change
 	case MultiArrayIncFloat:
 		if len(floatUpd) > len(crdt.floatCounters) {
-			effectValue = MultiArrayIncFloatWithSizeEffect{IncEff: MultiArrayIncFloatEffect(floatUpd), OldSize: len(crdt.floatCounters)}
+			effect = MultiArrayIncFloatWithSizeEffect{IncEff: MultiArrayIncFloatEffect(floatUpd), OldSize: len(crdt.floatCounters)}
 			crdt.expandFloatArray(int32(len(floatUpd)))
 		} else {
-			effectValue = MultiArrayIncFloatEffect(floatUpd)
+			effect = MultiArrayIncFloatEffect(floatUpd)
 		}
 		for i, change := range floatUpd {
 			crdt.floatCounters[i] += change
@@ -2958,9 +2963,9 @@ func (crdt *MultiArrayCrdt) applyDownstreamFloat(downstreamArgs MultiArrayUpd) (
 			}
 		}
 		if oldSize != len(crdt.floatCounters) {
-			effectValue = MultiArrayIncFloatPositionsWithSizeEffect{IncEff: MultiArrayIncFloatPositionsEffect(floatUpd), OldSize: oldSize}
+			effect = MultiArrayIncFloatPositionsWithSizeEffect{IncEff: MultiArrayIncFloatPositionsEffect(floatUpd), OldSize: oldSize}
 		} else {
-			effectValue = MultiArrayIncFloatPositionsEffect(floatUpd)
+			effect = MultiArrayIncFloatPositionsEffect(floatUpd)
 		}
 	case MultiArrayIncFloatRange:
 		oldSize := len(crdt.floatCounters)
@@ -2971,35 +2976,34 @@ func (crdt *MultiArrayCrdt) applyDownstreamFloat(downstreamArgs MultiArrayUpd) (
 			crdt.floatCounters[i] += floatUpd.Change
 		}
 		if oldSize != len(crdt.intCounters) {
-			effectValue = MultiArrayIncFloatRangeWithSizeEffect{IncEff: MultiArrayIncFloatRangeEffect(floatUpd), OldSize: oldSize}
+			effect = MultiArrayIncFloatRangeWithSizeEffect{IncEff: MultiArrayIncFloatRangeEffect(floatUpd), OldSize: oldSize}
 		} else {
-			effectValue = MultiArrayIncFloatRangeEffect(floatUpd)
+			effect = MultiArrayIncFloatRangeEffect(floatUpd)
 		}
 	}
-	return &effectValue
+	return
 }
 
-func (crdt *MultiArrayCrdt) applyDownstreamData(downstreamArgs MultiArrayUpd) (effect *Effect) {
-	var effectValue Effect = NoEffect{}
-
+func (crdt *MultiArrayCrdt) applyDownstreamData(downstreamArgs MultiArrayUpd) (effect Effect) {
+	effect = NoEffect{}
 	switch dataUpd := downstreamArgs.(type) {
 	case DownstreamMultiArraySetRegisterSingle:
 		if int(dataUpd.Pos) >= len(crdt.dataCounters) {
-			effectValue = MultiArraySetSizesEffect{RegisterSize: int32(len(crdt.dataCounters))} //The value of this position before was "0" as it did not belong to the array
+			effect = MultiArraySetSizesEffect{RegisterSize: int32(len(crdt.dataCounters))} //The value of this position before was "0" as it did not belong to the array
 			crdt.expandDataArray(dataUpd.Pos + 1)
 		} else if crdt.dataTsId[dataUpd.Pos] < dataUpd.TsId { //Can compare directly: if ts is equal, then we pick the higher replicaID. Perfect!
-			effectValue = MultiArraySetRegisterSingleEffect{Pos: dataUpd.Pos, Value: crdt.dataCounters[dataUpd.Pos], TsId: crdt.dataTsId[dataUpd.Pos]}
+			effect = MultiArraySetRegisterSingleEffect{Pos: dataUpd.Pos, Value: crdt.dataCounters[dataUpd.Pos], TsId: crdt.dataTsId[dataUpd.Pos]}
 		} else {
-			return &effectValue
+			return
 		}
 		crdt.dataCounters[dataUpd.Pos], crdt.dataTsId[dataUpd.Pos] = dataUpd.Value, dataUpd.TsId
 	case DownstreamMultiArraySetRegister:
 		if len(dataUpd.Values) > len(crdt.dataCounters) {
 			//Safe to use the dataCounters for the effect as we will replace it.
-			effectValue = MultiArraySetRegisterWithSizeEffect{IncEff: MultiArraySetRegisterEffect{Values: crdt.dataCounters, TsIds: crdt.dataTsId}, OldSize: len(crdt.dataCounters)}
+			effect = MultiArraySetRegisterWithSizeEffect{IncEff: MultiArraySetRegisterEffect{Values: crdt.dataCounters, TsIds: crdt.dataTsId}, OldSize: len(crdt.dataCounters)}
 			crdt.expandDataArray(int32(len(dataUpd.Values)))
 		} else {
-			effectValue = MultiArraySetRegisterEffect{Values: copySliceWithNilCheck(crdt.dataCounters), TsIds: copySliceWithNilCheck(crdt.dataTsId)}
+			effect = MultiArraySetRegisterEffect{Values: copySliceWithNilCheck(crdt.dataCounters), TsIds: copySliceWithNilCheck(crdt.dataTsId)}
 		}
 		atLeastOne := false
 		for i, value := range dataUpd.Values {
@@ -3008,8 +3012,7 @@ func (crdt *MultiArrayCrdt) applyDownstreamData(downstreamArgs MultiArrayUpd) (e
 			}
 		}
 		if !atLeastOne {
-			effectValue = NoEffect{}
-			return &effectValue
+			return NoEffect{}
 		}
 	case DownstreamMultiArraySetRegisterPositions:
 		oldSize, oldData, oldTs, atLeastOne := len(crdt.dataCounters), make([][]byte, len(dataUpd.Pos)), make([]uint64, len(dataUpd.Pos)), false
@@ -3038,13 +3041,13 @@ func (crdt *MultiArrayCrdt) applyDownstreamData(downstreamArgs MultiArrayUpd) (e
 			}
 		}
 		if !atLeastOne {
-			return &effectValue
+			return NoEffect{}
 		}
 		if oldSize != len(crdt.dataCounters) {
-			effectValue = MultiArraySetRegisterPositionsWithSizeEffect{
+			effect = MultiArraySetRegisterPositionsWithSizeEffect{
 				IncEff: MultiArraySetRegisterPositionsEffect{Pos: dataUpd.Pos, Values: oldData, TsIds: oldTs}, OldSize: oldSize}
 		} else {
-			effectValue = MultiArraySetRegisterPositionsEffect{Pos: dataUpd.Pos, Values: oldData, TsIds: oldTs}
+			effect = MultiArraySetRegisterPositionsEffect{Pos: dataUpd.Pos, Values: oldData, TsIds: oldTs}
 		}
 	case DownstreamMultiArraySetRegisterRange:
 		oldSize := len(crdt.dataCounters)
@@ -3065,33 +3068,32 @@ func (crdt *MultiArrayCrdt) applyDownstreamData(downstreamArgs MultiArrayUpd) (e
 			}
 		}
 		if oldSize != len(crdt.dataCounters) {
-			effectValue = MultiArraySetRegisterRangeWithSizeEffect{
+			effect = MultiArraySetRegisterRangeWithSizeEffect{
 				IncEff: MultiArraySetRegisterRangeEffect{From: dataUpd.From, To: dataUpd.To, Values: oldData, TsIds: oldTs}, OldSize: oldSize}
 		} else {
-			effectValue = MultiArraySetRegisterRangeEffect{From: dataUpd.From, To: dataUpd.To, Values: oldData, TsIds: oldTs}
+			effect = MultiArraySetRegisterRangeEffect{From: dataUpd.From, To: dataUpd.To, Values: oldData, TsIds: oldTs}
 		}
 	}
-	return &effectValue
+	return
 }
 
-func (crdt *MultiArrayCrdt) applyDownstreamAvg(downstreamArgs MultiArrayUpd) (effect *Effect) {
-	var effectValue Effect
+func (crdt *MultiArrayCrdt) applyDownstreamAvg(downstreamArgs MultiArrayUpd) (effect Effect) {
 	switch avgUpd := downstreamArgs.(type) {
 	case MultiArrayIncAvgSingle:
 		if int(avgUpd.Pos) >= len(crdt.sums) {
-			effectValue = MultiArraySetSizesEffect{AvgSize: int32(len(crdt.sums))} //The value of this position before was "0" as it did not belong to the array
+			effect = MultiArraySetSizesEffect{AvgSize: int32(len(crdt.sums))} //The value of this position before was "0" as it did not belong to the array
 			crdt.expandAvgArray(avgUpd.Pos + 1)
 		} else {
-			effectValue = MultiArrayIncAvgSingleEffect(avgUpd)
+			effect = MultiArrayIncAvgSingleEffect(avgUpd)
 		}
 		crdt.sums[avgUpd.Pos] += avgUpd.Value
 		crdt.counts[avgUpd.Pos] += int64(avgUpd.Count)
 	case MultiArrayIncAvg:
 		if len(avgUpd.Value) > len(crdt.sums) {
-			effectValue = MultiArrayIncAvgWithSizeEffect{IncEff: MultiArrayIncAvgEffect(avgUpd), OldSize: len(crdt.sums)}
+			effect = MultiArrayIncAvgWithSizeEffect{IncEff: MultiArrayIncAvgEffect(avgUpd), OldSize: len(crdt.sums)}
 			crdt.expandAvgArray(int32(len(avgUpd.Value)))
 		} else {
-			effectValue = MultiArrayIncAvgEffect(avgUpd)
+			effect = MultiArrayIncAvgEffect(avgUpd)
 		}
 		for i, value := range avgUpd.Value {
 			crdt.sums[i] += value
@@ -3119,9 +3121,9 @@ func (crdt *MultiArrayCrdt) applyDownstreamAvg(downstreamArgs MultiArrayUpd) (ef
 			}
 		}
 		if oldSize != len(crdt.sums) {
-			effectValue = MultiArrayIncAvgPositionsWithSizeEffect{IncEff: MultiArrayIncAvgPositionsEffect(avgUpd), OldSize: oldSize}
+			effect = MultiArrayIncAvgPositionsWithSizeEffect{IncEff: MultiArrayIncAvgPositionsEffect(avgUpd), OldSize: oldSize}
 		} else {
-			effectValue = MultiArrayIncAvgPositionsEffect(avgUpd)
+			effect = MultiArrayIncAvgPositionsEffect(avgUpd)
 		}
 	case MultiArrayIncAvgRange:
 		oldSize := len(crdt.sums)
@@ -3134,16 +3136,15 @@ func (crdt *MultiArrayCrdt) applyDownstreamAvg(downstreamArgs MultiArrayUpd) (ef
 			crdt.counts[i] += int64(avgUpd.Count)
 		}
 		if oldSize != len(crdt.intCounters) {
-			effectValue = MultiArrayIncAvgRangeWithSizeEffect{IncEff: MultiArrayIncAvgRangeEffect(avgUpd), OldSize: oldSize}
+			effect = MultiArrayIncAvgRangeWithSizeEffect{IncEff: MultiArrayIncAvgRangeEffect(avgUpd), OldSize: oldSize}
 		} else {
-			effectValue = MultiArrayIncAvgRangeEffect(avgUpd)
+			effect = MultiArrayIncAvgRangeEffect(avgUpd)
 		}
 	}
-	return &effectValue
+	return
 }
 
-func (crdt *MultiArrayCrdt) applyDownstreamMulti(upd DownstreamMultiArrayUpdateAll) (effect *Effect) {
-	var effectValue Effect
+func (crdt *MultiArrayCrdt) applyDownstreamMulti(upd DownstreamMultiArrayUpdateAll) (effect Effect) {
 	oldIntSize, oldFloatSize, oldDataSize, oldAvgSize := -1, -1, -1, -1
 	oldDataSlice, oldTsId := crdt.dataCounters, crdt.dataTsId
 	if len(upd.Ints) > 0 { //Ints
@@ -3193,70 +3194,69 @@ func (crdt *MultiArrayCrdt) applyDownstreamMulti(upd DownstreamMultiArrayUpdateA
 	}
 
 	if oldIntSize == -1 && oldFloatSize == -1 && oldDataSize == -1 && oldAvgSize == -1 {
-		effectValue = NoEffect{} //Happens when there's only update for data but it does not happen due to clock.
-		return &effectValue
+		return NoEffect{} //Happens when there's only update for data but it does not happen due to clock.
 	}
 	if oldIntSize > -1 && oldFloatSize == -1 && oldDataSize == -1 && oldAvgSize == -1 {
 		if oldIntSize < len(crdt.intCounters) {
-			effectValue = CounterArrayIncMultiWithSizeEffect{IncEff: CounterArrayIncrementMultiEffect(upd.Ints), OldSize: oldIntSize}
+			effect = CounterArrayIncMultiWithSizeEffect{IncEff: CounterArrayIncrementMultiEffect(upd.Ints), OldSize: oldIntSize}
 		} else {
-			effectValue = CounterArrayIncrementMultiEffect(upd.Ints)
+			effect = CounterArrayIncrementMultiEffect(upd.Ints)
 		}
 	} else if oldIntSize == -1 && oldFloatSize > -1 && oldDataSize == -1 && oldAvgSize == -1 {
 		if oldFloatSize < len(crdt.floatCounters) {
-			effectValue = MultiArrayIncFloatWithSizeEffect{IncEff: MultiArrayIncFloatEffect(upd.Floats), OldSize: oldFloatSize}
+			effect = MultiArrayIncFloatWithSizeEffect{IncEff: MultiArrayIncFloatEffect(upd.Floats), OldSize: oldFloatSize}
 		} else {
-			effectValue = MultiArrayIncFloatEffect(upd.Floats)
+			effect = MultiArrayIncFloatEffect(upd.Floats)
 		}
 	} else if oldIntSize == -1 && oldFloatSize == -1 && oldDataSize > -1 && oldAvgSize == -1 {
 		if oldDataSize < len(crdt.dataCounters) {
-			effectValue = MultiArraySetRegisterWithSizeEffect{IncEff: MultiArraySetRegisterEffect{Values: oldDataSlice, TsIds: oldTsId}, OldSize: oldDataSize}
+			effect = MultiArraySetRegisterWithSizeEffect{IncEff: MultiArraySetRegisterEffect{Values: oldDataSlice, TsIds: oldTsId}, OldSize: oldDataSize}
 		} else {
-			effectValue = MultiArraySetRegisterEffect{Values: oldDataSlice, TsIds: oldTsId}
+			effect = MultiArraySetRegisterEffect{Values: oldDataSlice, TsIds: oldTsId}
 		}
 	} else if oldIntSize == -1 && oldFloatSize == -1 && oldDataSize == -1 && oldAvgSize > -1 {
 		if oldAvgSize < len(crdt.sums) {
-			effectValue = MultiArrayIncAvgWithSizeEffect{IncEff: MultiArrayIncAvgEffect{Value: upd.Sums, Count: upd.Counts}, OldSize: oldAvgSize}
+			effect = MultiArrayIncAvgWithSizeEffect{IncEff: MultiArrayIncAvgEffect{Value: upd.Sums, Count: upd.Counts}, OldSize: oldAvgSize}
 		} else {
-			effectValue = MultiArrayIncAvgEffect{Value: upd.Sums, Count: upd.Counts}
+			effect = MultiArrayIncAvgEffect{Value: upd.Sums, Count: upd.Counts}
 		}
 	} else {
 		if oldIntSize == len(crdt.intCounters) && oldFloatSize == len(crdt.floatCounters) && oldDataSize == len(crdt.dataCounters) && oldAvgSize == len(crdt.sums) {
-			effectValue = MultiArrayUpdateAllEffect{MultiArrayUpdateAll: MultiArrayUpdateAll{Ints: upd.Ints, Floats: upd.Floats, Data: upd.Data, Sums: upd.Sums, Counts: upd.Counts}, TsId: upd.TsId}
+			effect = MultiArrayUpdateAllEffect{MultiArrayUpdateAll: MultiArrayUpdateAll{Ints: upd.Ints, Floats: upd.Floats, Data: upd.Data, Sums: upd.Sums, Counts: upd.Counts}, TsId: upd.TsId}
 		} else {
-			effectValue = MultiArrayUpdateAllWithSizeEffect{DownstreamMultiArrayUpdateAll: DownstreamMultiArrayUpdateAll{MultiArrayUpdateAll: MultiArrayUpdateAll{Ints: upd.Ints, Floats: upd.Floats, Data: upd.Data, Sums: upd.Sums, Counts: upd.Counts}, TsId: upd.TsId},
+			effect = MultiArrayUpdateAllWithSizeEffect{DownstreamMultiArrayUpdateAll: DownstreamMultiArrayUpdateAll{MultiArrayUpdateAll: MultiArrayUpdateAll{Ints: upd.Ints, Floats: upd.Floats, Data: upd.Data, Sums: upd.Sums, Counts: upd.Counts}, TsId: upd.TsId},
 				MultiArraySetSizesEffect: MultiArraySetSizesEffect{IntSize: int32(oldIntSize), FloatSize: int32(oldFloatSize), RegisterSize: int32(oldDataSize), AvgSize: int32(oldAvgSize)}}
 		}
 	}
-	return &effectValue
+	return
 }
 
-func (crdt *MultiArrayCrdt) applyDownstreamSize(sizeArg MultiArraySetSizes) (effect *Effect) {
-	var effectValue Effect
+func (crdt *MultiArrayCrdt) applyDownstreamSize(sizeArg MultiArraySetSizes) (effect Effect) {
 	sizeEffect := MultiArraySetSizesEffect{IntSize: -1, FloatSize: -1, RegisterSize: -1, AvgSize: -1}
 	atLeastOne := false
-	if sizeArg.IntSize > int32(len(crdt.intCounters)) {
-		sizeEffect.IntSize, atLeastOne = int32(len(crdt.intCounters)), true
+	lenInts, lenFloats, lenDataC, lenSums := int32(len(crdt.intCounters)), int32(len(crdt.floatCounters)), int32(len(crdt.dataCounters)), int32(len(crdt.sums))
+	if sizeArg.IntSize > lenInts {
+		sizeEffect.IntSize, atLeastOne = lenInts, true
 		crdt.expandIntArray(sizeArg.IntSize)
 	}
-	if sizeArg.FloatSize > int32(len(crdt.floatCounters)) {
-		sizeEffect.FloatSize, atLeastOne = int32(len(crdt.floatCounters)), true
+	if sizeArg.FloatSize > lenFloats {
+		sizeEffect.FloatSize, atLeastOne = lenFloats, true
 		crdt.expandFloatArray(sizeArg.FloatSize)
 	}
-	if sizeArg.RegisterSize > int32(len(crdt.dataCounters)) {
-		sizeEffect.RegisterSize, atLeastOne = int32(len(crdt.floatCounters)), true
+	if sizeArg.RegisterSize > lenDataC {
+		sizeEffect.RegisterSize, atLeastOne = lenDataC, true
 		crdt.expandDataArray(sizeArg.RegisterSize)
 	}
-	if sizeArg.AvgSize > int32(len(crdt.sums)) {
-		sizeEffect.AvgSize, atLeastOne = int32(len(crdt.counts)), true
+	if sizeArg.AvgSize > lenSums {
+		sizeEffect.AvgSize, atLeastOne = lenSums, true
 		crdt.expandAvgArray(sizeArg.AvgSize)
 	}
 	if !atLeastOne { //Can still happen (e.g., two concurrent set sizes)
-		effectValue = NoEffect{}
+		effect = NoEffect{}
 	} else {
-		effectValue = sizeEffect
+		effect = sizeEffect
 	}
-	return &effectValue
+	return
 }
 
 func (crdt *MultiArrayCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err error) {
@@ -3273,12 +3273,12 @@ func (crdt *MultiArrayCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
-func (crdt *MultiArrayCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *MultiArrayCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	return crdt.applyDownstream(updArgs)
 }
 
-func (crdt *MultiArrayCrdt) undoEffect(effect *Effect) {
-	switch typedEffect := (*effect).(type) {
+func (crdt *MultiArrayCrdt) undoEffect(effect Effect) {
+	switch typedEffect := (effect).(type) {
 	case CounterArrayIncrementEffect:
 		crdt.intCounters[typedEffect.Position] -= typedEffect.Change
 	case CounterArrayIncrementMultiEffect:
@@ -3491,7 +3491,7 @@ func (crdt *MultiArrayCrdt) undoEffect(effect *Effect) {
 	}
 }
 
-func (crdt *MultiArrayCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+func (crdt *MultiArrayCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {}
 
 //Protobuf functions
 
@@ -3502,7 +3502,7 @@ func (crdtOp MultiArraySetSizes) FromUpdateObject(protobuf *proto.ApbUpdateOpera
 }
 
 func (crdtOp MultiArraySetSizes) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	updType := proto.MultiArrayType_MA_SIZE
+	updType, nType := proto.MultiArrayType_MA_SIZE, proto.NumberArrayUpdType_SIZE
 	setSizesProto := proto.ApbMultiArraySetSizeUpdate{}
 	if crdtOp.IntSize > 0 {
 		setSizesProto.IntSize = &crdtOp.IntSize
@@ -3517,7 +3517,8 @@ func (crdtOp MultiArraySetSizes) ToUpdateObject() (protobuf *proto.ApbUpdateOper
 		setSizesProto.AvgSize = &crdtOp.AvgSize
 	}
 	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{
-		Type: &updType, Upd: &proto.ApbMultiArrayUpdate_SizeUpd{SizeUpd: &setSizesProto}}}}
+		Type: &updType, UpdType: &nType, SizeUpd: &setSizesProto}}}
+	//Type: &updType, Upd: &proto.ApbMultiArrayUpdate_SizeUpd{SizeUpd: &setSizesProto}}}}
 }
 
 func (crdtOp MultiArrayIncIntSingle) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -3526,9 +3527,10 @@ func (crdtOp MultiArrayIncIntSingle) FromUpdateObject(protobuf *proto.ApbUpdateO
 }
 
 func (crdtOp MultiArrayIncIntSingle) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	updType := proto.MultiArrayType_MA_INT
-	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType, Upd: &proto.ApbMultiArrayUpdate_IntUpd{
-		IntUpd: &proto.ApbMultiArrayIntUpdate{Upd: &proto.ApbMultiArrayIntUpdate_IncSingle{IncSingle: &proto.ApbMultiArrayIntIncSingle{Pos: &crdtOp.Pos, Change: &crdtOp.Change}}}}}}}
+	updType, nType := proto.MultiArrayType_MA_INT, proto.NumberArrayUpdType_INC
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType, UpdType: &nType,
+		IntUpd: &proto.ApbMultiArrayIntUpdate{IncSingle: &proto.ApbMultiArrayIntIncSingle{Pos: &crdtOp.Pos, Change: &crdtOp.Change}}}}}
+	//Upd: &proto.ApbMultiArrayUpdate_IntUpd{IntUpd: &proto.ApbMultiArrayIntUpdate{Upd: &proto.ApbMultiArrayIntUpdate_IncSingle{IncSingle: &proto.ApbMultiArrayIntIncSingle{Pos: &crdtOp.Pos, Change: &crdtOp.Change}}}}}}}
 }
 
 func (crdtOp MultiArrayIncInt) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -3536,9 +3538,10 @@ func (crdtOp MultiArrayIncInt) FromUpdateObject(protobuf *proto.ApbUpdateOperati
 }
 
 func (crdtOp MultiArrayIncInt) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	updType := proto.MultiArrayType_MA_INT
-	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType, Upd: &proto.ApbMultiArrayUpdate_IntUpd{
-		IntUpd: &proto.ApbMultiArrayIntUpdate{Upd: &proto.ApbMultiArrayIntUpdate_Inc{Inc: &proto.ApbMultiArrayIntInc{Changes: crdtOp}}}}}}}
+	updType, nType := proto.MultiArrayType_MA_INT, proto.NumberArrayUpdType_INC_MULTI
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType,
+		UpdType: &nType, IntUpd: &proto.ApbMultiArrayIntUpdate{Inc: &proto.ApbMultiArrayIntInc{Changes: crdtOp}}}}}
+	//Upd: &proto.ApbMultiArrayUpdate_IntUpd{IntUpd: &proto.ApbMultiArrayIntUpdate{Upd: &proto.ApbMultiArrayIntUpdate_Inc{Inc: &proto.ApbMultiArrayIntInc{Changes: crdtOp}}}}}}}
 }
 
 func (crdtOp MultiArrayIncIntPositions) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -3547,9 +3550,10 @@ func (crdtOp MultiArrayIncIntPositions) FromUpdateObject(protobuf *proto.ApbUpda
 }
 
 func (crdtOp MultiArrayIncIntPositions) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	updType := proto.MultiArrayType_MA_INT
-	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType, Upd: &proto.ApbMultiArrayUpdate_IntUpd{
-		IntUpd: &proto.ApbMultiArrayIntUpdate{Upd: &proto.ApbMultiArrayIntUpdate_IncPos{IncPos: &proto.ApbMultiArrayIntIncPositions{Change: crdtOp.Changes, Pos: crdtOp.Pos}}}}}}}
+	updType, nType := proto.MultiArrayType_MA_INT, proto.NumberArrayUpdType_INC_POS
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType,
+		UpdType: &nType, IntUpd: &proto.ApbMultiArrayIntUpdate{IncPos: &proto.ApbMultiArrayIntIncPositions{Change: crdtOp.Changes, Pos: crdtOp.Pos}}}}}
+	//Upd: &proto.ApbMultiArrayUpdate_IntUpd{IntUpd: &proto.ApbMultiArrayIntUpdate{Upd: &proto.ApbMultiArrayIntUpdate_IncPos{IncPos: &proto.ApbMultiArrayIntIncPositions{Change: crdtOp.Changes, Pos: crdtOp.Pos}}}}}}}
 }
 
 func (crdtOp MultiArrayIncIntRange) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -3558,9 +3562,10 @@ func (crdtOp MultiArrayIncIntRange) FromUpdateObject(protobuf *proto.ApbUpdateOp
 }
 
 func (crdtOp MultiArrayIncIntRange) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	updType := proto.MultiArrayType_MA_INT
-	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType, Upd: &proto.ApbMultiArrayUpdate_IntUpd{
-		IntUpd: &proto.ApbMultiArrayIntUpdate{Upd: &proto.ApbMultiArrayIntUpdate_IncRange{IncRange: &proto.ApbMultiArrayIntIncRange{From: &crdtOp.From, To: &crdtOp.To, Change: &crdtOp.Change}}}}}}}
+	updType, nType := proto.MultiArrayType_MA_INT, proto.NumberArrayUpdType_INC_RANGE
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType,
+		UpdType: &nType, IntUpd: &proto.ApbMultiArrayIntUpdate{IncRange: &proto.ApbMultiArrayIntIncRange{From: &crdtOp.From, To: &crdtOp.To, Change: &crdtOp.Change}}}}}
+	//Upd: &proto.ApbMultiArrayUpdate_IntUpd{IntUpd: &proto.ApbMultiArrayIntUpdate{Upd: &proto.ApbMultiArrayIntUpdate_IncRange{IncRange: &proto.ApbMultiArrayIntIncRange{From: &crdtOp.From, To: &crdtOp.To, Change: &crdtOp.Change}}}}}}}
 }
 
 func (crdtOp MultiArrayIncFloatSingle) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -3569,10 +3574,10 @@ func (crdtOp MultiArrayIncFloatSingle) FromUpdateObject(protobuf *proto.ApbUpdat
 }
 
 func (crdtOp MultiArrayIncFloatSingle) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	updType := proto.MultiArrayType_MA_FLOAT
-	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType, Upd: &proto.ApbMultiArrayUpdate_FloatUpd{
-		FloatUpd: &proto.ApbMultiArrayFloatUpdate{
-			Upd: &proto.ApbMultiArrayFloatUpdate_IncSingle{IncSingle: &proto.ApbMultiArrayFloatIncSingle{Pos: &crdtOp.Pos, Change: &crdtOp.Change}}}}}}}
+	updType, nType := proto.MultiArrayType_MA_FLOAT, proto.NumberArrayUpdType_INC
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType,
+		UpdType: &nType, FloatUpd: &proto.ApbMultiArrayFloatUpdate{IncSingle: &proto.ApbMultiArrayFloatIncSingle{Pos: &crdtOp.Pos, Change: &crdtOp.Change}}}}}
+	//Upd: &proto.ApbMultiArrayUpdate_FloatUpd{FloatUpd: &proto.ApbMultiArrayFloatUpdate{Upd: &proto.ApbMultiArrayFloatUpdate_IncSingle{IncSingle: &proto.ApbMultiArrayFloatIncSingle{Pos: &crdtOp.Pos, Change: &crdtOp.Change}}}}}}}
 }
 
 func (crdtOp MultiArrayIncFloat) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -3580,9 +3585,10 @@ func (crdtOp MultiArrayIncFloat) FromUpdateObject(protobuf *proto.ApbUpdateOpera
 }
 
 func (crdtOp MultiArrayIncFloat) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	updType := proto.MultiArrayType_MA_FLOAT
-	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType, Upd: &proto.ApbMultiArrayUpdate_FloatUpd{
-		FloatUpd: &proto.ApbMultiArrayFloatUpdate{Upd: &proto.ApbMultiArrayFloatUpdate_Inc{Inc: &proto.ApbMultiArrayFloatInc{Changes: crdtOp}}}}}}}
+	updType, nType := proto.MultiArrayType_MA_FLOAT, proto.NumberArrayUpdType_INC_MULTI
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType,
+		UpdType: &nType, FloatUpd: &proto.ApbMultiArrayFloatUpdate{Inc: &proto.ApbMultiArrayFloatInc{Changes: crdtOp}}}}}
+	//Upd: &proto.ApbMultiArrayUpdate_FloatUpd{FloatUpd: &proto.ApbMultiArrayFloatUpdate{Upd: &proto.ApbMultiArrayFloatUpdate_Inc{Inc: &proto.ApbMultiArrayFloatInc{Changes: crdtOp}}}}}}}
 }
 
 func (crdtOp MultiArrayIncFloatPositions) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -3591,9 +3597,10 @@ func (crdtOp MultiArrayIncFloatPositions) FromUpdateObject(protobuf *proto.ApbUp
 }
 
 func (crdtOp MultiArrayIncFloatPositions) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	updType := proto.MultiArrayType_MA_FLOAT
-	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType, Upd: &proto.ApbMultiArrayUpdate_FloatUpd{
-		FloatUpd: &proto.ApbMultiArrayFloatUpdate{Upd: &proto.ApbMultiArrayFloatUpdate_IncPos{IncPos: &proto.ApbMultiArrayFloatIncPositions{Change: crdtOp.Changes, Pos: crdtOp.Pos}}}}}}}
+	updType, nType := proto.MultiArrayType_MA_FLOAT, proto.NumberArrayUpdType_INC_POS
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType,
+		UpdType: &nType, FloatUpd: &proto.ApbMultiArrayFloatUpdate{IncPos: &proto.ApbMultiArrayFloatIncPositions{Change: crdtOp.Changes, Pos: crdtOp.Pos}}}}}
+	//Upd: &proto.ApbMultiArrayUpdate_FloatUpd{FloatUpd: &proto.ApbMultiArrayFloatUpdate{Upd: &proto.ApbMultiArrayFloatUpdate_IncPos{IncPos: &proto.ApbMultiArrayFloatIncPositions{Change: crdtOp.Changes, Pos: crdtOp.Pos}}}}}}}
 }
 
 func (crdtOp MultiArrayIncFloatRange) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -3602,9 +3609,10 @@ func (crdtOp MultiArrayIncFloatRange) FromUpdateObject(protobuf *proto.ApbUpdate
 }
 
 func (crdtOp MultiArrayIncFloatRange) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	updType := proto.MultiArrayType_MA_FLOAT
-	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType, Upd: &proto.ApbMultiArrayUpdate_FloatUpd{
-		FloatUpd: &proto.ApbMultiArrayFloatUpdate{Upd: &proto.ApbMultiArrayFloatUpdate_IncRange{IncRange: &proto.ApbMultiArrayFloatIncRange{From: &crdtOp.From, To: &crdtOp.To, Change: &crdtOp.Change}}}}}}}
+	updType, nType := proto.MultiArrayType_MA_FLOAT, proto.NumberArrayUpdType_INC_RANGE
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType,
+		UpdType: &nType, FloatUpd: &proto.ApbMultiArrayFloatUpdate{IncRange: &proto.ApbMultiArrayFloatIncRange{From: &crdtOp.From, To: &crdtOp.To, Change: &crdtOp.Change}}}}}
+	//Upd: &proto.ApbMultiArrayUpdate_FloatUpd{FloatUpd: &proto.ApbMultiArrayFloatUpdate{Upd: &proto.ApbMultiArrayFloatUpdate_IncRange{IncRange: &proto.ApbMultiArrayFloatIncRange{From: &crdtOp.From, To: &crdtOp.To, Change: &crdtOp.Change}}}}}}}
 }
 
 func (crdtOp MultiArraySetRegisterSingle) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -3613,9 +3621,10 @@ func (crdtOp MultiArraySetRegisterSingle) FromUpdateObject(protobuf *proto.ApbUp
 }
 
 func (crdtOp MultiArraySetRegisterSingle) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	updType := proto.MultiArrayType_MA_DATA
-	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType, Upd: &proto.ApbMultiArrayUpdate_DataUpd{
-		DataUpd: &proto.ApbMultiArrayDataUpdate{Upd: &proto.ApbMultiArrayDataUpdate_SetSingle{SetSingle: &proto.ApbMultiArrayDataSetSingle{Pos: &crdtOp.Pos, Data: crdtOp.Value}}}}}}}
+	updType, nType := proto.MultiArrayType_MA_DATA, proto.NumberArrayUpdType_INC
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType,
+		UpdType: &nType, DataUpd: &proto.ApbMultiArrayDataUpdate{SetSingle: &proto.ApbMultiArrayDataSetSingle{Pos: &crdtOp.Pos, Data: crdtOp.Value}}}}}
+	//Upd: &proto.ApbMultiArrayUpdate_DataUpd{DataUpd: &proto.ApbMultiArrayDataUpdate{Upd: &proto.ApbMultiArrayDataUpdate_SetSingle{SetSingle: &proto.ApbMultiArrayDataSetSingle{Pos: &crdtOp.Pos, Data: crdtOp.Value}}}}}}}
 }
 
 func (crdtOp MultiArraySetRegister) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -3623,9 +3632,10 @@ func (crdtOp MultiArraySetRegister) FromUpdateObject(protobuf *proto.ApbUpdateOp
 }
 
 func (crdtOp MultiArraySetRegister) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	updType := proto.MultiArrayType_MA_DATA
-	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType, Upd: &proto.ApbMultiArrayUpdate_DataUpd{
-		DataUpd: &proto.ApbMultiArrayDataUpdate{Upd: &proto.ApbMultiArrayDataUpdate_Set{Set: &proto.ApbMultiArrayDataSet{Data: crdtOp}}}}}}}
+	updType, nType := proto.MultiArrayType_MA_DATA, proto.NumberArrayUpdType_INC_MULTI
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType,
+		UpdType: &nType, DataUpd: &proto.ApbMultiArrayDataUpdate{Set: &proto.ApbMultiArrayDataSet{Data: crdtOp}}}}}
+	//Upd: &proto.ApbMultiArrayUpdate_DataUpd{DataUpd: &proto.ApbMultiArrayDataUpdate{Upd: &proto.ApbMultiArrayDataUpdate_Set{Set: &proto.ApbMultiArrayDataSet{Data: crdtOp}}}}}}}
 }
 
 func (crdtOp MultiArraySetRegisterPositions) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -3634,9 +3644,10 @@ func (crdtOp MultiArraySetRegisterPositions) FromUpdateObject(protobuf *proto.Ap
 }
 
 func (crdtOp MultiArraySetRegisterPositions) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	updType := proto.MultiArrayType_MA_DATA
-	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType, Upd: &proto.ApbMultiArrayUpdate_DataUpd{
-		DataUpd: &proto.ApbMultiArrayDataUpdate{Upd: &proto.ApbMultiArrayDataUpdate_SetPos{SetPos: &proto.ApbMultiArrayDataSetPositions{Pos: crdtOp.Pos, Data: crdtOp.Values}}}}}}}
+	updType, nType := proto.MultiArrayType_MA_DATA, proto.NumberArrayUpdType_INC_POS
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType,
+		UpdType: &nType, DataUpd: &proto.ApbMultiArrayDataUpdate{SetPos: &proto.ApbMultiArrayDataSetPositions{Pos: crdtOp.Pos, Data: crdtOp.Values}}}}}
+	//Upd: &proto.ApbMultiArrayUpdate_DataUpd{DataUpd: &proto.ApbMultiArrayDataUpdate{Upd: &proto.ApbMultiArrayDataUpdate_SetPos{SetPos: &proto.ApbMultiArrayDataSetPositions{Pos: crdtOp.Pos, Data: crdtOp.Values}}}}}}}
 }
 
 func (crdtOp MultiArraySetRegisterRange) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -3645,9 +3656,10 @@ func (crdtOp MultiArraySetRegisterRange) FromUpdateObject(protobuf *proto.ApbUpd
 }
 
 func (crdtOp MultiArraySetRegisterRange) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	updType := proto.MultiArrayType_MA_DATA
-	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType, Upd: &proto.ApbMultiArrayUpdate_DataUpd{
-		DataUpd: &proto.ApbMultiArrayDataUpdate{Upd: &proto.ApbMultiArrayDataUpdate_SetRange{SetRange: &proto.ApbMultiArrayDataSetRange{From: &crdtOp.From, To: &crdtOp.To, Data: crdtOp.Value}}}}}}}
+	updType, nType := proto.MultiArrayType_MA_DATA, proto.NumberArrayUpdType_INC_RANGE
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType,
+		UpdType: &nType, DataUpd: &proto.ApbMultiArrayDataUpdate{SetRange: &proto.ApbMultiArrayDataSetRange{From: &crdtOp.From, To: &crdtOp.To, Data: crdtOp.Value}}}}}
+	//Upd: &proto.ApbMultiArrayUpdate_DataUpd{DataUpd: &proto.ApbMultiArrayDataUpdate{Upd: &proto.ApbMultiArrayDataUpdate_SetRange{SetRange: &proto.ApbMultiArrayDataSetRange{From: &crdtOp.From, To: &crdtOp.To, Data: crdtOp.Value}}}}}}}
 }
 
 func (crdtOp MultiArrayIncAvgSingle) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -3656,9 +3668,10 @@ func (crdtOp MultiArrayIncAvgSingle) FromUpdateObject(protobuf *proto.ApbUpdateO
 }
 
 func (crdtOp MultiArrayIncAvgSingle) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	updType := proto.MultiArrayType_MA_AVG
-	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType, Upd: &proto.ApbMultiArrayUpdate_AvgUpd{
-		AvgUpd: &proto.ApbMultiArrayAvgUpdate{Upd: &proto.ApbMultiArrayAvgUpdate_IncSingle{IncSingle: &proto.ApbMultiArrayAvgIncSingle{Pos: &crdtOp.Pos, Value: &crdtOp.Value, Count: &crdtOp.Count}}}}}}}
+	updType, nType := proto.MultiArrayType_MA_AVG, proto.NumberArrayUpdType_INC
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType,
+		UpdType: &nType, AvgUpd: &proto.ApbMultiArrayAvgUpdate{IncSingle: &proto.ApbMultiArrayAvgIncSingle{Pos: &crdtOp.Pos, Value: &crdtOp.Value, Count: &crdtOp.Count}}}}}
+	//Upd: &proto.ApbMultiArrayUpdate_AvgUpd{AvgUpd: &proto.ApbMultiArrayAvgUpdate{Upd: &proto.ApbMultiArrayAvgUpdate_IncSingle{IncSingle: &proto.ApbMultiArrayAvgIncSingle{Pos: &crdtOp.Pos, Value: &crdtOp.Value, Count: &crdtOp.Count}}}}}}}
 }
 
 func (crdtOp MultiArrayIncAvg) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -3667,9 +3680,10 @@ func (crdtOp MultiArrayIncAvg) FromUpdateObject(protobuf *proto.ApbUpdateOperati
 }
 
 func (crdtOp MultiArrayIncAvg) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	updType := proto.MultiArrayType_MA_AVG
-	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType, Upd: &proto.ApbMultiArrayUpdate_AvgUpd{
-		AvgUpd: &proto.ApbMultiArrayAvgUpdate{Upd: &proto.ApbMultiArrayAvgUpdate_Inc{Inc: &proto.ApbMultiArrayAvgInc{Values: crdtOp.Value, Counts: crdtOp.Count}}}}}}}
+	updType, nType := proto.MultiArrayType_MA_AVG, proto.NumberArrayUpdType_INC_MULTI
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType,
+		UpdType: &nType, AvgUpd: &proto.ApbMultiArrayAvgUpdate{Inc: &proto.ApbMultiArrayAvgInc{Values: crdtOp.Value, Counts: crdtOp.Count}}}}}
+	//Upd: &proto.ApbMultiArrayUpdate_AvgUpd{AvgUpd: &proto.ApbMultiArrayAvgUpdate{Upd: &proto.ApbMultiArrayAvgUpdate_Inc{Inc: &proto.ApbMultiArrayAvgInc{Values: crdtOp.Value, Counts: crdtOp.Count}}}}}}}
 }
 
 func (crdtOp MultiArrayIncAvgPositions) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -3678,9 +3692,10 @@ func (crdtOp MultiArrayIncAvgPositions) FromUpdateObject(protobuf *proto.ApbUpda
 }
 
 func (crdtOp MultiArrayIncAvgPositions) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	updType := proto.MultiArrayType_MA_AVG
-	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType, Upd: &proto.ApbMultiArrayUpdate_AvgUpd{
-		AvgUpd: &proto.ApbMultiArrayAvgUpdate{Upd: &proto.ApbMultiArrayAvgUpdate_IncPos{IncPos: &proto.ApbMultiArrayAvgIncPositions{Pos: crdtOp.Pos, Values: crdtOp.Value, Counts: crdtOp.Count}}}}}}}
+	updType, nType := proto.MultiArrayType_MA_AVG, proto.NumberArrayUpdType_INC_POS
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType,
+		UpdType: &nType, AvgUpd: &proto.ApbMultiArrayAvgUpdate{IncPos: &proto.ApbMultiArrayAvgIncPositions{Pos: crdtOp.Pos, Values: crdtOp.Value, Counts: crdtOp.Count}}}}}
+	//Upd: &proto.ApbMultiArrayUpdate_AvgUpd{AvgUpd: &proto.ApbMultiArrayAvgUpdate{Upd: &proto.ApbMultiArrayAvgUpdate_IncPos{IncPos: &proto.ApbMultiArrayAvgIncPositions{Pos: crdtOp.Pos, Values: crdtOp.Value, Counts: crdtOp.Count}}}}}}}
 }
 
 func (crdtOp MultiArrayIncAvgRange) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -3689,9 +3704,10 @@ func (crdtOp MultiArrayIncAvgRange) FromUpdateObject(protobuf *proto.ApbUpdateOp
 }
 
 func (crdtOp MultiArrayIncAvgRange) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	updType := proto.MultiArrayType_MA_AVG
-	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType, Upd: &proto.ApbMultiArrayUpdate_AvgUpd{
-		AvgUpd: &proto.ApbMultiArrayAvgUpdate{Upd: &proto.ApbMultiArrayAvgUpdate_IncRange{IncRange: &proto.ApbMultiArrayAvgIncRange{From: &crdtOp.From, To: &crdtOp.To, Value: &crdtOp.Value, Count: &crdtOp.Count}}}}}}}
+	updType, nType := proto.MultiArrayType_MA_AVG, proto.NumberArrayUpdType_INC_RANGE
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType,
+		UpdType: &nType, AvgUpd: &proto.ApbMultiArrayAvgUpdate{IncRange: &proto.ApbMultiArrayAvgIncRange{From: &crdtOp.From, To: &crdtOp.To, Value: &crdtOp.Value, Count: &crdtOp.Count}}}}}
+	//Upd: &proto.ApbMultiArrayUpdate_AvgUpd{AvgUpd: &proto.ApbMultiArrayAvgUpdate{Upd: &proto.ApbMultiArrayAvgUpdate_IncRange{IncRange: &proto.ApbMultiArrayAvgIncRange{From: &crdtOp.From, To: &crdtOp.To, Value: &crdtOp.Value, Count: &crdtOp.Count}}}}}}}
 }
 
 func (crdtOp MultiArrayUpdateAll) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -3701,7 +3717,7 @@ func (crdtOp MultiArrayUpdateAll) FromUpdateObject(protobuf *proto.ApbUpdateOper
 }
 
 func (crdtOp MultiArrayUpdateAll) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	updType := proto.MultiArrayType_MA_MULTI
+	updType, nType := proto.MultiArrayType_MA_MULTI, proto.NumberArrayUpdType_INC_MULTI
 	multiUpdProto := &proto.ApbMultiArrayMultiUpdate{}
 	if len(crdtOp.Ints) > 0 {
 		multiUpdProto.Ints = crdtOp.Ints
@@ -3716,7 +3732,8 @@ func (crdtOp MultiArrayUpdateAll) ToUpdateObject() (protobuf *proto.ApbUpdateOpe
 		multiUpdProto.Counts, multiUpdProto.Sums = crdtOp.Counts, crdtOp.Sums
 	}
 	//fmt.Printf("[MultiArrayUpdateAll]Converted to update obj. Lens: ints %d, floats %d, data %d, counts %d, sums %d\n", len(crdtOp.Ints), len(crdtOp.Floats), len(crdtOp.Data), len(crdtOp.Counts), len(crdtOp.Sums))
-	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType, Upd: &proto.ApbMultiArrayUpdate_MultiUpd{MultiUpd: multiUpdProto}}}}
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType, UpdType: &nType, MultiUpd: multiUpdProto}}}
+	//return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Multiarrayop{Multiarrayop: &proto.ApbMultiArrayUpdate{Type: &updType, Upd: &proto.ApbMultiArrayUpdate_MultiUpd{MultiUpd: multiUpdProto}}}}
 }
 
 func (crdtState MultiArrayState) FromReadResp(protobuf *proto.ApbReadObjectResp) (state State) {
@@ -3725,7 +3742,7 @@ func (crdtState MultiArrayState) FromReadResp(protobuf *proto.ApbReadObjectResp)
 		DataCounters: protoState.GetDataArray(), Sums: protoState.GetSums(), Counts: protoState.GetCounts()}
 }
 
-func (crdtState MultiArrayState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState MultiArrayState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	protoState := &proto.ApbGetMultiArrayResp{}
 	if len(crdtState.IntCounters) > 0 {
 		protoState.IntCounters = crdtState.IntCounters
@@ -3747,7 +3764,7 @@ func (crdtState IntArrayState) FromReadResp(protobuf *proto.ApbReadObjectResp) (
 	return IntArrayState(protobuf.GetPartread().GetMultiarray().GetInts().GetIntValues())
 }
 
-func (crdtState IntArrayState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState IntArrayState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	arrayType := proto.MultiArrayType_MA_INT
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Multiarray{
 		Multiarray: &proto.ApbMultiArrayPartialReadResp{Type: &arrayType, Resp: &proto.ApbMultiArrayPartialReadResp_Ints{Ints: &proto.ApbMultiArrayIntResp{IntValues: crdtState}}}}}}}
@@ -3757,7 +3774,7 @@ func (crdtState FloatArrayState) FromReadResp(protobuf *proto.ApbReadObjectResp)
 	return FloatArrayState(protobuf.GetPartread().GetMultiarray().GetFloats().GetFloatValues())
 }
 
-func (crdtState FloatArrayState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState FloatArrayState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	arrayType := proto.MultiArrayType_MA_FLOAT
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Multiarray{
 		Multiarray: &proto.ApbMultiArrayPartialReadResp{Type: &arrayType, Resp: &proto.ApbMultiArrayPartialReadResp_Floats{Floats: &proto.ApbMultiArrayFloatResp{FloatValues: crdtState}}}}}}}
@@ -3768,7 +3785,7 @@ func (crdtState AvgArrayState) FromReadResp(protobuf *proto.ApbReadObjectResp) (
 	return AvgArrayState{Sums: protoState.GetSums(), Counts: protoState.GetCounts()}
 }
 
-func (crdtState AvgArrayState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState AvgArrayState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	arrayType := proto.MultiArrayType_MA_AVG
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Multiarray{
 		Multiarray: &proto.ApbMultiArrayPartialReadResp{Type: &arrayType, Resp: &proto.ApbMultiArrayPartialReadResp_Avgs{Avgs: &proto.ApbMultiArrayAvgResp{Sums: crdtState.Sums, Counts: crdtState.Counts}}}}}}}
@@ -3778,7 +3795,7 @@ func (crdtState DataArrayState) FromReadResp(protobuf *proto.ApbReadObjectResp) 
 	return DataArrayState(protobuf.GetPartread().GetMultiarray().GetData().GetDataValues())
 }
 
-func (crdtState DataArrayState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState DataArrayState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	arrayType := proto.MultiArrayType_MA_DATA
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Multiarray{
 		Multiarray: &proto.ApbMultiArrayPartialReadResp{Type: &arrayType, Resp: &proto.ApbMultiArrayPartialReadResp_Data{Data: &proto.ApbMultiArrayDataResp{DataValues: crdtState}}}}}}}
@@ -3788,7 +3805,7 @@ func (crdtState IntArraySingleState) FromReadResp(protobuf *proto.ApbReadObjectR
 	return IntArraySingleState(protobuf.GetPartread().GetMultiarray().GetSingle().GetIntValue())
 }
 
-func (crdtState IntArraySingleState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState IntArraySingleState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	arrayType := proto.MultiArrayType_MA_INT
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Multiarray{
 		Multiarray: &proto.ApbMultiArrayPartialReadResp{Type: &arrayType, Resp: &proto.ApbMultiArrayPartialReadResp_Single{Single: &proto.ApbMultiArraySingleResp{IntValue: pb.Int64(int64(crdtState))}}}}}}}
@@ -3798,7 +3815,7 @@ func (crdtState FloatArraySingleState) FromReadResp(protobuf *proto.ApbReadObjec
 	return FloatArraySingleState(protobuf.GetPartread().GetMultiarray().GetSingle().GetFloatValue())
 }
 
-func (crdtState FloatArraySingleState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState FloatArraySingleState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	arrayType := proto.MultiArrayType_MA_FLOAT
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Multiarray{
 		Multiarray: &proto.ApbMultiArrayPartialReadResp{Type: &arrayType, Resp: &proto.ApbMultiArrayPartialReadResp_Single{Single: &proto.ApbMultiArraySingleResp{FloatValue: pb.Float64(float64(crdtState))}}}}}}}
@@ -3809,7 +3826,7 @@ func (crdtState AvgArraySingleState) FromReadResp(protobuf *proto.ApbReadObjectR
 	return AvgArraySingleState{Sum: singleProto.GetSumValue(), Count: singleProto.GetCountValue()}
 }
 
-func (crdtState AvgArraySingleState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState AvgArraySingleState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	arrayType := proto.MultiArrayType_MA_AVG
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Multiarray{Multiarray: &proto.ApbMultiArrayPartialReadResp{
 		Type: &arrayType, Resp: &proto.ApbMultiArrayPartialReadResp_Single{Single: &proto.ApbMultiArraySingleResp{SumValue: pb.Int64(crdtState.Sum), CountValue: pb.Int64(crdtState.Count)}}}}}}}
@@ -3819,7 +3836,7 @@ func (crdtState DataArraySingleState) FromReadResp(protobuf *proto.ApbReadObject
 	return DataArraySingleState(protobuf.GetPartread().GetMultiarray().GetSingle().GetDataValue())
 }
 
-func (crdtState DataArraySingleState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState DataArraySingleState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	arrayType := proto.MultiArrayType_MA_DATA
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Multiarray{
 		Multiarray: &proto.ApbMultiArrayPartialReadResp{Type: &arrayType, Resp: &proto.ApbMultiArrayPartialReadResp_Single{Single: &proto.ApbMultiArraySingleResp{DataValue: crdtState}}}}}}}
@@ -3831,7 +3848,7 @@ func (crdtState MultiArraySingleState) FromReadResp(protobuf *proto.ApbReadObjec
 		DataValue: singleProto.GetDataValue(), Sum: singleProto.GetSumValue(), Count: singleProto.GetCountValue()}
 }
 
-func (crdtState MultiArraySingleState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState MultiArraySingleState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	arrayType := proto.MultiArrayType_MA_MULTI
 	singleProto := proto.ApbMultiArraySingleResp{}
 	if crdtState.IntValue != 0 {
@@ -3857,7 +3874,7 @@ func (crdtState MultiArrayDataSliceIntPosState) FromReadResp(protobuf *proto.Apb
 	return MultiArrayDataSliceIntPosState{DataCounters: stateProto.GetDataValues(), IntValue: stateProto.GetIntValue()}
 }
 
-func (crdtState MultiArrayDataSliceIntPosState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState MultiArrayDataSliceIntPosState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	arrayType := proto.MultiArrayType_MA_INT
 	//fmt.Printf("[MultiArrayDataSliceIntPosState][ToReadResp]len(data): %d. Int value: %d. Data values: %v, %v, %v.\n", len(crdtState.DataCounters), crdtState.IntValue,
 	//crdtState.DataCounters[0], crdtState.DataCounters[1], crdtState.DataCounters[2])
@@ -3870,7 +3887,7 @@ func (crdtState MultiArrayDataSliceFloatPosState) FromReadResp(protobuf *proto.A
 	return MultiArrayDataSliceFloatPosState{DataCounters: stateProto.GetDataValues(), FloatValue: stateProto.GetFloatValue()}
 }
 
-func (crdtState MultiArrayDataSliceFloatPosState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState MultiArrayDataSliceFloatPosState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	arrayType := proto.MultiArrayType_MA_FLOAT
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Multiarray{Multiarray: &proto.ApbMultiArrayPartialReadResp{
 		Type: &arrayType, Resp: &proto.ApbMultiArrayPartialReadResp_DataAndSingle{DataAndSingle: &proto.ApbMultiArrayDataAndSingleResp{DataValues: crdtState.DataCounters, FloatValue: &crdtState.FloatValue}}}}}}}
@@ -3881,7 +3898,7 @@ func (crdtState MultiArrayDataSliceAvgPosState) FromReadResp(protobuf *proto.Apb
 	return MultiArrayDataSliceAvgPosState{DataCounters: stateProto.GetDataValues(), Sum: stateProto.GetIntValue(), Count: stateProto.GetCountValue()}
 }
 
-func (crdtState MultiArrayDataSliceAvgPosState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState MultiArrayDataSliceAvgPosState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	arrayType := proto.MultiArrayType_MA_AVG
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Multiarray{Multiarray: &proto.ApbMultiArrayPartialReadResp{
 		Type: &arrayType, Resp: &proto.ApbMultiArrayPartialReadResp_DataAndSingle{DataAndSingle: &proto.ApbMultiArrayDataAndSingleResp{DataValues: crdtState.DataCounters, IntValue: &crdtState.Sum, CountValue: &crdtState.Count}}}}}}}
@@ -4339,7 +4356,7 @@ func (crdt MultiArrayCrdt) ToProtoState() (protobuf *proto.ProtoState) {
 		Data: crdt.dataCounters, Sums: crdt.sums, Counts: crdt.counts}}}
 }
 
-func (crdt MultiArrayCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
+func (crdt MultiArrayCrdt) FromProtoState(proto *proto.ProtoState, ts clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	protoState := proto.GetMultiArray()
 	return (&MultiArrayCrdt{intCounters: protoState.GetIntCounters(), floatCounters: protoState.GetFloatCounters(),
 		dataCounters: protoState.GetData(), sums: protoState.GetSums(), counts: protoState.GetCounts()}).initializeFromSnapshot(ts, replicaID)
@@ -4934,18 +4951,18 @@ func avgAvgSliceByValue[T Number](sumSlice, countSlice []T, compValue T, comp Co
 switch intUpd := downstreamArgs.(type) {
 	case CounterArrayIncrement:
 		if int(intUpd.Position) >= len(crdt.intCounters) {
-			effectValue = MultiArraySetSizesEffect{intSize: int32(len(crdt.intCounters))} //The value of this position before was "0" as it did not belong to the array
+			effect = MultiArraySetSizesEffect{intSize: int32(len(crdt.intCounters))} //The value of this position before was "0" as it did not belong to the array
 			crdt.expandIntArray(intUpd.Position + 1)
 		} else {
-			effectValue = CounterArrayIncrementEffect(intUpd)
+			effect = CounterArrayIncrementEffect(intUpd)
 		}
 		crdt.intCounters[intUpd.Position] += intUpd.Change
 	case CounterArrayIncrementMulti:
 		if len(intUpd) > len(crdt.intCounters) {
-			effectValue = CounterArrayIncMultiWithSizeEffect{IncEff: CounterArrayIncrementMultiEffect(intUpd), OldSize: len(crdt.intCounters)}
+			effect = CounterArrayIncMultiWithSizeEffect{IncEff: CounterArrayIncrementMultiEffect(intUpd), OldSize: len(crdt.intCounters)}
 			crdt.expandIntArray(int32(len(intUpd)))
 		} else {
-			effectValue = CounterArrayIncrementMultiEffect(intUpd)
+			effect = CounterArrayIncrementMultiEffect(intUpd)
 		}
 		for i, change := range intUpd {
 			crdt.intCounters[i] += change
@@ -4969,9 +4986,9 @@ switch intUpd := downstreamArgs.(type) {
 			}
 		}
 		if oldSize != len(crdt.intCounters) {
-			effectValue = CounterArrayIncSubWithSizeEffect{IncEff: CounterArrayIncrementSubEffect(intUpd), OldSize: oldSize}
+			effect = CounterArrayIncSubWithSizeEffect{IncEff: CounterArrayIncrementSubEffect(intUpd), OldSize: oldSize}
 		} else {
-			effectValue = CounterArrayIncrementSubEffect(intUpd)
+			effect = CounterArrayIncrementSubEffect(intUpd)
 		}
 	}
 */
@@ -5142,23 +5159,23 @@ func (crdt *MultiArrayCrdt) toAvgSlice(slice []int64) (sums, counts []int64) {
 	return
 }
 
-func (crdt *MultiArrayCrdt) applyDownstreamAvg(downstreamArgs MultiArrayUpd) (effect *Effect) {
+func (crdt *MultiArrayCrdt) applyDownstreamAvg(downstreamArgs MultiArrayUpd) (effect Effect) {
 	var effectValue Effect
 	switch avgUpd := downstreamArgs.(type) {
 	case MultiArrayIncAvgSingle:
 		if int(avgUpd.Pos) >= len(crdt.intCounters) {
-			effectValue = MultiArraySetSizesEffect{intSize: int32(len(crdt.intCounters))} //The value of this position before was "0" as it did not belong to the array
+			effect = MultiArraySetSizesEffect{intSize: int32(len(crdt.intCounters))} //The value of this position before was "0" as it did not belong to the array
 			crdt.expandIntArray(avgUpd.Pos + 1)
 		} else {
-			effectValue = MultiArrayIncAvgSingleEffect(avgUpd)
+			effect = MultiArrayIncAvgSingleEffect(avgUpd)
 		}
 		crdt.intCounters[avgUpd.Pos] += int64(avgUpd.Value)<<24 | int64(avgUpd.Count)&0xFFFFFF //|: same effect as +
 	case MultiArrayIncAvg:
 		if len(avgUpd.Value) > len(crdt.intCounters) {
-			effectValue = MultiArrayIncAvgWithSizeEffect{IncEff: MultiArrayIncAvgEffect(avgUpd), OldSize: len(crdt.intCounters)}
+			effect = MultiArrayIncAvgWithSizeEffect{IncEff: MultiArrayIncAvgEffect(avgUpd), OldSize: len(crdt.intCounters)}
 			crdt.expandIntArray(int32(len(avgUpd.Value)))
 		} else {
-			effectValue = MultiArrayIncAvgEffect(avgUpd)
+			effect = MultiArrayIncAvgEffect(avgUpd)
 		}
 		for i, value := range avgUpd.Value {
 			crdt.intCounters[i] += int64(value)<<24 | int64(avgUpd.Count[i])&0xFFFFFF
@@ -5182,9 +5199,9 @@ func (crdt *MultiArrayCrdt) applyDownstreamAvg(downstreamArgs MultiArrayUpd) (ef
 			}
 		}
 		if oldSize != len(crdt.intCounters) {
-			effectValue = MultiArrayIncAvgPositionsWithSizeEffect{IncEff: MultiArrayIncAvgPositionsEffect(avgUpd), OldSize: oldSize}
+			effect = MultiArrayIncAvgPositionsWithSizeEffect{IncEff: MultiArrayIncAvgPositionsEffect(avgUpd), OldSize: oldSize}
 		} else {
-			effectValue = MultiArrayIncAvgPositionsEffect(avgUpd)
+			effect = MultiArrayIncAvgPositionsEffect(avgUpd)
 		}
 	}
 	return &effectValue

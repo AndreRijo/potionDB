@@ -60,14 +60,14 @@ func (args FlagState) GetCRDTType() proto.CRDTType               { return proto.
 func (args FlagState) GetDATAType() proto.DATAType               { return proto.DATAType_DEFAULT }
 func (args FlagState) GetREADType() proto.READType               { return proto.READType_FULL }
 
-func (crdt *EwFlagCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *EwFlagCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	return &EwFlagCrdt{enables: makeUniqueSet(), random: rand.NewSource(time.Now().Unix())}
 	//crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	//return crdt
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *EwFlagCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *EwFlagCrdt) {
+func (crdt *EwFlagCrdt) initializeFromSnapshot(startTs clocksi.Timestamp, replicaID uint16) (sameCRDT *EwFlagCrdt) {
 	crdt.CRDTVM, crdt.random = (&genericInversibleCRDT{}).initialize(crdt),
 		rand.NewSource(time.Now().Unix())
 	return crdt
@@ -120,11 +120,11 @@ func (crdt *EwFlagCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs Downs
 		}
 		return nil
 	}
-	crdt.addToHistory(&updTs, &downstreamArgs, crdt.applyDownstream(downstreamArgs))
+	crdt.addToHistory(updTs, downstreamArgs, crdt.applyDownstream(downstreamArgs))
 	return nil
 }
 
-func (crdt *EwFlagCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect *Effect) {
+func (crdt *EwFlagCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect Effect) {
 	fmt.Println("[EWFlag][DS]", downstreamArgs)
 	switch opType := downstreamArgs.(type) {
 	case DownstreamEnableFlagEW:
@@ -137,18 +137,16 @@ func (crdt *EwFlagCrdt) applyDownstream(downstreamArgs DownstreamArguments) (eff
 	return
 }
 
-func (crdt *EwFlagCrdt) applyEnableFlag(op DownstreamEnableFlagEW) (effect *Effect) {
+func (crdt *EwFlagCrdt) applyEnableFlag(op DownstreamEnableFlagEW) (effect Effect) {
 	//We have causal consistency, so an added unique never comes after its removal.
 	crdt.enables.add(op.Unique)
-	var effectValue Effect = EnableEWEffect{Unique: op.Unique}
-	return &effectValue
+	return EnableEWEffect{Unique: op.Unique}
 }
 
-func (crdt *EwFlagCrdt) applyDisableFlag(op DownstreamDisableFlagEW) (effect *Effect) {
+func (crdt *EwFlagCrdt) applyDisableFlag(op DownstreamDisableFlagEW) (effect Effect) {
 	//For rebuilding older versions, we need to know the actual set of uniques that was effectively removed.
 	removed := crdt.enables.getAndRemoveIntersection(op.Seen)
-	var effectValue Effect = DisableEWEffect{Removed: removed}
-	return &effectValue
+	return DisableEWEffect{Removed: removed}
 }
 
 func (crdt *EwFlagCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err error) {
@@ -167,13 +165,13 @@ func (crdt *EwFlagCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
-func (crdt *EwFlagCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *EwFlagCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	return crdt.applyDownstream(updArgs)
 }
 
-func (crdt *EwFlagCrdt) undoEffect(effect *Effect) {
+func (crdt *EwFlagCrdt) undoEffect(effect Effect) {
 	//Ignore if it is noEffect
-	switch typedEffect := (*effect).(type) {
+	switch typedEffect := (effect).(type) {
 	case EnableEWEffect:
 		delete(crdt.enables, typedEffect.Unique)
 	case DisableEWEffect:
@@ -181,7 +179,7 @@ func (crdt *EwFlagCrdt) undoEffect(effect *Effect) {
 	}
 }
 
-func (crdt *EwFlagCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+func (crdt *EwFlagCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {}
 
 // Protobuf functions
 func (crdtOp EnableFlag) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -205,7 +203,7 @@ func (crdtState FlagState) FromReadResp(protobuf *proto.ApbReadObjectResp) (stat
 	return crdtState
 }
 
-func (crdtState FlagState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState FlagState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Flag{Flag: &proto.ApbGetFlagResp{Value: pb.Bool(crdtState.Flag)}}}
 }
 
@@ -233,7 +231,7 @@ func (crdt *EwFlagCrdt) ToProtoState() (protobuf *proto.ProtoState) {
 	return &proto.ProtoState{State: &proto.ProtoState_Flag{Flag: &proto.ProtoFlagState{Ew: &proto.ProtoFlagEWState{Uniques: UniqueSetToUInt64Array(crdt.enables)}}}}
 }
 
-func (crdt *EwFlagCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
+func (crdt *EwFlagCrdt) FromProtoState(proto *proto.ProtoState, ts clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	return (&EwFlagCrdt{enables: UInt64ArrayToUniqueSet(proto.GetFlag().GetEw().GetUniques())}).initializeFromSnapshot(ts, replicaID)
 }
 

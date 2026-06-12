@@ -159,7 +159,7 @@ In PotionDB, due to the possibility of multiple transactions executing concurren
 The first change that is necessary in the CRDT implementation is to create an instance of "*genericInversibleCRDT" and store it in the CRDT's struct. In the Initialize() method of the CRDT, the genericInversibleCRDT must be initialized too. For example:
 
 ```
-func (crdt *MyCRDT) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *MyCRDT) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
     return &MyCRDT{
         genericInversibleCRDT: (&genericInversibleCRDT{}).initialize(startTs),
         ... //other fields of MyCRDT
@@ -173,7 +173,7 @@ In short, to specify effects, do the following steps:
 - Pick a downstream operation, analyze it's code. Try to figure out the different ways the state change, and which information is needed to "undo" the change;
 - Define a new struct for each different "type" of change - this makes it easier to implement the undo of the change;
 - In the method of your downstream operation, initialize the correct effect in the place where the state change occours. If no state change occours, the struct NoEffect{} can be used;
-- At the end of the Downstream() method, call crdt.addToHistory(&updTs, &downstreamArgs, effect).
+- At the end of the Downstream() method, call crdt.addToHistory(updTs, downstreamArgs, effect).
 
 The third step consists in implementing the interface InversibleCRDT defined in crdt/inversibleCrdt, which is as follows:
 
@@ -182,11 +182,11 @@ Copy() (copyCRDT InversibleCRDT)
 
 RebuildCRDTToVersion(targetTs clocksi.Timestamp)
 
-undoEffect(effect *Effect)
+undoEffect(effect Effect)
 
-reapplyOp(updArgs DownstreamArguments) (effect *Effect)
+reapplyOp(updArgs DownstreamArguments) (effect Effect)
 
-notifyRebuiltComplete(currTs *clocksi.Timestamp)
+notifyRebuiltComplete(currTs clocksi.Timestamp)
 ```
 
 *Copy() (copyCRDT InversibleCRDT)*

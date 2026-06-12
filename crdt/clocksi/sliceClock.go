@@ -462,6 +462,26 @@ func (st SliceTimestamp) Update() (sameTs Timestamp) {
 	return st
 }
 
+func GetSliceTimestampSize() int {
+	return len(sortedIDs) * entrySize
+}
+
+func GetSliceTimestampSizeForNEntries(nEntries int) int {
+	return nEntries * entrySize
+}
+
+func (st SliceTimestamp) GetBytesSize() int {
+	return len(st.vc) * entrySize
+}
+
+func (st SliceTimestamp) ToBytesBuf(bytes []byte) (nWritten int) {
+	for i, ts := range st.vc {
+		binary.LittleEndian.PutUint64(bytes[i*entrySize:(i+1)*entrySize], uint64(ts))
+	}
+	//fmt.Printf("[SliceTimestamp]ToBytesBuf(): Encoding clock with %d entries, into a buf with %d bytes available.\n", len(st.vc), len(bytes))
+	return len(st.vc) * entrySize
+}
+
 func (st SliceTimestamp) ToBytes() (bytes []byte) {
 	bytes = make([]byte, len(st.vc)*entrySize)
 	for i, ts := range st.vc {
@@ -486,6 +506,19 @@ func (st SliceTimestamp) FromBytes(bytes []byte) (newTs Timestamp) {
 	return SliceTimestamp{vc: newVC}
 }
 
+func (st SliceTimestamp) FromBytesInto(bytes []byte) (sameTs Timestamp) {
+	if len(bytes) == len(st.vc)*entrySize { //Fast path.
+		for i := 0; i < len(st.vc); i++ {
+			st.vc[i] = int64(binary.LittleEndian.Uint64(bytes[i*entrySize:]))
+		}
+		return st
+	} else if len(bytes) == 0 && len(st.vc) == len(knownIDs) {
+		return st
+	} else { //Safe, slow path. Will allocate new.
+		return st.FromBytes(bytes)
+	}
+}
+
 func (st SliceTimestamp) ToString() (tsString string) {
 	var builder strings.Builder
 	builder.WriteString("{[")
@@ -501,6 +534,27 @@ func (st SliceTimestamp) ToString() (tsString string) {
 
 func (st SliceTimestamp) ToSortedString() (tsString string) {
 	return st.ToString() //SliceTimestamp's vc is already naturally stored in order.
+}
+
+func (st SliceTimestamp) ToDebugCompString(otherTs Timestamp) (tsString string) {
+	var builder strings.Builder
+	builder.WriteString("{[")
+	for i, value := range st.vc {
+		builder.WriteString(fmt.Sprint(sortedIDs[i]))
+		builder.WriteRune(':')
+		builder.WriteString(fmt.Sprint(value))
+		builder.WriteRune(',')
+		builder.WriteString(fmt.Sprint(sortedIDs[i]))
+		builder.WriteRune(':')
+		builder.WriteString(fmt.Sprint(otherTs.GetPos(uint16(i))))
+		builder.WriteRune(',')
+	}
+	builder.WriteString("]}")
+	return builder.String()
+}
+
+func (ts SliceTimestamp) GetNumberEntries() int {
+	return len(ts.vc)
 }
 
 // NOTE: If we one day support adding/removing replicas on the fly this will probably no longer work, as it ignores the replica's ID (map key)

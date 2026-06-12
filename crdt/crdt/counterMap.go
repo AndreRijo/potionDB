@@ -156,6 +156,16 @@ type CounterMapIncMultEffect[T SignedNumber] struct {
 	Data     [][]byte
 }
 
+// Holds buffers used by CounterMapState protobuf creation that should be returned to the respective pools when no longer necessary.
+type CounterMapStateBufs struct {
+	DataType    proto.DATAType
+	PairsBuf    any //[]KeyCounterPair[T], but for simplicity of usage we don't put this as the generic directly.
+	KeysBuf     []int32
+	IntValues   []int64
+	FloatValues []float64
+	DataBuf     [][]byte
+}
+
 //Downstream operations
 //Uses directly Updates.
 
@@ -338,14 +348,14 @@ func isFloatDataType[T SignedNumber]() bool {
 	}
 }
 
-func (crdt *CounterMapCrdt[T]) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *CounterMapCrdt[T]) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	crdt = &CounterMapCrdt[T]{entries: make(map[int32]int, 1), quick: tools.NewSliceWithCounter[KeyCounterPair[T]](0)}
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *CounterMapCrdt[T]) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *CounterMapCrdt[T]) {
+func (crdt *CounterMapCrdt[T]) initializeFromSnapshot(startTs clocksi.Timestamp, replicaID uint16) (sameCRDT *CounterMapCrdt[T]) {
 	crdt.CRDTVM = (&genericInversibleCRDT{}).initialize(crdt)
 	return crdt
 }
@@ -372,12 +382,39 @@ func (crdt *CounterMapCrdt[T]) Read(args ReadArguments, updsNotYetApplied []Upda
 	return nil
 }
 
+func (crdt *CounterMapCrdt[T]) makeKeyCounterPairSlice(wantedLen int) []KeyCounterPair[T] {
+	if wantedLen < COUNTER_MAP_POOL_MIN_LEN { //Small slices just allocate always.
+		return make([]KeyCounterPair[T], wantedLen)
+	} //Others, try to re-use
+	switch counterMapDataType[T]() {
+	case proto.DATAType_INT64:
+		return any(counterMapPoolInt64.Get(wantedLen)).([]KeyCounterPair[T])
+	case proto.DATAType_INT32:
+		return any(counterMapPoolInt32.Get(wantedLen)).([]KeyCounterPair[T])
+	case proto.DATAType_INT16:
+		return any(counterMapPoolInt16.Get(wantedLen)).([]KeyCounterPair[T])
+	case proto.DATAType_INT8:
+		return any(counterMapPoolInt8.Get(wantedLen)).([]KeyCounterPair[T])
+	case proto.DATAType_INT:
+		return any(counterMapPoolInt.Get(wantedLen)).([]KeyCounterPair[T])
+	case proto.DATAType_FLOAT64:
+		return any(counterMapPoolFloat64.Get(wantedLen)).([]KeyCounterPair[T])
+	case proto.DATAType_FLOAT32:
+		return any(counterMapPoolFloat32.Get(wantedLen)).([]KeyCounterPair[T])
+	default:
+		fmt.Printf("[CRDT][CounterMap]Unsupported data type for CounterMap: %v.\n", counterMapDataType[T]())
+		return nil
+	}
+}
+
 func (crdt *CounterMapCrdt[T]) getState(updsNotYetApplied []UpdateArguments) (state CounterMapState[T]) {
 	if len(updsNotYetApplied) == 0 {
-		state.Pairs = make([]KeyCounterPair[T], crdt.quick.Len())
+		//state.Pairs = make([]KeyCounterPair[T], crdt.quick.Len())
+		state.Pairs = crdt.makeKeyCounterPairSlice(crdt.quick.Len())
 		copy(state.Pairs, crdt.quick.ToSlice())
 		if len(state.Data) > 0 {
-			state.Data = make([][]byte, crdt.quick.Len())
+			//state.Data = make([][]byte, crdt.quick.Len())
+			state.Data = bytesSlicePool.Get(crdt.data.Len())
 			copy(state.Data, crdt.data.ToSlice())
 		}
 		return state
@@ -571,10 +608,12 @@ func (crdt *CounterMapCrdt[T]) getValue(key int32, updsNotYetApplied []UpdateArg
 
 func (crdt *CounterMapCrdt[T]) getValues(keys []int32, updsNotYetApplied []UpdateArguments) (state CounterMapState[T]) {
 	//Initial part is similar whenever we have updsNotYetApplied or not: we copy the existing values.
-	result := make([]KeyCounterPair[T], len(keys)) //We'll return 0 for non-existing keys. Can't ignore non-existing keys, as otherwise the values would match to the wrong keys.
+	//result := make([]KeyCounterPair[T], len(keys)) //We'll return 0 for non-existing keys. Can't ignore non-existing keys, as otherwise the values would match to the wrong keys.
+	result := crdt.makeKeyCounterPairSlice(len(keys)) //We'll return 0 for non-existing keys. Can't ignore non-existing keys, as otherwise the values would match to the wrong keys.
 	var resultData [][]byte
 	if crdt.sumData > 0 {
-		resultData = make([][]byte, len(keys))
+		//resultData = make([][]byte, len(keys))
+		resultData = bytesSlicePool.Get(len(keys))
 		for i, key := range keys {
 			pos, exists := crdt.entries[key]
 			var value T
@@ -871,10 +910,12 @@ func (crdt *CounterMapCrdt[T]) condStateResultHelper(condValue T, compType CompT
 		readData = false
 	}
 	if readData {
-		condDataSlice = tools.NewSliceWithCounter[[]byte](len(dataSlice))
+		//condDataSlice = tools.NewSliceWithCounter[[]byte](len(dataSlice))
+		condDataSlice = tools.ToSliceWithCounter(bytesSlicePool.Get(len(dataSlice))[:0]) //We set the len to 0, as ToSliceWithCounter keeps whatever is in the slice already.
 	}
 	if readKey && readValue {
-		condSlice := tools.NewSliceWithCounter[KeyCounterPair[T]](len(quickSlice))
+		//condSlice := tools.NewSliceWithCounter[KeyCounterPair[T]](len(quickSlice))
+		condSlice := tools.ToSliceWithCounter(crdt.makeKeyCounterPairSlice(len(quickSlice))[:0]) //We set the len to 0, as ToSliceWithCounter keeps whatever is in the slice already.
 		for i, pair := range quickSlice {
 			if crdt.compValue(pair.Value, condValue, compType) {
 				condSlice.AddToEnd(pair)
@@ -969,38 +1010,39 @@ func (crdt *CounterMapCrdt[T]) Downstream(updTs clocksi.Timestamp, downstreamArg
 	}
 	effect := crdt.applyDownstream(downstreamArgs)
 	//Necessary for inversibleCrdt
-	crdt.addToHistory(&updTs, &downstreamArgs, effect)
+	crdt.addToHistory(updTs, downstreamArgs, effect)
 
 	return nil
 }
 
-func (crdt *CounterMapCrdt[T]) applyDownstream(downstreamArgs DownstreamArguments) (effect *Effect) {
-	var tmpEffect Effect = NoEffect{}
+func (crdt *CounterMapCrdt[T]) applyDownstream(downstreamArgs DownstreamArguments) (effect Effect) {
+	effect = NoEffect{}
 	//fmt.Printf("[CounterMapCRDT][applyDownstream] Applying downstream operation of type %T. This CRDT is of type %T", downstreamArgs, crdt)
 	switch opType := downstreamArgs.(type) {
 	case CounterMapInc[T]:
-		tmpEffect = crdt.applyInc(opType.Key, opType.Change, opType.Data)
+		effect = crdt.applyInc(opType.Key, opType.Change, opType.Data)
 	case CounterMapDec[T]:
-		tmpEffect = crdt.applyInc(opType.Key, -opType.Change, opType.Data) //Just change signal
+		effect = crdt.applyInc(opType.Key, -opType.Change, opType.Data) //Just change signal
 	case CounterMapIncAll[T]:
-		tmpEffect = crdt.applyIncAll(opType.Keys, opType.Change, opType.Data)
+		effect = crdt.applyIncAll(opType.Keys, opType.Change, opType.Data)
 	case CounterMapDecAll[T]:
-		tmpEffect = crdt.applyIncAll(opType.Keys, -opType.Change, opType.Data) //Just change signal
+		effect = crdt.applyIncAll(opType.Keys, -opType.Change, opType.Data) //Just change signal
 	case CounterMapIncMult[T]:
-		tmpEffect = crdt.applyIncMult(opType.Keys, opType.Change, 1, opType.Data)
+		effect = crdt.applyIncMult(opType.Keys, opType.Change, 1, opType.Data)
 	case CounterMapDecMult[T]:
-		tmpEffect = crdt.applyIncMult(opType.Keys, opType.Change, -1, opType.Data) //-1: modifier to all values in change, to turn an inc into a dec.
+		effect = crdt.applyIncMult(opType.Keys, opType.Change, -1, opType.Data) //-1: modifier to all values in change, to turn an inc into a dec.
 	case CounterMapInit[T]:
-		tmpEffect = crdt.applyInit(int(opType))
+		effect = crdt.applyInit(int(opType))
 	default:
 		fmt.Printf("[CounterMapCrdt][Downstream]Unsupported downstream type: %v (%T)\n", downstreamArgs, downstreamArgs)
 	}
-	return &tmpEffect
+	return
 }
 
 func (crdt *CounterMapCrdt[T]) applyInc(key int32, change T, data []byte) (effect Effect) {
 	pos, exists := crdt.entries[key]
 	if !exists { //New key
+		//fmt.Printf("[CounterMapCrdt][applyInc]Key %d doesn't exist. Adding new key.\n", key)
 		pos = len(crdt.entries)
 		crdt.entries[key] = pos
 		crdt.quick.Append(KeyCounterPair[T]{Key: key, Value: change})
@@ -1008,6 +1050,7 @@ func (crdt *CounterMapCrdt[T]) applyInc(key int32, change T, data []byte) (effec
 		crdt.data.Append(data)
 		crdt.sumData += len(data)
 	} else {
+		//fmt.Printf("[CounterMapCrdt][applyInc]Key %d exists. Incrementing.\n", key)
 		crdt.quick.Slice[pos].Value += change
 		effect = CounterMapIncEffect[T]{Pos: int32(pos), Change: change}
 	}
@@ -1215,12 +1258,12 @@ func (crdt *CounterMapCrdt[T]) RebuildCRDTToVersion(targetTs clocksi.Timestamp) 
 	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
-func (crdt *CounterMapCrdt[T]) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *CounterMapCrdt[T]) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	return crdt.applyDownstream(updArgs)
 }
 
-func (crdt *CounterMapCrdt[T]) undoEffect(effect *Effect) {
-	switch typedEffect := (*effect).(type) {
+func (crdt *CounterMapCrdt[T]) undoEffect(effect Effect) {
+	switch typedEffect := (effect).(type) {
 	case CounterMapNewEffect[T]: //Added key is always the last one added.
 		delete(crdt.entries, typedEffect.Key)
 		crdt.quick.RemoveLast()
@@ -1258,11 +1301,11 @@ func (crdt *CounterMapCrdt[T]) undoEffect(effect *Effect) {
 			crdt.quick.Slice[pos].Value -= typedEffect.Changes[i] * typedEffect.Modifier
 		}
 	default:
-		fmt.Printf("[CounterMapCrdt] Unknown effect to undo: %+v (%T)\n", *effect, *effect)
+		fmt.Printf("[CounterMapCrdt] Unknown effect to undo: %+v (%T)\n", effect, effect)
 	}
 }
 
-func (crdt *CounterMapCrdt[T]) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+func (crdt *CounterMapCrdt[T]) notifyRebuiltComplete(currTs clocksi.Timestamp) {}
 
 //Protobuf functions
 //Note: on these functions, to avoid type switches (and converting T to any), we will just check both int and float entries whenever necessary.
@@ -1274,8 +1317,8 @@ func (args CounterMapInit[T]) FromUpdateObject(protobuf *proto.ApbUpdateOperatio
 }
 
 func (args CounterMapInit[T]) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	dataType := counterMapDataType[T]()
-	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Mapcounterop{Mapcounterop: &proto.ApbMapCounterUpdate{DataType: &dataType, Init: &proto.ApbMapCounterInit{Size: pb.Int32(int32(args))}}}}
+	dataType, updType := counterMapDataType[T](), proto.NumberArrayUpdType_SIZE
+	return &proto.ApbUpdateOperation{Op: &proto.ApbUpdateOperation_Mapcounterop{Mapcounterop: &proto.ApbMapCounterUpdate{DataType: &dataType, UpdType: &updType, Init: &proto.ApbMapCounterInit{Size: pb.Int32(int32(args))}}}}
 }
 
 func (args CounterMapInc[T]) FromUpdateObject(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -1291,7 +1334,7 @@ func (args CounterMapInc[T]) FromUpdateObject(protobuf *proto.ApbUpdateOperation
 }
 
 func (args CounterMapInc[T]) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	mapOp, isFloat := prepareApbMapCounterUpdate(counterMapDataType[T](), false)
+	mapOp, isFloat := prepareApbMapCounterUpdate(counterMapDataType[T](), false, proto.NumberArrayUpdType_INC)
 	if isFloat {
 		mapOp.IntOp = &proto.ApbMapIntOp{Inc: &proto.ApbMapIntSingleIncOp{Key: pb.Int32(args.Key), Inc: pb.Int64(int64(args.Change))}}
 		if len(args.Data) > 0 {
@@ -1319,7 +1362,7 @@ func (args CounterMapDec[T]) FromUpdateObject(protobuf *proto.ApbUpdateOperation
 }
 
 func (args CounterMapDec[T]) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	mapOp, isFloat := prepareApbMapCounterUpdate(counterMapDataType[T](), true)
+	mapOp, isFloat := prepareApbMapCounterUpdate(counterMapDataType[T](), true, proto.NumberArrayUpdType_INC)
 	if isFloat {
 		mapOp.IntOp = &proto.ApbMapIntOp{Inc: &proto.ApbMapIntSingleIncOp{Key: pb.Int32(args.Key), Inc: pb.Int64(int64(args.Change))}}
 		if len(args.Data) > 0 {
@@ -1347,7 +1390,7 @@ func (args CounterMapIncAll[T]) FromUpdateObject(protobuf *proto.ApbUpdateOperat
 }
 
 func (args CounterMapIncAll[T]) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	mapOp, isFloat := prepareApbMapCounterUpdate(counterMapDataType[T](), false)
+	mapOp, isFloat := prepareApbMapCounterUpdate(counterMapDataType[T](), false, proto.NumberArrayUpdType_INC_ALL)
 	if isFloat {
 		mapOp.IntOp = &proto.ApbMapIntOp{IncAll: &proto.ApbMapIntIncAllOp{Keys: args.Keys, Inc: pb.Int64(int64(args.Change))}}
 		if len(args.Data) > 0 {
@@ -1375,7 +1418,7 @@ func (args CounterMapDecAll[T]) FromUpdateObject(protobuf *proto.ApbUpdateOperat
 }
 
 func (args CounterMapDecAll[T]) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	mapOp, isFloat := prepareApbMapCounterUpdate(counterMapDataType[T](), true)
+	mapOp, isFloat := prepareApbMapCounterUpdate(counterMapDataType[T](), true, proto.NumberArrayUpdType_INC_ALL)
 	if isFloat {
 		mapOp.IntOp = &proto.ApbMapIntOp{IncAll: &proto.ApbMapIntIncAllOp{Keys: args.Keys, Inc: pb.Int64(int64(args.Change))}}
 		if len(args.Data) > 0 {
@@ -1413,7 +1456,7 @@ func (args CounterMapIncMult[T]) FromUpdateObject(protobuf *proto.ApbUpdateOpera
 }
 
 func (args CounterMapIncMult[T]) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	mapOp, isFloat := prepareApbMapCounterUpdate(counterMapDataType[T](), false)
+	mapOp, isFloat := prepareApbMapCounterUpdate(counterMapDataType[T](), false, proto.NumberArrayUpdType_INC_MULTI)
 	if isFloat {
 		values := make([]float64, len(args.Change))
 		for i, val := range args.Change {
@@ -1453,7 +1496,7 @@ func (args CounterMapDecMult[T]) FromUpdateObject(protobuf *proto.ApbUpdateOpera
 }
 
 func (args CounterMapDecMult[T]) ToUpdateObject() (protobuf *proto.ApbUpdateOperation) {
-	mapOp, isFloat := prepareApbMapCounterUpdate(counterMapDataType[T](), true)
+	mapOp, isFloat := prepareApbMapCounterUpdate(counterMapDataType[T](), true, proto.NumberArrayUpdType_INC_MULTI)
 	if isFloat {
 		values := make([]float64, len(args.Change))
 		for i, val := range args.Change {
@@ -1772,17 +1815,20 @@ func (crdtState CounterMapState[T]) FromReadResp(protobuf *proto.ApbReadObjectRe
 	return crdtState
 }
 
-func (crdtState CounterMapState[T]) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
-	keys, dataType := make([]int32, len(crdtState.Pairs)), counterMapDataType[T]()
+func (crdtState CounterMapState[T]) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
+	//keys, dataType := make([]int32, len(crdtState.Pairs)), counterMapDataType[T]()
+	keys, dataType := int32SlicePool.Get(len(crdtState.Pairs)), counterMapDataType[T]()
 	mapProto := proto.ApbGetMapCounterResp{DataType: &dataType, Keys: keys}
 	if dataType == proto.DATAType_FLOAT64 || dataType == proto.DATAType_FLOAT32 {
-		floatValues := make([]float64, len(crdtState.Pairs))
+		//floatValues := make([]float64, len(crdtState.Pairs))
+		floatValues := float64SlicePool.Get(len(crdtState.Pairs))
 		for i, pair := range crdtState.Pairs {
 			keys[i], floatValues[i] = pair.Key, float64(pair.Value)
 		}
 		mapProto.Floatvalues = floatValues
 	} else {
-		intValues := make([]int64, len(crdtState.Pairs))
+		//intValues := make([]int64, len(crdtState.Pairs))
+		intValues := int64SlicePool.Get(len(crdtState.Pairs))
 		for i, pair := range crdtState.Pairs {
 			keys[i], intValues[i] = pair.Key, int64(pair.Value)
 		}
@@ -1790,6 +1836,11 @@ func (crdtState CounterMapState[T]) ToReadResp() (protobuf *proto.ApbReadObjectR
 	}
 	if len(crdtState.Data) > 0 {
 		mapProto.Data = crdtState.Data
+	}
+	if len(keys) >= shared.MIN_SLICE_POOL_SIZE && buf != nil {
+		buf.Bufs.Append(BufToReturn{CRDTType: crdtState.GetCRDTType(),
+			Buf: CounterMapStateBufs{DataType: dataType, KeysBuf: keys, IntValues: mapProto.Intvalues,
+				FloatValues: mapProto.Floatvalues, DataBuf: crdtState.Data, PairsBuf: any(crdtState.Pairs)}})
 	}
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Mapcounter{Mapcounter: &mapProto}}
 }
@@ -1804,7 +1855,7 @@ func (crdtState CounterMapSingleState[T]) FromReadResp(protobuf *proto.ApbReadOb
 	}
 }
 
-func (crdtState CounterMapSingleState[T]) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState CounterMapSingleState[T]) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	dataType := counterMapDataType[T]()
 	if dataType == proto.DATAType_FLOAT64 || dataType == proto.DATAType_FLOAT32 {
 		return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{
@@ -1819,7 +1870,7 @@ func (crdtState CounterMapHasKeyState[T]) FromReadResp(protobuf *proto.ApbReadOb
 	return CounterMapHasKeyState[T](protobuf.GetPartread().GetMapcounter().GetHaskey().GetHas())
 }
 
-func (crdtState CounterMapHasKeyState[T]) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState CounterMapHasKeyState[T]) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{
 		Reply: &proto.ApbPartialReadResp_Mapcounter{Mapcounter: &proto.ApbMapCounterReadResp{Haskey: &proto.ApbMapCounterHasKeyResp{Has: pb.Bool(bool(crdtState))}}}}}}
 }
@@ -1828,7 +1879,7 @@ func (crdtState CounterMapKeysState[T]) FromReadResp(protobuf *proto.ApbReadObje
 	return CounterMapKeysState[T](protobuf.GetPartread().GetMapcounter().GetKeys().GetKeys())
 }
 
-func (crdtState CounterMapKeysState[T]) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState CounterMapKeysState[T]) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{
 		Reply: &proto.ApbPartialReadResp_Mapcounter{Mapcounter: &proto.ApbMapCounterReadResp{Keys: &proto.ApbMapCounterKeysResp{Keys: crdtState}}}}}}
 }
@@ -1842,7 +1893,7 @@ func (crdtState CounterMapKeysDataState[T]) FromReadResp(protobuf *proto.ApbRead
 	return crdtState
 }
 
-func (crdtState CounterMapKeysDataState[T]) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState CounterMapKeysDataState[T]) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	mapProto := proto.ApbMapCounterKeysDataResp{Keys: crdtState.Keys}
 	if len(crdtState.Data) > 0 {
 		mapProto.Data = crdtState.Data
@@ -1866,7 +1917,7 @@ func (crdtState CounterMapValuesDataState[T]) FromReadResp(protobuf *proto.ApbRe
 	return crdtState
 }
 
-func (crdtState CounterMapValuesDataState[T]) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState CounterMapValuesDataState[T]) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	mapProto := proto.ApbMapCounterValuesDataResp{}
 	dataType := counterMapDataType[T]()
 	if dataType == proto.DATAType_FLOAT64 || dataType == proto.DATAType_FLOAT32 {
@@ -1920,7 +1971,7 @@ func (crdt *CounterMapCrdt[T]) ToProtoState() (protobuf *proto.ProtoState) {
 	}
 }
 
-func (crdt *CounterMapCrdt[T]) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
+func (crdt *CounterMapCrdt[T]) FromProtoState(proto *proto.ProtoState, ts clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	mapProto := proto.GetMapCounter()
 	keys := mapProto.GetKeys()
 	entries, quick := make(map[int32]int, len(keys)), tools.NewSliceWithCounter[KeyCounterPair[T]](len(keys))
@@ -1942,11 +1993,11 @@ func (crdt *CounterMapCrdt[T]) FromProtoState(proto *proto.ProtoState, ts *clock
 func (crdt *CounterMapCrdt[T]) GetCRDT() CRDT { return crdt }
 
 // Sets data type for update, as well as setting the flag for isDec if appropriate.
-func prepareApbMapCounterUpdate(dataType proto.DATAType, isDec bool) (protoUpd *proto.ApbMapCounterUpdate, isFloat bool) {
+func prepareApbMapCounterUpdate(dataType proto.DATAType, isDec bool, updType proto.NumberArrayUpdType) (protoUpd *proto.ApbMapCounterUpdate, isFloat bool) {
 	if !isDec {
-		return &proto.ApbMapCounterUpdate{DataType: &dataType}, isDataTypeArgFloat(dataType)
+		return &proto.ApbMapCounterUpdate{DataType: &dataType, UpdType: &updType}, isDataTypeArgFloat(dataType)
 	}
-	return &proto.ApbMapCounterUpdate{DataType: &dataType, IsDec: shared.TRUE_POINTER}, isDataTypeArgFloat(dataType)
+	return &proto.ApbMapCounterUpdate{DataType: &dataType, UpdType: &updType, IsDec: shared.TRUE_POINTER}, isDataTypeArgFloat(dataType)
 }
 
 func prepareProtoMapCounterDownstream(dataType proto.DATAType, isDec bool) (protoUpd *proto.ProtoMapCounterDownstream, isFloat bool) {

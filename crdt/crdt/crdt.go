@@ -16,7 +16,7 @@ var DummyCRDTs []CRDT = initializeDummyCRDTs()
 
 type CRDT interface {
 	//Note: replicaID may not be required by every CRDT - for those, any value can be passed.
-	Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT)
+	Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT)
 
 	Read(args ReadArguments, updsNotYetApplied []UpdateArguments) (state State)
 
@@ -49,7 +49,7 @@ type MultiUpd []UpdateArguments
 // CRDTs with embedded CRDTs MUST implement this interface, as otherwise those embedded CRDTs' VMs will never be GC'ed.
 // Most simple CRDTs do not need this, however (counters, flags, registers, etc.)
 type CRDTWithGC interface {
-	CRDTGC(safeClk clocksi.Timestamp)
+	CRDTGC(safeClk clocksi.Timestamp, fastGC bool)
 }
 
 // The idea is to include here the methods/data common to every CRDT. For now, there's... nothing
@@ -238,6 +238,14 @@ For updsNotYetApplied (i.e., reads), this op is ignored.
 */
 type ResetOp struct{}
 
+// Debug. When a CRDT meets an unexpected operation, it may return this op for debugging purposes.
+type WrongOp struct {
+	RecOp         UpdateArguments
+	RecOpCrdtType proto.CRDTType
+	CrdtType      proto.CRDTType
+	DataType      proto.DATAType
+}
+
 func (op NoOp) GetCRDTType() proto.CRDTType { return -1 }
 func (op NoOp) GetDATAType() proto.DATAType { return proto.DATAType_DEFAULT }
 func (op NoOp) MustReplicate() bool         { return false }
@@ -259,6 +267,10 @@ func (op ResetOp) ToReplicatorObj() (protobuf *proto.ProtoOpDownstream) {
 	return &proto.ProtoOpDownstream{Specialop: proto.SPECIAL_UPD_RESET.Enum()}
 	//return &proto.ProtoOpDownstream{Op: &proto.ProtoOpDownstream_ResetOp{ResetOp: &proto.ProtoResetDownstream{}}}
 }
+
+func (op WrongOp) GetCRDTType() proto.CRDTType { return op.CrdtType }
+func (op WrongOp) GetDATAType() proto.DATAType { return op.DataType }
+func (op WrongOp) MustReplicate() bool         { return false }
 
 type ArgsError struct {
 	err  string

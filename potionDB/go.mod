@@ -4,6 +4,7 @@ go 1.22
 
 require (
 	github.com/AndreRijo/go-tools v0.0.0-20250702122434-f5d7580301a7
+	github.com/alphadose/zenq/v2 v2.8.4
 	github.com/streadway/amqp v1.1.0
 	github.com/twmb/murmur3 v1.1.5
 	github.com/zeebo/xxh3 v1.0.2
@@ -19,7 +20,9 @@ require (
 	github.com/antlr/antlr4/runtime/Go/antlr/v4 v4.0.0-20230321174746-8dcc6526cfb1 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/klauspost/cpuid/v2 v2.0.9 // indirect
+	github.com/planetscale/vtprotobuf v0.6.0 // indirect
 	golang.org/x/exp v0.0.0-20220722155223-a9213eeb770e // indirect
+	golang.org/x/sys v0.11.0 // indirect
 )
 
 replace sqlToKeyValue v0.0.0 => ../../sqlToKeyValue

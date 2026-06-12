@@ -158,7 +158,7 @@ func (args GetValuesArguments) HasInnerReads() bool         { return false }
 func (args GetValuesArguments) HasVariables() bool          { return false }
 
 // Note: crdt can (and most often will be) nil
-func (crdt *ORMapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *ORMapCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	return &ORMapCrdt{
 		CRDTVM:  (&genericInversibleCRDT{}).initialize(crdt),
 		entries: make(map[string]map[Element]UniqueSet),
@@ -167,7 +167,7 @@ func (crdt *ORMapCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) 
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *ORMapCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *ORMapCrdt) {
+func (crdt *ORMapCrdt) initializeFromSnapshot(startTs clocksi.Timestamp, replicaID uint16) (sameCRDT *ORMapCrdt) {
 	crdt.CRDTVM, crdt.random = (&genericInversibleCRDT{}).initialize(crdt), rand.NewSource(time.Now().Unix())
 	return crdt
 }
@@ -467,25 +467,24 @@ func (crdt *ORMapCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs Downst
 	}
 	effect := crdt.applyDownstream(downstreamArgs)
 	//Necessary for inversibleCrdt
-	crdt.addToHistory(&updTs, &downstreamArgs, effect)
+	crdt.addToHistory(updTs, downstreamArgs, effect)
 
 	return nil
 }
 
-func (crdt *ORMapCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect *Effect) {
-	var tmpEffect Effect = NoEffect{}
+func (crdt *ORMapCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect Effect) {
 	switch opType := downstreamArgs.(type) {
 	case DownstreamORMapAddAll:
-		tmpEffect = crdt.applyAddAll(opType.Adds, opType.Rems)
+		effect = crdt.applyAddAll(opType.Adds, opType.Rems)
 	case DownstreamORMapRemoveAll:
-		tmpEffect = crdt.applyRemoveAll(opType.Rems)
+		effect = crdt.applyRemoveAll(opType.Rems)
 	default:
 		fmt.Printf("[ORMap][Downstream]Unsupported downstream type: %v (%T)\n", downstreamArgs, downstreamArgs)
 	}
-	return &tmpEffect
+	return
 }
 
-func (crdt *ORMapCrdt) applyAddAll(toAdd map[string]UniqueElemPair, toRem map[string]map[Element]UniqueSet) (effect *ORMapAddAllEffect) {
+func (crdt *ORMapCrdt) applyAddAll(toAdd map[string]UniqueElemPair, toRem map[string]map[Element]UniqueSet) (effect ORMapAddAllEffect) {
 	//Remove old entries for the keys we're adding
 	remEffect := crdt.applyRemoveAll(toRem)
 	//For each key, add the respective element
@@ -506,10 +505,10 @@ func (crdt *ORMapCrdt) applyAddAll(toAdd map[string]UniqueElemPair, toRem map[st
 		}
 	}
 
-	return &ORMapAddAllEffect{toAdd, remEffect.Rems}
+	return ORMapAddAllEffect{toAdd, remEffect.Rems}
 }
 
-func (crdt *ORMapCrdt) applyRemoveAll(toRem map[string]map[Element]UniqueSet) (effect *ORMapRemoveAllEffect) {
+func (crdt *ORMapCrdt) applyRemoveAll(toRem map[string]map[Element]UniqueSet) (effect ORMapRemoveAllEffect) {
 	removed := make(map[string]map[Element]UniqueSet)
 	for key, entry := range toRem {
 		if crdtEntry, has := crdt.entries[key]; has {
@@ -531,7 +530,7 @@ func (crdt *ORMapCrdt) applyRemoveAll(toRem map[string]map[Element]UniqueSet) (e
 			}
 		}
 	}
-	return &ORMapRemoveAllEffect{toRem}
+	return ORMapRemoveAllEffect{toRem}
 }
 
 func (crdt *ORMapCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err error) {
@@ -570,12 +569,12 @@ func (crdt *ORMapCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
-func (crdt *ORMapCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *ORMapCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	return crdt.applyDownstream(updArgs)
 }
 
-func (crdt *ORMapCrdt) undoEffect(effect *Effect) {
-	switch typedEffect := (*effect).(type) {
+func (crdt *ORMapCrdt) undoEffect(effect Effect) {
+	switch typedEffect := (effect).(type) {
 	case ORMapAddAllEffect:
 		crdt.undoAddAllEffect(typedEffect.Adds, typedEffect.Rems)
 	case ORMapRemoveAllEffect:
@@ -620,7 +619,7 @@ func (crdt *ORMapCrdt) undoRemoveAllEffect(rems map[string]map[Element]UniqueSet
 	}
 }
 
-func (crdt *ORMapCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+func (crdt *ORMapCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {}
 
 //Protobuf functions
 
@@ -706,7 +705,7 @@ func (crdtState MapEntryState) FromReadResp(protobuf *proto.ApbReadObjectResp) (
 	return crdtState
 }
 
-func (crdtState MapEntryState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState MapEntryState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Map{Map: &proto.ApbGetMapResp{Entries: entriesToApbMapEntries(crdtState.Values)}}}
 }
 
@@ -715,7 +714,7 @@ func (crdtState MapHasKeyState) FromReadResp(protobuf *proto.ApbReadObjectResp) 
 	return crdtState
 }
 
-func (crdtState MapHasKeyState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState MapHasKeyState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Map{
 		Map: &proto.ApbMapPartialReadResp{Haskey: &proto.ApbMapHasKeyReadResp{Has: pb.Bool(crdtState.HasKey)}}}}}}
 }
@@ -725,7 +724,7 @@ func (crdtState MapKeysState) FromReadResp(protobuf *proto.ApbReadObjectResp) (s
 	return crdtState
 }
 
-func (crdtState MapKeysState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState MapKeysState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Map{
 		Map: &proto.ApbMapPartialReadResp{Getkeys: &proto.ApbMapGetKeysReadResp{Keys: crdtState.Keys}}}}}}
 }
@@ -735,7 +734,7 @@ func (crdtState MapGetValueState) FromReadResp(protobuf *proto.ApbReadObjectResp
 	return crdtState
 }
 
-func (crdtState MapGetValueState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState MapGetValueState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Map{Map: &proto.ApbMapPartialReadResp{
 		Getvalue: &proto.ApbMapGetValueResp{Value: &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Reg{Reg: &proto.ApbGetRegResp{Value: unsafe.Slice(unsafe.StringData(string(crdtState.Value)), len(crdtState.Value))}}}}}}}}}
 }
@@ -815,7 +814,7 @@ func (crdt *ORMapCrdt) ToProtoState() (protobuf *proto.ProtoState) {
 	return &proto.ProtoState{State: &proto.ProtoState_Ormap{Ormap: &proto.ProtoORMapState{Entries: createProtoMapRemoves(crdt.entries)}}}
 }
 
-func (crdt *ORMapCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
+func (crdt *ORMapCrdt) FromProtoState(proto *proto.ProtoState, ts clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	return (&ORMapCrdt{entries: createORMapDownRems(proto.GetOrmap().GetEntries())}).initializeFromSnapshot(ts, replicaID)
 }
 

@@ -105,7 +105,7 @@ func (eff SetValueConcurrentEffect) GetRemovedConcValues() tools.SliceWithCounte
 }
 
 // Note: crdt can (and most often will be) nil
-func (crdt *MVRegisterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *MVRegisterCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	return &MVRegisterCrdt{
 		CRDTVM: (&genericInversibleCRDT{}).initialize(crdt),
 		//value:          "",
@@ -118,7 +118,7 @@ func (crdt *MVRegisterCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uin
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *MVRegisterCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *MVRegisterCrdt) {
+func (crdt *MVRegisterCrdt) initializeFromSnapshot(startTs clocksi.Timestamp, replicaID uint16) (sameCRDT *MVRegisterCrdt) {
 	crdt.CRDTVM, crdt.localReplicaID = (&genericInversibleCRDT{}).initialize(crdt), replicaID
 	return crdt
 }
@@ -180,12 +180,12 @@ func (crdt *MVRegisterCrdt) getMaxClk() (maxClk clocksi.Timestamp) {
 }
 
 func (crdt *MVRegisterCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs DownstreamArguments) (otherDownstreamArgs DownstreamArguments) {
-	crdt.addToHistory(&updTs, &downstreamArgs, crdt.applyDownstream(downstreamArgs))
+	crdt.addToHistory(updTs, downstreamArgs, crdt.applyDownstream(downstreamArgs))
 	return nil
 }
 
 // TODO: Effects :((((
-/*func (crdt *MVRegisterCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect *Effect) {
+/*func (crdt *MVRegisterCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect Effect) {
 	var effectValue Effect
 	if downUpd, ok := downstreamArgs.(DownstreamMVSetValue); ok {
 		crdt.removeLowerClks(downUpd.Clk)   //Removes any clks that may be < than downUpd.Clk. Nothing happens if concValues is empty.
@@ -206,29 +206,28 @@ func (crdt *MVRegisterCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs D
 	return &effectValue
 }*/
 
-func (crdt *MVRegisterCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect *Effect) {
-	var effectValue Effect
+func (crdt *MVRegisterCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect Effect) {
 	if downUpd, ok := downstreamArgs.(DownstreamMVSetValue); ok {
 		removedClks := crdt.removeLowerClks(downUpd.Clk) //Removes any clks that may be < than downUpd.Clk. Nothing happens if concValues is empty.
 		if downUpd.Clk.IsHigher(crdt.clkValuePair.Clk) { //We definitely want this new value to be crdt.value. Afterwards, check if it is >= concurrent ones.
-			effectValue = SetValueHigherEffect{OldPair: crdt.clkValuePair, OldReplicaID: crdt.replicaID, RemovedConc: removedClks}
+			effect = SetValueHigherEffect{OldPair: crdt.clkValuePair, OldReplicaID: crdt.replicaID, RemovedConc: removedClks}
 			crdt.clkValuePair.Value, crdt.clkValuePair.Clk, crdt.replicaID = downUpd.NewValue, downUpd.Clk, downUpd.ReplicaID
 		} else { //Concurrent to this one. Need to check if it should be crdt.value, and then if it is >= than any concValues.
 			if downUpd.ReplicaID < crdt.replicaID {
-				effectValue = SetValueConcurrentHigherEffect{OldPair: crdt.clkValuePair, OldReplicaID: crdt.replicaID, RemovedConc: removedClks}
+				effect = SetValueConcurrentHigherEffect{OldPair: crdt.clkValuePair, OldReplicaID: crdt.replicaID, RemovedConc: removedClks}
 				crdt.concValues.AddToEnd(crdt.clkValuePair)
 				crdt.clkValuePair, crdt.replicaID = PairValueClk{Value: downUpd.NewValue, Clk: downUpd.Clk}, downUpd.ReplicaID
 			} else {
-				effectValue = SetValueConcurrentEffect{NewPair: PairValueClk{Value: downUpd.NewValue, Clk: downUpd.Clk}, RemovedConc: removedClks}
+				effect = SetValueConcurrentEffect{NewPair: PairValueClk{Value: downUpd.NewValue, Clk: downUpd.Clk}, RemovedConc: removedClks}
 				crdt.concValues.AddToEnd(PairValueClk{Value: downUpd.NewValue, Clk: downUpd.Clk})
 			}
 		}
-		return &effectValue
+		return
 	} else {
 		fmt.Printf("[MVRegister][Downstream]Unsupported downstream type: %v (%T)\n", downstreamArgs, downstreamArgs)
-		effectValue = NoEffect{}
+		effect = NoEffect{}
 	}
-	return &effectValue
+	return
 }
 
 // Iterates through concValues, removing any clk that is < refClk. Returns the removed clks for effects purposes.
@@ -283,12 +282,12 @@ func (crdt *MVRegisterCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
-func (crdt *MVRegisterCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *MVRegisterCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	return crdt.applyDownstream(updArgs)
 }
 
-func (crdt *MVRegisterCrdt) undoEffect(effect *Effect) {
-	if mvEff, ok := (*effect).(MVRegisterEffect); ok {
+func (crdt *MVRegisterCrdt) undoEffect(effect Effect) {
+	if mvEff, ok := (effect).(MVRegisterEffect); ok {
 		crdt.reAddClks(mvEff.GetRemovedConcValues()) //Re-adds the clks that were removed from concValues.
 
 		switch typedEff := mvEff.(type) {
@@ -308,7 +307,7 @@ func (crdt *MVRegisterCrdt) reAddClks(removedClks tools.SliceWithCounter[PairVal
 	}
 }
 
-func (crdt *MVRegisterCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+func (crdt *MVRegisterCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {}
 
 //Protobuf functions
 
@@ -332,7 +331,7 @@ func (crdtState MVRegisterState) FromReadResp(protobuf *proto.ApbReadObjectResp)
 	return crdtState
 }
 
-func (crdtState MVRegisterState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState MVRegisterState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	byteValues := make([][]byte, len(crdtState.Values))
 	for i, value := range crdtState.Values {
 		//byteValues[i] = []byte(value.(string))
@@ -347,7 +346,7 @@ func (crdtState MVRegisterSingleState) FromReadResp(protobuf *proto.ApbReadObjec
 	return crdtState
 }
 
-func (crdtState MVRegisterSingleState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState MVRegisterSingleState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Mvreg{Mvreg: &proto.ApbMVRegPartialReadResp{
 		Single: &proto.ApbMVRegSingleResp{Value: []byte((crdtState.Value).(string))}}}}}}
 }
@@ -382,7 +381,7 @@ func (crdt *MVRegisterCrdt) ToProtoState() (protobuf *proto.ProtoState) {
 	return &proto.ProtoState{State: &proto.ProtoState_Mvreg{Mvreg: mvState}}
 }
 
-func (crdt *MVRegisterCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
+func (crdt *MVRegisterCrdt) FromProtoState(proto *proto.ProtoState, ts clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	mvProto := proto.GetMvreg()
 	crdt.clkValuePair = PairValueClk{Value: string(mvProto.GetValue()), Clk: clocksi.SliceTimestamp{}.FromBytes(mvProto.GetClk())}
 	crdt.replicaID = uint16(mvProto.GetReplicaID())

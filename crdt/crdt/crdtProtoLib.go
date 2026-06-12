@@ -5,6 +5,8 @@ import (
 	"potionDB/crdt/clocksi"
 	"potionDB/crdt/proto"
 	"unsafe"
+
+	"github.com/AndreRijo/go-tools/src/tools"
 )
 
 //This file contains the conversion to and from protobufs of ops, read args and states
@@ -12,7 +14,7 @@ import (
 //The update operations have to implement ProtoUpd
 //Downstream operations have to implement ProtoDownUpd, for replication purposes only.
 //Read operations (including StateReadArguments) have to implement ProtoRead.
-//States have to implement ProtoState
+//States have to implement ProtoState. BufToReturn argument can safely be ignored for new CRDT implementations - it is only needed for CRDTs that leverage on sync.Pool.
 //Conversion of protobuf -> op/state/arg is done by "Global functions" (e.g., UpdateProtoToAntidoteUpdate)
 
 /*
@@ -29,6 +31,105 @@ INDEX:
 //NOTE: Maybe think of some way to avoid requiring the generic methods?
 //Maybe some kind of array or map built at runtime?
 
+const (
+	BUF_TO_RETURN_CAP = 10 //Usually only big buffers are recycled, so it is not expected that many will be present in a single protobuf.
+)
+
+// Contains a list of read buffers that should be returned to the respective pools when they are no longer needed.
+// Ideally, to further help memory re-usage, this struct should be stored per client and re-used within the client.
+type BufsToReturnToPool struct {
+	Bufs tools.SliceWithCounter[BufToReturn]
+}
+
+type BufToReturn struct {
+	proto.CRDTType
+	Buf any
+}
+
+func NewBufsToReturn() *BufsToReturnToPool {
+	return &BufsToReturnToPool{Bufs: tools.NewSliceWithCounter[BufToReturn](BUF_TO_RETURN_CAP)}
+}
+
+func (bufs *BufsToReturnToPool) AddBufToReturn(crdtType proto.CRDTType, buf any) {
+	bufs.Bufs.Append(BufToReturn{CRDTType: crdtType, Buf: buf})
+}
+
+// Don't free the buffers, but remove them from the list.
+func (bufs *BufsToReturnToPool) Reset() {
+	bufs.Bufs.Clear()
+}
+
+func (bufs *BufsToReturnToPool) ReturnBufs() {
+	if !bufs.Bufs.IsEmpty() {
+		slice := bufs.Bufs.ToSlice()
+		var curr BufToReturn
+		for i := 0; i < len(slice); i++ {
+			curr = slice[i]
+			switch curr.CRDTType {
+			case proto.CRDTType_MAP_COUNTER:
+				/*switch currBuf := curr.Buf.(type) {
+				case [][]byte:
+					bytesSlicePool.Put(currBuf)
+				case []KeyCounterPair[int32]:
+					counterMapPoolInt32.Put(currBuf)
+				case []KeyCounterPair[int64]:
+					counterMapPoolInt64.Put(currBuf)
+				case []KeyCounterPair[int16]:
+					counterMapPoolInt16.Put(currBuf)
+				case []KeyCounterPair[int8]:
+					counterMapPoolInt8.Put(currBuf)
+				case []KeyCounterPair[int]:
+					counterMapPoolInt.Put(currBuf)
+				case []KeyCounterPair[float64]:
+					counterMapPoolFloat64.Put(currBuf)
+				case []KeyCounterPair[float32]:
+					counterMapPoolFloat32.Put(currBuf)
+				default:
+					fmt.Printf("[CRDTProtoLib][WARNING]Unknown buf type for MAP_COUNTER: %T\n", currBuf)
+				}*/
+				typedBuf := curr.Buf.(CounterMapStateBufs)
+				int32SlicePool.Put(typedBuf.KeysBuf)
+				if len(typedBuf.IntValues) > 0 {
+					int64SlicePool.Put(typedBuf.IntValues)
+				} else if len(typedBuf.FloatValues) > 0 { //Either IntValues or FloatValues is set.
+					float64SlicePool.Put(typedBuf.FloatValues)
+				}
+				if len(typedBuf.DataBuf) > 0 {
+					bytesSlicePool.Put(typedBuf.DataBuf)
+				}
+				switch typedBuf.DataType {
+				case proto.DATAType_INT64:
+					counterMapPoolInt64.Put(typedBuf.PairsBuf.([]KeyCounterPair[int64]))
+				case proto.DATAType_INT32:
+					counterMapPoolInt32.Put(typedBuf.PairsBuf.([]KeyCounterPair[int32]))
+				case proto.DATAType_INT16:
+					counterMapPoolInt16.Put(typedBuf.PairsBuf.([]KeyCounterPair[int16]))
+				case proto.DATAType_INT8:
+					counterMapPoolInt8.Put(typedBuf.PairsBuf.([]KeyCounterPair[int8]))
+				case proto.DATAType_INT:
+					counterMapPoolInt.Put(typedBuf.PairsBuf.([]KeyCounterPair[int]))
+				case proto.DATAType_FLOAT64:
+					counterMapPoolFloat64.Put(typedBuf.PairsBuf.([]KeyCounterPair[float64]))
+				case proto.DATAType_FLOAT32:
+					counterMapPoolFloat32.Put(typedBuf.PairsBuf.([]KeyCounterPair[float32]))
+				}
+			case proto.CRDTType_ARRAY_COUNTER:
+				int64SlicePool.Put(curr.Buf.([]int64))
+			case proto.CRDTType_TOPK_RMV, proto.CRDTType_TOPSUM, proto.CRDTType_TOPK, proto.CRDTType_TOPK_RMV_EXT:
+				topKBuf := curr.Buf.(TopStateBufs)
+				int32SlicePool.Put(topKBuf.Ids)
+				int32SlicePool.Put(topKBuf.Scores)
+				if topKBuf.DataBuf != nil {
+					bytesSlicePool.Put(topKBuf.DataBuf)
+				}
+			default:
+				fmt.Printf("[CRDTProtoLib][WARNING]Unknown CRDT type for buf to return: %v\n", curr.CRDTType)
+			}
+		}
+		bufs.Bufs.Clear()
+	}
+}
+
 // *****INTERFACES*****/
 type ProtoUpd interface {
 	ToUpdateObject() (protobuf *proto.ApbUpdateOperation)
@@ -43,7 +144,8 @@ type ProtoRead interface {
 }
 
 type ProtoState interface {
-	ToReadResp() (protobuf *proto.ApbReadObjectResp)
+	//Converts state to its protobuf representation. If any of the state buffers is intended for re-use, it should be added to buf. Otherwise, buf can be ignored or even received as nil.
+	ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp)
 
 	FromReadResp(proto *proto.ApbReadObjectResp) (state State)
 }
@@ -57,7 +159,7 @@ type ProtoDownUpd interface {
 type ProtoCRDT interface {
 	ToProtoState() (protobuf *proto.ProtoState)
 
-	FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT)
+	FromProtoState(proto *proto.ProtoState, ts clocksi.Timestamp, replicaID uint16) (newCRDT CRDT)
 }
 
 /*****GLOBAL FUNCS*****/
@@ -543,7 +645,7 @@ func DownstreamProtoToAntidoteDownstream(protobuf *proto.ProtoOpDownstream, crdt
 	return
 }
 
-func StateProtoToCrdt(protobuf *proto.ProtoState, crdtType proto.CRDTType, ts *clocksi.Timestamp, replicaID uint16) (crdt CRDT) {
+func StateProtoToCrdt(protobuf *proto.ProtoState, crdtType proto.CRDTType, ts clocksi.Timestamp, replicaID uint16) (crdt CRDT) {
 	switch crdtType {
 	case proto.CRDTType_COUNTER:
 		crdt = (&CounterCrdt{}).FromProtoState(protobuf, ts, replicaID)
@@ -658,16 +760,33 @@ func updateTopkRmvProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation) (op 
 			return TopKRmvExtTopInit{}.FromUpdateObject(protobuf)
 		}
 	}
-	if adds := protobuf.GetTopkrmvop().GetAdds(); len(adds) > 0 {
+	/*if adds := protobuf.GetTopkrmvop().GetAdds(); len(adds) > 0 {
 		if len(adds) == 1 {
+			return TopKAdd{}.FromUpdateObject(protobuf)
+		}
+		return TopKAddAll{}.FromUpdateObject(protobuf)
+	}*/
+	/*if addIDs := protobuf.GetTopkrmvop().GetAdds().PlayerIds; len(addIDs) > 0 {
+		if len(addIDs) == 1 {
 			return TopKAdd{}.FromUpdateObject(protobuf)
 		}
 		return TopKAddAll{}.FromUpdateObject(protobuf)
 	}
 	if len(protobuf.GetTopkrmvop().GetRems()) == 1 {
 		return TopKRemove{}.FromUpdateObject(protobuf)
+	}*/
+	nRems := len(protobuf.GetTopkrmvop().GetRems())
+	if nRems == 0 {
+		nAdds := len(protobuf.GetTopkrmvop().GetAdds().PlayerIds)
+		if nAdds > 1 {
+			return TopKAddAll{}.FromUpdateObject(protobuf)
+		}
+		return TopKAdd{}.FromUpdateObject(protobuf)
 	}
-	return TopKRemoveAll{}.FromUpdateObject(protobuf)
+	if nRems > 1 {
+		return TopKRemoveAll{}.FromUpdateObject(protobuf)
+	}
+	return TopKRemove{}.FromUpdateObject(protobuf)
 }
 
 func updateTopsProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
@@ -675,9 +794,11 @@ func updateTopsProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation) (op Upd
 		return TopSInit(0).FromUpdateObject(protobuf)
 	}
 	topKProto := protobuf.GetTopkrmvop()
-	adds := topKProto.GetAdds()
+	//adds := topKProto.GetAdds()
+	adds := topKProto.GetAdds().Scores
 	if len(adds) == 1 {
-		if adds[0].GetScore() >= 0 {
+		//if adds[0].GetScore() >= 0 {
+		if adds[0] >= 0 { //Score.
 			return TopSAdd{}.FromUpdateObject(protobuf)
 		}
 		return TopSSub{}.FromUpdateObject(protobuf)
@@ -699,7 +820,7 @@ func updateTopkProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation) (op Upd
 	if protobuf.GetTopkinitop() != nil {
 		return TopKInit(0).FromUpdateObject(protobuf)
 	}
-	adds := protobuf.GetTopkrmvop().GetAdds()
+	adds := protobuf.GetTopkrmvop().GetAdds().PlayerIds
 	if len(adds) == 1 {
 		return TopKAdd{}.FromUpdateObject(protobuf)
 	}
@@ -756,8 +877,33 @@ func updatePairCounterProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation) 
 
 func updateArrayCounterProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
 	arrayCounter := protobuf.GetArraycounterop()
+	updType := arrayCounter.GetUpdType()
+	switch updType {
+	case proto.NumberArrayUpdType_INC:
+		if arrayCounter.Inc.GetInc() >= 0 {
+			return CounterArrayIncrement{}.FromUpdateObject(protobuf)
+		}
+		return CounterArrayDecrement{}.FromUpdateObject(protobuf)
+	case proto.NumberArrayUpdType_INC_ALL:
+		if arrayCounter.IncAll.GetInc() >= 0 {
+			return CounterArrayIncrementAll(0).FromUpdateObject(protobuf)
+		}
+		return CounterArrayDecrementAll(0).FromUpdateObject(protobuf)
+	case proto.NumberArrayUpdType_INC_MULTI:
+		if arrayCounter.IncMulti.GetIncs()[0] >= 0 {
+			return CounterArrayIncrementMulti(nil).FromUpdateObject(protobuf)
+		}
+		return CounterArrayDecrementMulti(nil).FromUpdateObject(protobuf)
+	case proto.NumberArrayUpdType_INC_SUB:
+		if arrayCounter.IncSub.GetIncs()[0] >= 0 {
+			return CounterArrayIncrementSub{}.FromUpdateObject(protobuf)
+		}
+		return CounterArrayDecrementSub{}.FromUpdateObject(protobuf)
+	case proto.NumberArrayUpdType_SIZE:
+		return CounterArraySetSize(0).FromUpdateObject(protobuf)
+	}
 	//fmt.Printf("[CRDTProtoLib]updateArrayCounterProtoToAntidoteUpdate. Protobuf: %+v\n", arrayCounter)
-	switch typedUpd := arrayCounter.Upd.(type) {
+	/*switch typedUpd := arrayCounter.Upd.(type) {
 	case *proto.ApbArrayCounterUpdate_Inc:
 		if typedUpd.Inc.GetInc() >= 0 {
 			return CounterArrayIncrement{}.FromUpdateObject(protobuf)
@@ -780,7 +926,7 @@ func updateArrayCounterProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation)
 		return CounterArrayDecrementSub{}.FromUpdateObject(protobuf)
 	case *proto.ApbArrayCounterUpdate_Size:
 		return CounterArraySetSize(0).FromUpdateObject(protobuf)
-	}
+	}*/
 	/*if inc := arrayCounter.GetInc(); inc != nil {
 		if inc.GetInc() >= 0 {
 			return CounterArrayIncrement{}.FromUpdateObject(protobuf)
@@ -809,7 +955,38 @@ func updateArrayCounterProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation)
 
 func updateArrayFloatProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
 	arrayFloat := protobuf.GetArrayfloatop()
-	switch typedUpd := arrayFloat.Upd.(type) {
+	updType := arrayFloat.GetUpdType()
+	switch updType {
+	case proto.NumberArrayUpdType_INC:
+		if arrayFloat.Inc.GetInc() >= 0 {
+			return FloatArrayIncrement{}.FromUpdateObject(protobuf)
+		}
+		return FloatArrayDecrement{}.FromUpdateObject(protobuf)
+	case proto.NumberArrayUpdType_INC_ALL:
+		if arrayFloat.IncAll.GetInc() >= 0 {
+			return FloatArrayIncrementAll(0).FromUpdateObject(protobuf)
+		}
+		return FloatArrayDecrementAll(0).FromUpdateObject(protobuf)
+	case proto.NumberArrayUpdType_INC_MULTI:
+		if arrayFloat.IncMulti.GetIncs()[0] >= 0 {
+			return FloatArrayIncrementMulti(nil).FromUpdateObject(protobuf)
+		}
+		return FloatArrayDecrementMulti(nil).FromUpdateObject(protobuf)
+	case proto.NumberArrayUpdType_INC_SUB:
+		if arrayFloat.IncSub.GetIncs()[0] >= 0 {
+			return FloatArrayIncrementSub{}.FromUpdateObject(protobuf)
+		}
+		return FloatArrayDecrementSub{}.FromUpdateObject(protobuf)
+	case proto.NumberArrayUpdType_INC_RANGE:
+		if arrayFloat.IncRange.GetInc() >= 0 {
+			return FloatArrayIncrementRange{}.FromUpdateObject(protobuf)
+		}
+		return FloatArrayDecrementRange{}.FromUpdateObject(protobuf)
+	case proto.NumberArrayUpdType_SIZE:
+		return FloatArraySetSize(0).FromUpdateObject(protobuf)
+	}
+	return nil
+	/*switch typedUpd := arrayFloat.Upd.(type) {
 	case *proto.ApbArrayFloatUpdate_Inc:
 		if typedUpd.Inc.GetInc() >= 0 {
 			return FloatArrayIncrement{}.FromUpdateObject(protobuf)
@@ -838,7 +1015,7 @@ func updateArrayFloatProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation) (
 	case *proto.ApbArrayFloatUpdate_Size:
 		return FloatArraySetSize(0).FromUpdateObject(protobuf)
 	}
-	return nil
+	return nil*/
 	/*if inc := arrayFloat.GetInc(); inc != nil {
 		if inc.GetInc() >= 0 {
 			return FloatArrayIncrement{}.FromUpdateObject(protobuf)
@@ -865,21 +1042,32 @@ func updateArrayFloatProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation) (
 
 func updateMultiArrayProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation) (op UpdateArguments) {
 	multiArray := protobuf.GetMultiarrayop()
-	arrayType := multiArray.GetType()
+	arrayType, updType := multiArray.GetType(), multiArray.GetUpdType()
 	//fmt.Printf("[CRDTProtoLib]Multi array update proto to antidote. Start. ArrayType: %+v.\n", arrayType)
 	switch arrayType {
 	case proto.MultiArrayType_MA_INT:
-		counterUpd := multiArray.GetIntUpd() //Inc, Multi, Sub
-		switch counterUpd.Upd.(type) {
-		case *proto.ApbMultiArrayIntUpdate_IncSingle:
+		switch updType {
+		case proto.NumberArrayUpdType_INC:
 			return MultiArrayIncIntSingle{}.FromUpdateObject(protobuf)
-		case *proto.ApbMultiArrayIntUpdate_Inc:
+		case proto.NumberArrayUpdType_INC_MULTI:
 			return MultiArrayIncInt(nil).FromUpdateObject(protobuf)
-		case *proto.ApbMultiArrayIntUpdate_IncPos:
+		case proto.NumberArrayUpdType_INC_POS:
 			return MultiArrayIncIntPositions{}.FromUpdateObject(protobuf)
-		case *proto.ApbMultiArrayIntUpdate_IncRange:
+		case proto.NumberArrayUpdType_INC_RANGE:
 			return MultiArrayIncIntRange{}.FromUpdateObject(protobuf)
 		}
+		/*
+			counterUpd := multiArray.GetIntUpd() //Inc, Multi, Sub
+			switch counterUpd.Upd.(type) {
+			case *proto.ApbMultiArrayIntUpdate_IncSingle:
+				return MultiArrayIncIntSingle{}.FromUpdateObject(protobuf)
+			case *proto.ApbMultiArrayIntUpdate_Inc:
+				return MultiArrayIncInt(nil).FromUpdateObject(protobuf)
+			case *proto.ApbMultiArrayIntUpdate_IncPos:
+				return MultiArrayIncIntPositions{}.FromUpdateObject(protobuf)
+			case *proto.ApbMultiArrayIntUpdate_IncRange:
+				return MultiArrayIncIntRange{}.FromUpdateObject(protobuf)
+			}*/
 		/*if inc := counterUpd.GetIncSingle(); inc != nil {
 			return MultiArrayIncIntSingle{}.FromUpdateObject(protobuf)
 		}
@@ -893,7 +1081,17 @@ func updateMultiArrayProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation) (
 			return MultiArrayIncIntRange{}.FromUpdateObject(protobuf)
 		}*/
 	case proto.MultiArrayType_MA_FLOAT:
-		floatUpd := multiArray.GetFloatUpd()
+		switch updType {
+		case proto.NumberArrayUpdType_INC:
+			return MultiArrayIncFloatSingle{}.FromUpdateObject(protobuf)
+		case proto.NumberArrayUpdType_INC_MULTI:
+			return MultiArrayIncFloat(nil).FromUpdateObject(protobuf)
+		case proto.NumberArrayUpdType_INC_POS:
+			return MultiArrayIncFloatPositions{}.FromUpdateObject(protobuf)
+		case proto.NumberArrayUpdType_INC_RANGE:
+			return MultiArrayIncFloatRange{}.FromUpdateObject(protobuf)
+		}
+		/*floatUpd := multiArray.GetFloatUpd()
 		switch floatUpd.Upd.(type) {
 		case *proto.ApbMultiArrayFloatUpdate_IncSingle:
 			return MultiArrayIncFloatSingle{}.FromUpdateObject(protobuf)
@@ -903,7 +1101,7 @@ func updateMultiArrayProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation) (
 			return MultiArrayIncFloatPositions{}.FromUpdateObject(protobuf)
 		case *proto.ApbMultiArrayFloatUpdate_IncRange:
 			return MultiArrayIncFloatRange{}.FromUpdateObject(protobuf)
-		}
+		}*/
 		/*if inc := floatUpd.GetIncSingle(); inc != nil {
 			return MultiArrayIncFloatSingle{}.FromUpdateObject(protobuf)
 		}
@@ -917,7 +1115,17 @@ func updateMultiArrayProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation) (
 			return MultiArrayIncFloatRange{}.FromUpdateObject(protobuf)
 		}*/
 	case proto.MultiArrayType_MA_DATA:
-		dataUpd := multiArray.GetDataUpd()
+		switch updType {
+		case proto.NumberArrayUpdType_INC:
+			return MultiArraySetRegisterSingle{}.FromUpdateObject(protobuf)
+		case proto.NumberArrayUpdType_INC_MULTI:
+			return MultiArraySetRegister(nil).FromUpdateObject(protobuf)
+		case proto.NumberArrayUpdType_INC_POS:
+			return MultiArraySetRegisterPositions{}.FromUpdateObject(protobuf)
+		case proto.NumberArrayUpdType_INC_RANGE:
+			return MultiArraySetRegisterRange{}.FromUpdateObject(protobuf)
+		}
+		/*dataUpd := multiArray.GetDataUpd()
 		switch dataUpd.Upd.(type) {
 		case *proto.ApbMultiArrayDataUpdate_SetSingle:
 			return MultiArraySetRegisterSingle{}.FromUpdateObject(protobuf)
@@ -927,7 +1135,7 @@ func updateMultiArrayProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation) (
 			return MultiArraySetRegisterPositions{}.FromUpdateObject(protobuf)
 		case *proto.ApbMultiArrayDataUpdate_SetRange:
 			return MultiArraySetRegisterRange{}.FromUpdateObject(protobuf)
-		}
+		}*/
 		/*if inc := dataUpd.GetSetSingle(); inc != nil {
 			return MultiArraySetRegisterSingle{}.FromUpdateObject(protobuf)
 		}
@@ -941,7 +1149,17 @@ func updateMultiArrayProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation) (
 			return MultiArraySetRegisterRange{}.FromUpdateObject(protobuf)
 		}*/
 	case proto.MultiArrayType_MA_AVG:
-		avgUpd := multiArray.GetAvgUpd()
+		switch updType {
+		case proto.NumberArrayUpdType_INC:
+			return MultiArrayIncAvgSingle{}.FromUpdateObject(protobuf)
+		case proto.NumberArrayUpdType_INC_MULTI:
+			return MultiArrayIncAvg{}.FromUpdateObject(protobuf)
+		case proto.NumberArrayUpdType_INC_POS:
+			return MultiArrayIncAvgPositions{}.FromUpdateObject(protobuf)
+		case proto.NumberArrayUpdType_INC_RANGE:
+			return MultiArrayIncAvgRange{}.FromUpdateObject(protobuf)
+		}
+		/*avgUpd := multiArray.GetAvgUpd()
 		switch avgUpd.Upd.(type) {
 		case *proto.ApbMultiArrayAvgUpdate_IncSingle:
 			return MultiArrayIncAvgSingle{}.FromUpdateObject(protobuf)
@@ -951,7 +1169,7 @@ func updateMultiArrayProtoToAntidoteUpdate(protobuf *proto.ApbUpdateOperation) (
 			return MultiArrayIncAvgPositions{}.FromUpdateObject(protobuf)
 		case *proto.ApbMultiArrayAvgUpdate_IncRange:
 			return MultiArrayIncAvgRange{}.FromUpdateObject(protobuf)
-		}
+		}*/
 		/*if inc := avgUpd.GetIncSingle(); inc != nil {
 			return MultiArrayIncAvgSingle{}.FromUpdateObject(protobuf)
 		}
@@ -1520,7 +1738,7 @@ func partialGetValuesOpToAntidoteRead(protobuf *proto.ApbPartialReadArgs, crdtTy
 	}
 	return EmbMapPartialArguments{}.FromPartialRead(protobuf)
 	*/
-	if protobuf.GetMap().GetGetvalues().Args == nil {
+	if len(protobuf.GetMap().GetGetvalues().Args) == 0 {
 		//if protobuf.GetMap().Getvalues.Args == nil {
 		return GetValuesArguments{}.FromPartialRead(protobuf)
 	}
@@ -1727,14 +1945,16 @@ func downstreamProtoCounterFloatToAntidoteDownstream(protobuf *proto.ProtoOpDown
 }
 
 func downstreamProtoSetToAntidoteDownstream(protobuf *proto.ProtoOpDownstream) (downOp DownstreamArguments) {
-	if adds := protobuf.GetSetOp().GetAdds(); adds != nil {
+	//if adds := protobuf.GetSetOp().GetAdds(); adds != nil {
+	if len(protobuf.GetSetOp().GetAdds()) > 0 {
 		return DownstreamAddAll{}.FromReplicatorObj(protobuf)
 	}
 	return DownstreamRemoveAll{}.FromReplicatorObj(protobuf)
 }
 
 func downstreamProtoORMapToAntidoteDownstream(protobuf *proto.ProtoOpDownstream) (downOp DownstreamArguments) {
-	if adds := protobuf.GetOrmapOp().GetAdds(); adds != nil {
+	//if adds := protobuf.GetOrmapOp().GetAdds(); adds != nil {
+	if len(protobuf.GetOrmapOp().GetAdds()) > 0 {
 		return DownstreamORMapAddAll{}.FromReplicatorObj(protobuf)
 	}
 	return DownstreamORMapRemoveAll{}.FromReplicatorObj(protobuf)
@@ -1752,7 +1972,7 @@ func downstreamProtoRRMapToAntidoteDownstream(protobuf *proto.ProtoOpDownstream)
 			return DownstreamRWEmbMapUpdateAllArray{}.FromReplicatorObj(protobuf)
 		}
 		return RemoteDownstreamRWEmbMapFirstUpdate{}.FromReplicatorObj(protobuf)
-	} else if rems := rwOp.GetRems().GetKeys(); rems != nil {
+	} else if rems := rwOp.GetRems().GetKeys(); len(rems) > 0 {
 		if len(rems) > 1 {
 			return DownstreamRWEmbMapRemoveAll{}.FromReplicatorObj(protobuf)
 		}
@@ -1766,7 +1986,7 @@ func downstreamProtoTopKRmvToAntidoteDownstream(protobuf *proto.ProtoOpDownstrea
 		downOp = TopKRmvInit{}.FromReplicatorObj(protobuf)
 		return downOp
 	}
-	if adds := protobuf.GetTopkrmvOp().GetAdds(); adds != nil {
+	if adds := protobuf.GetTopkrmvOp().GetAdds(); len(adds) > 0 {
 		if len(adds) == 1 {
 			return DownstreamTopKAdd{}.FromReplicatorObj(protobuf)
 		} else {
@@ -1784,7 +2004,7 @@ func downstreamProtoTopKRmvExtToAntidoteDownstream(protobuf *proto.ProtoOpDownst
 		downOp = TopKRmvExtTopInit{}.FromReplicatorObj(protobuf)
 		return downOp
 	}
-	if adds := protobuf.GetTopkrmvOp().GetAdds(); adds != nil {
+	if adds := protobuf.GetTopkrmvOp().GetAdds(); len(adds) > 0 {
 		if len(adds) == 1 {
 			return DownstreamTopKRmvExtAdd{}.FromReplicatorObj(protobuf)
 		} else {
@@ -1842,7 +2062,8 @@ func downstreamProtoTopKToAntidoteDownstream(protobuf *proto.ProtoOpDownstream) 
 		downOp = TopKInit(0).FromReplicatorObj(protobuf)
 		return downOp
 	}
-	adds := protobuf.GetTopkOp().GetAdds()
+	//adds := protobuf.GetTopkOp().GetAdds()
+	adds := protobuf.GetTopkOp().PlayerIds
 	if len(adds) == 1 {
 		return DownstreamSimpleTopKAdd{}.FromReplicatorObj(protobuf)
 	}
@@ -2321,7 +2542,7 @@ func protoMapCounterInitToReplicatorObj(protobuf *proto.ProtoOpDownstream, dataT
 	return nil
 }
 
-func mapCounterToProtoState(protobuf *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (crdt CRDT) {
+func mapCounterToProtoState(protobuf *proto.ProtoState, ts clocksi.Timestamp, replicaID uint16) (crdt CRDT) {
 	mapState := protobuf.GetMapCounter()
 	dataType := mapState.GetDataType()
 	switch dataType {
@@ -2372,14 +2593,14 @@ func entriesToApbMapEntries(entries map[string]Element) (protos []*proto.ApbMapE
 	return
 }
 
-func crdtsToApbMapEntries(states map[string]State) (protos []*proto.ApbMapEntry) {
+func crdtsToApbMapEntries(states map[string]State, buf *BufsToReturnToPool) (protos []*proto.ApbMapEntry) {
 	protos = make([]*proto.ApbMapEntry, len(states))
 	i := 0
 	for key, state := range states {
 		crdtType := state.GetCRDTType()
 		protos[i] = &proto.ApbMapEntry{
 			Key:   &proto.ApbMapKey{Key: unsafe.Slice(unsafe.StringData(key), len(key)), Type: &crdtType},
-			Value: state.(ProtoState).ToReadResp(),
+			Value: state.(ProtoState).ToReadResp(buf),
 		}
 		i++
 	}

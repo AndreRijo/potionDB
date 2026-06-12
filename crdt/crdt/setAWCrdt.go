@@ -135,7 +135,7 @@ func (args GetNElementsArguments) HasInnerReads() bool         { return false }
 func (args GetNElementsArguments) HasVariables() bool          { return false }
 
 // Note: crdt can (and most often will be) nil
-func (crdt *SetAWCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
+func (crdt *SetAWCrdt) Initialize(startTs clocksi.Timestamp, replicaID uint16) (newCrdt CRDT) {
 	return &SetAWCrdt{
 		CRDTVM: (&genericInversibleCRDT{}).initialize(crdt),
 		elems:  make(map[Element]UniqueSet),
@@ -144,7 +144,7 @@ func (crdt *SetAWCrdt) Initialize(startTs *clocksi.Timestamp, replicaID uint16) 
 }
 
 // Used to initialize when building a CRDT from a remote snapshot
-func (crdt *SetAWCrdt) initializeFromSnapshot(startTs *clocksi.Timestamp, replicaID uint16) (sameCRDT *SetAWCrdt) {
+func (crdt *SetAWCrdt) initializeFromSnapshot(startTs clocksi.Timestamp, replicaID uint16) (sameCRDT *SetAWCrdt) {
 	crdt.CRDTVM, crdt.random = (&genericInversibleCRDT{}).initialize(crdt), rand.NewSource(time.Now().Unix())
 	return crdt
 }
@@ -166,7 +166,7 @@ func (crdt *SetAWCrdt) Read(args ReadArguments, updsNotYetApplied []UpdateArgume
 }
 
 func (crdt *SetAWCrdt) getNElements(updsNotYetApplied []UpdateArguments) (state State) {
-	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+	if len(updsNotYetApplied) == 0 {
 		return SetAWNElementsState{Count: len(crdt.elems)}
 	}
 	//TODO: Maybe could optimize this
@@ -174,7 +174,7 @@ func (crdt *SetAWCrdt) getNElements(updsNotYetApplied []UpdateArguments) (state 
 }
 
 func (crdt *SetAWCrdt) getState(updsNotYetApplied []UpdateArguments) (state State) {
-	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+	if len(updsNotYetApplied) == 0 {
 		//go doesn't have a set structure nor a way to get keys from map.
 		//Using an auxiliary array in the state with the elements isn't a good option either - remove would have to search for the element
 		//So, unfortunatelly, we need to built it here.
@@ -238,7 +238,7 @@ func (crdt *SetAWCrdt) getState(updsNotYetApplied []UpdateArguments) (state Stat
 
 func (crdt *SetAWCrdt) lookup(elem Element, updsNotYetApplied []UpdateArguments) (state State) {
 	_, hasElem := crdt.elems[elem]
-	if updsNotYetApplied == nil || len(updsNotYetApplied) == 0 {
+	if len(updsNotYetApplied) == 0 {
 		return SetAWLookupState{HasElem: hasElem}
 	}
 
@@ -334,12 +334,12 @@ func (crdt *SetAWCrdt) Downstream(updTs clocksi.Timestamp, downstreamArgs Downst
 	}
 	effect := crdt.applyDownstream(downstreamArgs)
 	//Necessary for inversibleCrdt
-	crdt.addToHistory(&updTs, &downstreamArgs, effect)
+	crdt.addToHistory(updTs, downstreamArgs, effect)
 
 	return nil
 }
 
-func (crdt *SetAWCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect *Effect) {
+func (crdt *SetAWCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effect Effect) {
 	switch opType := downstreamArgs.(type) {
 	case DownstreamAddAll:
 		effect = crdt.applyAddAll(opType.Elems)
@@ -352,7 +352,7 @@ func (crdt *SetAWCrdt) applyDownstream(downstreamArgs DownstreamArguments) (effe
 	return
 }
 
-func (crdt *SetAWCrdt) applyAddAll(toAdd map[Element]Unique) (effect *Effect) {
+func (crdt *SetAWCrdt) applyAddAll(toAdd map[Element]Unique) (effect Effect) {
 	for key, newUnique := range toAdd {
 		//Checks if the key is already in the map. If it is, adds a unique
 		if existingUniques, ok := crdt.elems[key]; ok {
@@ -363,13 +363,12 @@ func (crdt *SetAWCrdt) applyAddAll(toAdd map[Element]Unique) (effect *Effect) {
 			crdt.elems[key] = newSet
 		}
 	}
-	var effectValue Effect = AddAllEffect{AddedMap: toAdd}
-	return &effectValue
+	return AddAllEffect{AddedMap: toAdd}
 }
 
-func (crdt *SetAWCrdt) applyRemoveAll(toRem map[Element]UniqueSet) (effect *Effect) {
-	removedMap := make(map[Element]UniqueSet)
-	var effectValue Effect = RemoveAllEffect{RemovedMap: removedMap}
+func (crdt *SetAWCrdt) applyRemoveAll(toRem map[Element]UniqueSet) (effect Effect) {
+	removedMap := make(map[Element]UniqueSet, len(toRem))
+	effect = RemoveAllEffect{RemovedMap: removedMap}
 
 	for key, uniquesToRem := range toRem {
 		//Checks if the key is already in the map. If it is, removes the uniques in the intersection
@@ -381,7 +380,7 @@ func (crdt *SetAWCrdt) applyRemoveAll(toRem map[Element]UniqueSet) (effect *Effe
 		}
 		//The element wasn't in the set already, so nothing to do
 	}
-	return &effectValue
+	return
 }
 
 func (crdt *SetAWCrdt) IsOperationWellTyped(args UpdateArguments) (ok bool, err error) {
@@ -407,12 +406,12 @@ func (crdt *SetAWCrdt) RebuildCRDTToVersion(targetTs clocksi.Timestamp) {
 	crdt.CRDTVM.rebuildCRDTToVersion(targetTs)
 }
 
-func (crdt *SetAWCrdt) reapplyOp(updArgs DownstreamArguments) (effect *Effect) {
+func (crdt *SetAWCrdt) reapplyOp(updArgs DownstreamArguments) (effect Effect) {
 	return crdt.applyDownstream(updArgs)
 }
 
-func (crdt *SetAWCrdt) undoEffect(effect *Effect) {
-	switch typedEffect := (*effect).(type) {
+func (crdt *SetAWCrdt) undoEffect(effect Effect) {
+	switch typedEffect := (effect).(type) {
 	case AddAllEffect:
 		crdt.undoAddAllEffect(&typedEffect)
 	case RemoveAllEffect:
@@ -443,7 +442,7 @@ func (crdt *SetAWCrdt) undoRemoveAllEffect(effect *RemoveAllEffect) {
 	}
 }
 
-func (crdt *SetAWCrdt) notifyRebuiltComplete(currTs *clocksi.Timestamp) {}
+func (crdt *SetAWCrdt) notifyRebuiltComplete(currTs clocksi.Timestamp) {}
 
 //Protobuf functions
 
@@ -496,7 +495,7 @@ func (crdtState SetAWValueState) FromReadResp(protobuf *proto.ApbReadObjectResp)
 	return crdtState
 }
 
-func (crdtState SetAWValueState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState SetAWValueState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Set{Set: &proto.ApbGetSetResp{Value: ElementArrayToByteMatrix(crdtState.Elems)}}}
 }
 
@@ -505,7 +504,7 @@ func (crdtState SetAWLookupState) FromReadResp(protobuf *proto.ApbReadObjectResp
 	return crdtState
 }
 
-func (crdtState SetAWLookupState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState SetAWLookupState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Set{
 		Set: &proto.ApbSetPartialReadResp{Lookup: &proto.ApbSetLookupReadResp{Has: pb.Bool(crdtState.HasElem)}}}}}}
 }
@@ -515,7 +514,7 @@ func (crdtState SetAWNElementsState) FromReadResp(protobuf *proto.ApbReadObjectR
 	return crdtState
 }
 
-func (crdtState SetAWNElementsState) ToReadResp() (protobuf *proto.ApbReadObjectResp) {
+func (crdtState SetAWNElementsState) ToReadResp(buf *BufsToReturnToPool) (protobuf *proto.ApbReadObjectResp) {
 	return &proto.ApbReadObjectResp{Resp: &proto.ApbReadObjectResp_Partread{Partread: &proto.ApbPartialReadResp{Reply: &proto.ApbPartialReadResp_Set{
 		Set: &proto.ApbSetPartialReadResp{Nelems: &proto.ApbSetNElemsReadResp{Count: pb.Int32(int32(crdtState.Count))}}}}}}
 }
@@ -585,7 +584,7 @@ func (crdt *SetAWCrdt) ToProtoState() (protobuf *proto.ProtoState) {
 	return &proto.ProtoState{State: &proto.ProtoState_Awset{Awset: &proto.ProtoAWSetState{Elems: protoElems}}}
 }
 
-func (crdt *SetAWCrdt) FromProtoState(proto *proto.ProtoState, ts *clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
+func (crdt *SetAWCrdt) FromProtoState(proto *proto.ProtoState, ts clocksi.Timestamp, replicaID uint16) (newCRDT CRDT) {
 	protoElems := proto.GetAwset().GetElems()
 	elems := make(map[Element]UniqueSet, len(protoElems))
 	for _, protoElem := range protoElems {
