@@ -1873,12 +1873,9 @@ func (tm *TransactionManager) handleStaticTMUpdate(request TransactionManagerReq
 	//replyChan := make(chan clocksi.Timestamp, len(updsPerPartition))
 	//var currRequest MaterializerRequest
 	waitFor, args := 0, MaterializerRequest{MatRequestArgs: MatStaticUpdateArgs{TransactionId: newTxnId, ReplyChan: replyChan}}
-<<<<<<< Updated upstream
-=======
 	if len(replyChan) > 0 { //TODO: REMOVE
 		panic(fmt.Sprintf("[TM][StaticUpdate]Reply channel has leftover replies from previous invocations. Reply chan len: %d.\n", len(replyChan)))
 	}
->>>>>>> Stashed changes
 	for i := 0; i < len(updsPerPartition); i++ {
 		if partBitSet.GetBit(i) {
 			//args.Updates = updsPerPartition[i].ToSlice()
@@ -1916,9 +1913,6 @@ func (tm *TransactionManager) handleStaticTMUpdate(request TransactionManagerReq
 	for i := 0; i < waitFor; i++ {
 		reply := <-replyChan
 		maxTimestamp.MergeInto(reply.Third)
-<<<<<<< Updated upstream
-		partInfo[reply.First] = tools.Pair[int32, clocksi.Timestamp]{First: reply.Second, Second: reply.Third}
-=======
 		if !maxTimestamp.IsHigherOrEqual(reply.Third) {
 			panic(fmt.Sprintf("[TM][StaticUpdate]Inconsistency in maxTimestamp calculation: merged clk is >= than the prepare clock. Merged: %s, prepare: %s, txnID: %d\n",
 				maxTimestamp.ToString(), reply.Third.ToString(), newTxnId))
@@ -1927,7 +1921,6 @@ func (tm *TransactionManager) handleStaticTMUpdate(request TransactionManagerReq
 	}
 	if len(replyChan) > 0 {
 		panic(fmt.Sprintf("[TM][StaticUpdate]Reply channel is not empty after receiving all replies: Len of chan left: %d. waitFor: %d.\n", len(replyChan), waitFor))
->>>>>>> Stashed changes
 	}
 
 	//Step "2.5" - notify TM's handleCommitReplies() of the number of partitions for this txn.
@@ -3213,11 +3206,7 @@ func (tm *TransactionManager) handleDownstreamGeneratedOps() {
 			}
 		}*/
 
-<<<<<<< Updated upstream
-		var maxTimestamp clocksi.Timestamp = clocksi.DummyTs
-=======
 		/*var maxTimestamp clocksi.Timestamp = clocksi.DummyTs
->>>>>>> Stashed changes
 		//Wait for reply of each partition
 		for i := 0; i < len(req.ops); i++ {
 			reply := <-replyChan
@@ -3225,8 +3214,6 @@ func (tm *TransactionManager) handleDownstreamGeneratedOps() {
 				maxTimestamp = reply.Third
 			}
 			partInfo[reply.First] = tools.Pair[int32, clocksi.Timestamp]{First: reply.Second, Second: reply.Third}
-<<<<<<< Updated upstream
-=======
 		}*/
 		maxTimestamp := clocksi.NewSliceTimestamp()
 		for i := 0; i < len(req.ops); i++ {
@@ -3237,7 +3224,6 @@ func (tm *TransactionManager) handleDownstreamGeneratedOps() {
 					maxTimestamp.ToString(), reply.Third.ToString(), newTxnId))
 			}
 			partInfo[reply.First] = tools.Pair[int32, clocksi.Timestamp]{First: reply.Second, Second: reply.Third}
->>>>>>> Stashed changes
 		}
 
 		//Notify TM's handleCommitReplies() of the number of partitions for this txn.

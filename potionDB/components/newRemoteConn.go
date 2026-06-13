@@ -912,13 +912,8 @@ func (remote *RemoteConn) handleReceivedStableClock(data []byte) {
 func (remote *RemoteConn) sendMerged() {
 	if !remote.onHold.IsEmpty() { //It may be empty after a clock is received without txns inbetween.
 		txn := remote.getMergedTxn()
-<<<<<<< Updated upstream
 		fmt.Printf("[RC%d]Sending merged txn to TM, with clk %s, ts of sender replica %d, from replicaID %d, at %s.\n",
 			remote.replicaID, txn.Clk.ToString(), txn.Clk.GetPos(clocksi.GetSortedPosOfId(txn.SenderID)), txn.SenderID, time.Now().Format("15:04:05.000"))
-=======
-		//fmt.Printf("[RC%d]Sending merged txn to TM, with clk %s, ts of sender replica %d, from replicaID %d, at %s.\n",
-		//	remote.replicaID, txn.Clk.ToString(), txn.Clk.GetPos(clocksi.GetSortedPosOfId(txn.SenderID)), txn.SenderID, time.Now().Format("15:04:05.000"))
->>>>>>> Stashed changes
 		remote.listenerChan <- txn
 		//remote.listenerChan <- remote.getMergedTxn()
 	}
