@@ -429,13 +429,23 @@ func (pc *prepClockSlice) PeekMin() TxnIdClkPair {
 
 func (pc *prepClockSlice) removeNotLazy(index int, element TxnIdClkPair) {
 	//In this remove, we may often have to search for the element, as other elements to the left may have already been removed.
+<<<<<<< Updated upstream
 	//origIndex := index
+=======
+	origIndex := index //TODO: Comment
+>>>>>>> Stashed changes
 	for pc.slice[index].txnId != element.txnId {
 		index--
 		/*if index == -1 {
 			panic(fmt.Sprintf("[PCS%d]Element with txnId %d, pos %d, not found for removal in prepClockSlice. FirstPos: %d. NextWritePos: %d. NRemoved: %d. Slice: %v. Log: %v.\n", pc.partID, element.txnId, origIndex, pc.firstPos, pc.nextWritePos, pc.nRemoved, pc.slice[:pc.nextWritePos], pc.prepLog.ToSlice()))
 		}*/
 	}
+<<<<<<< Updated upstream
+=======
+	if !pc.slice[index].clk.IsEqual(element.clk) {
+		panic(fmt.Sprintf("[PCS%d]Not lazy remove - Tried to remove txnId %d, but the clocks don't match! Removing pos %d (original pos: %d) which has txnId %d. Clk to remove: %s. Clk being removed: %s.\n", pc.partID, element.txnId, index, origIndex, pc.slice[index].txnId, element.clk.ToString(), pc.slice[index].clk.ToString()))
+	}
+>>>>>>> Stashed changes
 	//If the element is never found, it would crash in the for above with a negative index.
 	if index < pc.nextWritePos-1 {
 		copy(pc.slice[index:], pc.slice[index+1:pc.nextWritePos]) //Shift left
@@ -515,6 +525,13 @@ func (pc *prepClockSlice) Remove(index int, element TxnIdClkPair) {
 			panic(fmt.Sprintf("[PCS%d]Lazy remove: tried to remove txnId %d, but it wasn't found! Removing pos %d, which has txnId %d. Clk to remove: %s. Clk being removed: %s.\n", pc.partID, element.txnId, posRemoved, pc.slice[posRemoved].txnId, element.clk.ToString(), pc.slice[posRemoved].clk.ToString()))
 		}
 	}
+<<<<<<< Updated upstream
+=======
+	//TODO: Remove this check
+	if !pc.slice[posRemoved].clk.IsEqual(element.clk) {
+		panic(fmt.Sprintf("[PCS%d]Lazy remove: tried to remove txnId %d, but the clocks don't match! Removing pos %d, which has txnId %d. Clk to remove: %s. Clk being removed: %s.\n", pc.partID, element.txnId, posRemoved, pc.slice[posRemoved].txnId, element.clk.ToString(), pc.slice[posRemoved].clk.ToString()))
+	}
+>>>>>>> Stashed changes
 	if posRemoved == pc.nextWritePos-1 { //We removed the last element, we can just move the pointer back.
 		for ; pc.removed.GetBit(posRemoved); posRemoved-- { //Keep skipping until we find a non-empty position. Remove everything on the way that is empty.
 			pc.removed.Unset(posRemoved)
@@ -1308,6 +1325,13 @@ func (part *partition) handleMatStaticWrite(args MatStaticUpdateArgs) {
 	//args.ReplyChan <- part.prepClks.PeekMax().clk
 	//args.ReplyChan <- part.prepareClock(args.TransactionId)
 	clk := part.prepareClock(args.TransactionId)
+<<<<<<< Updated upstream
+=======
+	if !part.prepClks.slice[part.prepClks.GetLastPos()].clk.IsEqual(clk) {
+		panic(fmt.Sprintf("[MAT%d]Error/bug in prepClockSlice: clk returned by part.prepareClock doesn't match the clock in the last position of prepClks! TxnId: %d. PrepClk: %s. Last prepClk in prepClks: %s.\n",
+			part.id, args.TransactionId, clk.ToString(), part.prepClks.slice[part.prepClks.GetLastPos()].clk.ToString()))
+	}
+>>>>>>> Stashed changes
 	//part.prepClks.prepLog.Append(MatLogInfo{OpType: ADD_STATIC_WRITE, TxnId: args.TransactionId})
 	args.ReplyChan <- tools.Triple[int16, int32, clocksi.Timestamp]{First: part.partID, Second: int32(part.prepClks.GetLastPos()), Third: clk}
 	//}
@@ -1367,6 +1391,12 @@ func (part *partition) handleMatCommit(args MatCommitArgs) {
 		if part.partitionClock.stableClk.GetPos(part.replicaID) > args.CommitTimestamp.GetPos(part.replicaID) {
 			panic(fmt.Sprintf("[MAT%d][ERROR][handleMatCommit]Commit timestamp is lower than stable clock for our replicaID %d! CommitClk: %s. StableClk: %s. Args: %+v", part.id, part.replicaID, args.CommitTimestamp.ToString(), part.partitionClock.stableClk.ToString(), args))
 		}
+<<<<<<< Updated upstream
+=======
+		if args.CommitTimestamp.GetPos(part.replicaID) < args.PrepTimestamp.GetPos(part.replicaID) {
+			panic(fmt.Sprintf("[MAT%d][ERROR][handleMatCommit]Commit timestamp is lower than prepare timestamp for our replicaID %d! CommitClk: %s. PrepClk: %s. StableClk: %s. Args: %+v", part.id, part.replicaID, args.CommitTimestamp.ToString(), args.PrepTimestamp.ToString(), part.partitionClock.stableClk.ToString(), args))
+		}
+>>>>>>> Stashed changes
 		part.applyCommit(args)
 	} else {
 		//fmt.Printf("[MAT%d]Hold commit", part.id)
